@@ -222,4 +222,8 @@ local work, link a checkout at `_checkouts/eta`.
 - **The thesis beyond chapter 4.1.** Membership change is in the direction
   of revision B, quorums that vary by epoch, but is not that revision as
   written. Early completion of phase one (revision C) and quorum-based value
-  selection (chapter 6) are not implemented.
+  selection (chapter 6) are not implemented. Nor is chapter 7: peace's epochs
+  are pre-allocated to proposers, `{Round, ServerId}`, the first of the five
+  approaches in table 7.2. The others (an allocator, value mapping, recovery,
+  and the hybrids of §7.4 that generalise Fast Paxos) let any proposer decide
+  in one round trip without a leader; peace has a leader for that (§3.6).
