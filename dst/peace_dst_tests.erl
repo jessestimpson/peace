@@ -1,4 +1,5 @@
-%% The simulation suite. `rebar3 as dst eunit'.
+%% The simulation suite. `make dst', which is `rebar3 as dst eunit' on one
+%% scheduler thread; see the Makefile for why.
 -module(peace_dst_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -92,6 +93,28 @@ faults_grid_test_() ->
         exercised(peace_dst:stats())
     end}.
 
+%% Leadership under attack: forced elections, two-server splits and late
+%% `learned' messages, five servers. This is the workload that reaches the
+%% stale-leader hazard; see the planted bug below.
+churn_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{servers => 5, churn => true}) end),
+        #{
+            runs := Runs,
+            acknowledged := Acked,
+            leaderships := Leaderships,
+            forced_elections := Elections,
+            splits := Splits,
+            rumours := Rumours
+        } = Stats = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(Leaderships >= Runs * 3, Stats),
+        ?assert(Elections >= Runs * 5, Stats),
+        ?assert(Splits >= Runs * 3, Stats),
+        ?assert(Rumours >= Runs * 5, Stats)
+    end}.
+
 %% The suite can fail. Quorums that do not intersect lose agreement, and the
 %% failure shrinks to a trace that still reproduces it.
 unsafe_quorums_are_caught_test_() ->
@@ -113,6 +136,21 @@ amnesia_is_caught_test_() ->
             opts(Seed, #{mode => amnesia})
         end),
         ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
+    end}.
+
+%% A deposed leader that learns a slot went against it and leads on gets a
+%% follower to decide the value that lost. With the guard, the same seed is
+%% clean.
+stale_leader_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Config = #{servers => 5, churn => true},
+        Planted = Config#{mode => no_conflict_step_down},
+        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) -> opts(Seed, Planted) end),
+        ?assertMatch({violation, #{property := agreement}}, maps:get(outcome, Result)),
+        Shrunk = eta_shrink:shrink(peace_dst, maps:get(trace, Result), opts(Seed, Planted)),
+        ?assertMatch(#{verified := true}, Shrunk, eta_run:summary(Shrunk)),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
 %% ---------------------------------------------------------------------------

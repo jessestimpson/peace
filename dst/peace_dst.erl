@@ -52,7 +52,33 @@
 %%   server's own validation switched off. The same constants as
 %%   `formal/FPaxosUnsafeQuorums.cfg'.</li>
 %% <li>`amnesia' - a disk that comes back empty after a restart.</li>
+%% <li>`no_conflict_step_down' - a leader that learns a slot was decided
+%%   against its own proposal goes on leading. The same change as
+%%   `formal/FPaxosNoConflictStepDown.cfg'.</li>
 %% </ul>
+%%
+%% == Churn ==
+%%
+%% With `churn' on, the workload is aimed at leadership instead of at
+%% durability, with three more operations in place of crashes:
+%%
+%% <ul>
+%% <li>`{elect, I}' - a server is told its election timeout has fired when
+%%   it has not. Any server may suspect its leader at any time.</li>
+%% <li>`{split, I, J}' - two servers are cut off together from the rest, so
+%%   that a leader can keep a follower while a new leader rises without
+%%   either of them hearing of it.</li>
+%% <li>`{rumour, I}' - a server receives `learned' for the latest slots
+%%   anybody has decided, through any cut. It stands for an answer to a
+%%   catch-up request that was sent long ago and is only now arriving, and
+%%   it is the TLA+ `CatchUp' action, which the model allows anybody at any
+%%   time. The network policy alone almost never produces it: a leader
+%%   only asks to catch up while it is still a follower.</li>
+%% </ul>
+%%
+%% Together they reach the stale-leader hazard that `ConflictStepDown' in the
+%% model guards against, which random loss and delay did not reach in
+%% thousands of runs.
 -module(peace_dst).
 
 -behaviour(eta_harness).
@@ -109,6 +135,7 @@ init(_Seed, Config) ->
         ids => Ids,
         configs => Configs,
         faults => maps:get(faults, Config, true),
+        churn => maps:get(churn, Config, false),
         converge => maps:get(converge, Config, false),
         %% Every client process ever spawned, oldest first.
         ops => [],
@@ -125,11 +152,18 @@ processes(#{n := N, ops := Ops, sups := Sups}) ->
     [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)] ++
         [Pid || Pid <- Ops ++ Sups, is_process_alive(Pid)].
 
-generate(#{n := N, faults := Faults}, Rand0) ->
+generate(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
     {Roll, Rand1} = rand:uniform_s(Rand0),
     {I, Rand2} = rand:uniform_s(N, Rand1),
     Op =
         if
+            Churn, Roll < 0.45 -> {command, I};
+            Churn, Roll < 0.53 -> {query, I};
+            Churn, Roll < 0.68 -> {elect, I};
+            Churn, Roll < 0.76 -> {split, I, I rem N + 1};
+            Churn, Roll < 0.90 -> {rumour, I};
+            Churn, Roll < 0.94 -> {isolate, I};
+            Churn -> heal;
             not Faults, Roll < 0.80 -> {command, I};
             not Faults -> {query, I};
             %% Faults are kept rare. Too many and no command ever completes,
@@ -180,6 +214,34 @@ execute({crash, I}, S) ->
             ok = eta_net:kill_node(node_name(I)),
             bump(crashes),
             S
+    end;
+execute({elect, I}, S = #{ids := Ids}) ->
+    bump(forced_elections),
+    Id = lists:nth(I, Ids),
+    spawn_op(node_name(I), fun() -> peace:trigger_election(Id) end, S);
+execute({split, I, J}, S = #{n := N}) ->
+    Others = lists:seq(1, N) -- [I, J],
+    lists:foreach(
+        fun({A, B}) ->
+            ok = eta_net:cut(node_name(A), node_name(B)),
+            ok = eta_net:cut(node_name(B), node_name(A))
+        end,
+        [{A, B} || A <- [I, J], B <- Others]
+    ),
+    bump(splits),
+    S;
+execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
+    Decided = lists:sort([{Slot, Command} || [Slot, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
+    case lists:nthtail(max(0, length(Decided) - 4), Decided) of
+        [] ->
+            S;
+        Latest ->
+            bump(rumours),
+            To = lists:nth(I, Ids),
+            From = lists:nth(I rem N + 1, Ids),
+            %% Sent from the receiver's own node: it was in flight before
+            %% whatever cut there is now.
+            spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, From, {learned, Latest}) end, S)
     end;
 execute({restart, I}, S = #{configs := Configs}) ->
     case server_pid(I) of
@@ -419,6 +481,8 @@ server_config(I, Ids, Mode, Tab, Config) ->
             Base;
         unsafe_quorums ->
             Base#{quorum => {counting, 2, 1}, unsafe_no_quorum_check => true};
+        no_conflict_step_down ->
+            Base#{unsafe_no_conflict_step_down => true};
         amnesia ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}
     end.

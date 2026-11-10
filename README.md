@@ -90,15 +90,21 @@ and a network that drops and delays. The workload includes cutting servers
 off, killing them and restarting them from their disks. Seven invariants are
 checked after every step, among them agreement across the whole run, that
 memory never runs ahead of disk, and that a linearizable read contains every
-command acknowledged before it. Two planted bugs prove the suite can fail.
+command acknowledged before it. A second workload goes after leadership
+instead: forced elections, two-server splits and long-delayed `learned`
+messages. Three planted bugs prove the suite can fail: quorums that do not
+intersect, a disk that forgets, and the deposed leader of the model's third
+mutation, which only the second workload reaches.
 
 **Ordinary tests** ([test/](test/)). The protocol core as a pure function,
 including TLC's counterexample for the deposed leader replayed against the
-code; quorum arithmetic; and whole clusters on real processes.
+code; quorum arithmetic; whole clusters on real processes; and the dets
+backend against the contract the simulation assumes of a disk, through
+closes and kills.
 
 ```
 make test       # rebar3 eunit
-make dst        # rebar3 as dst eunit        (about two minutes)
+make dst        # rebar3 as dst eunit, on one scheduler thread (over a minute)
 make tlc        # formal/check_all.sh quick  (a few minutes)
 make tlc-long   # the configs with tens of millions of states
 ```

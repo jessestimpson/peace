@@ -154,7 +154,10 @@
     %% who is waiting on one.
     next = 1 :: peace:index(),
     acks = #{} :: #{peace:index() => [peace:server_id()]},
-    pending = #{} :: #{peace:index() => {tag(), from(), kind()}}
+    pending = #{} :: #{peace:index() => {tag(), from(), kind()}},
+    %% Whether a contradicted leader steps down. Only ever false in tests
+    %% that show what the guard is for.
+    conflict_step_down = true :: boolean()
 }).
 
 -opaque core() :: #core{}.
@@ -182,7 +185,8 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored) ->
         promised = Promised,
         seen = Promised,
         log = Log,
-        last = lists:max([0 | maps:keys(Log)])
+        last = lists:max([0 | maps:keys(Log)]),
+        conflict_step_down = not maps:get(unsafe_no_conflict_step_down, Config, false)
     },
     %% A follower has nobody waiting and performs no machine effects, so
     %% replaying the log produces none.
@@ -540,7 +544,7 @@ msg({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, ballot = Mine
     %% come to cover that slot while followers still take it to mean "the
     %% leader's proposal was chosen".
     Conflict =
-        Role =:= leader andalso
+        C0#core.conflict_step_down andalso Role =:= leader andalso
             lists:any(
                 fun({I, {decided, Command}}) ->
                     case Log0 of

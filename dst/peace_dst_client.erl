@@ -8,7 +8,7 @@
 
 -include("peace_eta.hrl").
 
--export([command/4, query/3, restart/1]).
+-export([command/4, query/3, restart/1, deliver/3]).
 
 -define(CALL_TIMEOUT_MS, 200).
 -define(RETRY_AFTER_MS, 60).
@@ -73,3 +73,9 @@ submit(Fun, Attempts) ->
         Other ->
             {unknown, Other}
     end.
+
+%% Hands a server a protocol message as if `From' had sent it.
+deliver(To, From, Msg) ->
+    ?ETA_LABEL(rumour),
+    _ = erlang:send(To, {peace_msg, From, Msg}, [noconnect]),
+    ok.

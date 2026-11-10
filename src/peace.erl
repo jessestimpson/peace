@@ -83,7 +83,10 @@
     quorum => peace_quorum:spec(),
     storage => peace_storage:storage(),
     election_timeout_ms => pos_integer(),
-    heartbeat_ms => pos_integer()
+    heartbeat_ms => pos_integer(),
+    %% For tests that plant a bug, to show a check can fail. Never set these.
+    unsafe_no_quorum_check => boolean(),
+    unsafe_no_conflict_step_down => boolean()
 }.
 
 -type command_ret() ::

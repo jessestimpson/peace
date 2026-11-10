@@ -10,8 +10,14 @@ test:
 	rebar3 eunit
 
 # Deterministic simulation with eta. See dst/peace_dst.erl.
+#
+# One scheduler thread: a simulated run executes one process at a time, so
+# more threads only fight over it. Measured on ten cores, one thread is a
+# little faster on an idle machine and uses a sixth of the CPU; on a busy
+# machine (TLC running, say) the default is over twenty times slower than it
+# is idle, and one thread about three times.
 dst:
-	rebar3 as dst eunit
+	ERL_FLAGS="+S 1" rebar3 as dst eunit
 
 # Model checking with TLC. See formal/README.md.
 tlc:
