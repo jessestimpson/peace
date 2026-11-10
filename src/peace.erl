@@ -7,7 +7,7 @@
 %% ```
 %% Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 %% {ok, _Started, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
-%% {ok, 5, Leader} = peace:process_value(Ids, {add, 5}),
+%% {ok, 5, Leader} = peace:propose(Ids, {add, 5}),
 %% {ok, 5, _} = peace:consistent_query(Leader, fun(Count) -> Count end).
 %% '''
 %%
@@ -37,9 +37,9 @@
     start_cluster/3,
     start_server/1,
     stop_server/1,
-    process_value/2,
-    process_value/3,
-    pipeline_value/2,
+    propose/2,
+    propose/3,
+    propose_async/2,
     consistent_query/2,
     consistent_query/3,
     local_query/2,
@@ -58,7 +58,7 @@
     index/0,
     role/0,
     server_config/0,
-    value_opts/0,
+    propose_opts/0,
     cluster_opts/0
 ]).
 
@@ -116,13 +116,13 @@
     unsafe_no_lease_fence => boolean()
 }.
 
-%% `session' makes the value safe to retry: see `process_value/3'.
--type value_opts() :: #{
+%% `session' makes the value safe to retry: see `propose/3'.
+-type propose_opts() :: #{
     timeout => timeout(),
     session => {ClientId :: term(), Seq :: non_neg_integer()}
 }.
 
--type value_ret() ::
+-type propose_ret() ::
     {ok, Reply :: term(), Leader :: server_id()}
     | {error, term()}
     | {timeout, server_id()}.
@@ -196,12 +196,18 @@ stop_server(Id = {_Name, Node}) ->
 %% Values and queries
 %% ---------------------------------------------------------------------------
 
-%% @equiv process_value(ServerOrServers, Value, 5000)
--spec process_value(server_id() | [server_id()], peace_machine:value()) -> value_ret().
-process_value(ServerOrServers, Value) ->
-    process_value(ServerOrServers, Value, ?DEFAULT_CALL_TIMEOUT_MS).
+%% @equiv propose(ServerOrServers, Value, 5000)
+-spec propose(server_id() | [server_id()], peace_machine:value()) -> propose_ret().
+propose(ServerOrServers, Value) ->
+    propose(ServerOrServers, Value, ?DEFAULT_CALL_TIMEOUT_MS).
 
-%% @doc Submits a value and waits for it to be applied.
+%% @doc Proposes a value and waits for it to be decided and applied.
+%%
+%% The thesis's proposer is handed a candidate value and returns the value
+%% decided (section 2.2). Here the value is handed to the leader, the
+%% distinguished proposer of Multi-Paxos (section 3.6), which assigns it an
+%% index and proposes it there, so what is decided at that index is this
+%% value or, if the leader is deposed first, perhaps another.
 %%
 %% Given one server, the value goes there and follows redirects to the
 %% leader. Given a list, each is tried in turn until one knows a leader.
@@ -225,9 +231,9 @@ process_value(ServerOrServers, Value) ->
 %% the client has since moved on from is answered
 %% `{error, {session_superseded, Seq}}' and not applied. Without a session,
 %% a retried value may be applied twice.
--spec process_value(server_id() | [server_id()], peace_machine:value(), timeout() | value_opts()) ->
-    value_ret().
-process_value(ServerOrServers, Value, Opts) when is_map(Opts) ->
+-spec propose(server_id() | [server_id()], peace_machine:value(), timeout() | propose_opts()) ->
+    propose_ret().
+propose(ServerOrServers, Value, Opts) when is_map(Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_CALL_TIMEOUT_MS),
     Request =
         case Opts of
@@ -239,14 +245,15 @@ process_value(ServerOrServers, Value, Opts) when is_map(Opts) ->
                 {value, Value}
         end,
     leader_call(servers(ServerOrServers), Request, Timeout, ?MAX_HOPS, no_leader);
-process_value(ServerOrServers, Value, Timeout) ->
+propose(ServerOrServers, Value, Timeout) ->
     leader_call(servers(ServerOrServers), {value, Value}, Timeout, ?MAX_HOPS, no_leader).
 
-%% @doc Submits a value without waiting. Nothing is sent back, and nothing
+%% @doc Proposes a value without waiting. Not a thesis term: the name is
+%% `propose/2' with the usual suffix. Nothing is sent back, and nothing
 %% says whether `Server' was the leader. For values whose effect is observed
 %% some other way.
--spec pipeline_value(server_id(), peace_machine:value()) -> ok.
-pipeline_value(Server, Value) ->
+-spec propose_async(server_id(), peace_machine:value()) -> ok.
+propose_async(Server, Value) ->
     gen_server:cast(Server, {value, Value}).
 
 %% @equiv consistent_query(ServerOrServers, Fun, 5000)
@@ -292,7 +299,7 @@ members(Server, Timeout) ->
     call(Server, members, Timeout).
 
 %% @equiv change_members(ServerOrServers, Members, Quorum, 5000)
--spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> value_ret().
+-spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> propose_ret().
 change_members(ServerOrServers, Members, Quorum) ->
     change_members(ServerOrServers, Members, Quorum, ?DEFAULT_CALL_TIMEOUT_MS).
 
@@ -317,7 +324,7 @@ change_members(ServerOrServers, Members, Quorum) ->
 %% configuration needs a phase-two quorum of its own members reachable, or
 %% nothing more is decided until they are.
 -spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec(), timeout()) ->
-    value_ret().
+    propose_ret().
 change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) ->
     leader_call(servers(ServerOrServers), {reconfigure, {Members, Quorum}}, Timeout, ?MAX_HOPS, no_leader).
 

@@ -32,14 +32,14 @@ values_and_queries(Ids0) ->
     ?_test(begin
         {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Ids),
-        {ok, ok, Leader} = peace:process_value(Ids, {put, a, 1}),
+        {ok, ok, Leader} = peace:propose(Ids, {put, a, 1}),
         %% Any member will do: the request follows the redirect.
         [Follower | _] = Ids -- [Leader],
-        {ok, 1, Leader} = peace:process_value(Follower, {get, a}),
+        {ok, 1, Leader} = peace:propose(Follower, {get, a}),
         {ok, #{a := 1}, Leader} = peace:consistent_query(Follower, fun(#{kv := KV}) -> KV end),
         {ok, Ids, Leader} = peace:members(Leader),
-        ok = peace:pipeline_value(Leader, {put, b, 2}),
-        {ok, 2, Leader} = peace:process_value(Leader, {get, b}),
+        ok = peace:propose_async(Leader, {put, b, 2}),
+        {ok, 2, Leader} = peace:propose(Leader, {get, b}),
         %% Followers converge on the same history.
         Histories = await(fun() ->
             Hs = [history(Id) || Id <- Ids],
@@ -58,19 +58,19 @@ leader_failover(Ids0) ->
     ?_test(begin
         {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Ids),
-        {ok, ok, Leader} = peace:process_value(Leader, {put, a, 1}),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
         ok = peace:stop_server(Leader),
         Rest = Ids -- [Leader],
         NewLeader = await_leader(Rest),
         ?assertNotEqual(Leader, NewLeader),
         %% What was acknowledged is still there.
-        {ok, 1, NewLeader} = peace:process_value(Rest, {get, a}),
+        {ok, 1, NewLeader} = peace:propose(Rest, {get, a}),
         %% One more down leaves no majority, and nothing is acknowledged.
         [Last] = Rest -- [NewLeader],
         ok = peace:stop_server(NewLeader),
         ?assertMatch(
             Result when element(1, Result) =/= ok,
-            peace:process_value(Last, {put, a, 2}, 500)
+            peace:propose(Last, {put, a, 2}, 500)
         )
     end).
 
@@ -82,8 +82,8 @@ flexible_quorum_survives_what_majority_cannot(Ids) ->
         Leader = await_leader(Ids),
         [F1, F2, F3, F4] = Ids -- [Leader],
         [ok = peace:stop_server(F) || F <- [F2, F3, F4]],
-        {ok, ok, Leader} = peace:process_value(Leader, {put, a, 1}),
-        {ok, 1, Leader} = peace:process_value(F1, {get, a}),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
+        {ok, 1, Leader} = peace:propose(F1, {get, a}),
         %% With the leader gone too, one member is nowhere near four promises.
         ok = peace:stop_server(Leader),
         timer:sleep(400),
@@ -102,12 +102,12 @@ durable_restart(Ids0) ->
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
             Leader = await_leader(Ids),
-            {ok, ok, Leader} = peace:process_value(Leader, {put, a, 1}),
+            {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
             %% The whole cluster goes down and comes back.
             [ok = peace:stop_server(Id) || Id <- Ids],
             [ok = peace:start_server(Config(Id)) || Id <- Ids],
             NewLeader = await_leader(Ids),
-            {ok, 1, NewLeader} = peace:process_value(NewLeader, {get, a}),
+            {ok, 1, NewLeader} = peace:propose(NewLeader, {get, a}),
             %% Epochs moved on from where they were, not from zero.
             #{promised := {Round, _}} = peace:overview(NewLeader),
             ?assert(Round >= 2)
@@ -130,7 +130,7 @@ sessions_snapshots_and_leases(Ids0) ->
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
             Leader = await_leader(Ids),
-            Put = fun(N) -> peace:process_value(Ids, {put, N, N}, #{session => {me, N}}) end,
+            Put = fun(N) -> peace:propose(Ids, {put, N, N}, #{session => {me, N}}) end,
             [{ok, ok, Leader} = Put(N) || N <- lists:seq(1, 7)],
             %% A retry of the last value changes nothing and is answered.
             {ok, ok, Leader} = Put(7),
@@ -157,7 +157,7 @@ sessions_snapshots_and_leases(Ids0) ->
             {ok, 7, NewLeader} = peace:consistent_query(Ids, fun(#{kv := KV}) -> map_size(KV) end),
             %% The session table came back too.
             {ok, ok, NewLeader} = Put(7),
-            {ok, 7, NewLeader} = peace:process_value(NewLeader, {get, 7})
+            {ok, 7, NewLeader} = peace:propose(NewLeader, {get, 7})
         end)}.
 
 %% One server out and one in, on real processes.
@@ -167,7 +167,7 @@ change_members(Ids0) ->
     ?_test(begin
         {ok, Old, []} = peace:start_cluster(Old, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Old),
-        {ok, ok, Leader} = peace:process_value(Old, {put, a, 1}),
+        {ok, ok, Leader} = peace:propose(Old, {put, a, 1}),
         %% The newcomer is told who the cluster is, and waits.
         ok = peace:start_server((fast())#{id => D, members => Old, machine => ?TEST_MACHINE}),
         [Gone | Stay] = [Leader | Old -- [Leader]],
@@ -178,7 +178,7 @@ change_members(Ids0) ->
         ?assert(lists:member(NewLeader, New)),
         {ok, New, NewLeader} = peace:members(NewLeader),
         ok = peace:stop_server(Gone),
-        {ok, 1, NewLeader} = peace:process_value(New, {get, a}),
+        {ok, 1, NewLeader} = peace:propose(New, {get, a}),
         %% The newcomer has the history from before it arrived.
         ok = await(fun() ->
             case history(D) of
@@ -196,7 +196,7 @@ machine_effects(Ids0) ->
         Leader = await_leader(Ids),
         %% state_enter runs on every server as its role changes.
         ok = receive_all([{state_enter, follower}, {state_enter, candidate}, {state_enter, leader}]),
-        {ok, ok, Leader} = peace:process_value(Leader, {tell, Self, hello}),
+        {ok, ok, Leader} = peace:propose(Leader, {tell, Self, hello}),
         ?assertEqual({told, hello}, receive_told()),
         %% Applied on three servers, performed by one.
         ?assertEqual(none, receive_told())

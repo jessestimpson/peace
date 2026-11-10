@@ -29,7 +29,7 @@ value(Tab, N, Servers, Op, Retry) ->
             session -> #{timeout => ?CALL_TIMEOUT_MS, session => {N, 1}};
             _ -> #{timeout => ?CALL_TIMEOUT_MS}
         end,
-    Result = submit(fun() -> peace:process_value(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
+    Result = submit(fun() -> peace:propose(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
     _ = ?ETA_LOG({client, N, Op, Result}),
     true = ets:insert(Tab, {{op, Op}, Result}),
     ok.

@@ -35,7 +35,7 @@ apply(_Meta, reset, Count) -> {0, Count}.
 Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 {ok, _Started, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
 
-{ok, 5, Leader} = peace:process_value(Ids, {add, 5}),
+{ok, 5, Leader} = peace:propose(Ids, {add, 5}),
 {ok, 5, _} = peace:consistent_query(Leader, fun(Count) -> Count end),
 {ok, 5, _} = peace:local_query(hd(Ids), fun(Count) -> Count end).   %% may be stale
 ```
@@ -110,7 +110,7 @@ at most once however often it is retried, and the retry gets the reply the
 first application got. One value in flight per client, `Seq` increasing.
 
 ```erlang
-{ok, Reply, _} = peace:process_value(Ids, Value, #{session => {my_id, 17}, timeout => 2000}).
+{ok, Reply, _} = peace:propose(Ids, Value, #{session => {my_id, 17}, timeout => 2000}).
 ```
 
 **Snapshots.** Every `snapshot_interval` applied indexes (default 4096) a
