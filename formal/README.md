@@ -106,9 +106,11 @@ able to reach for the properties above to mean anything, so each must fail.
 | `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 21.9 million |
 | `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | 116.9 million |
 
-The first three took about 25 minutes together on a busy machine,
-`FPaxosThreeEpochs` under five of them. `FPaxosMajorityTwoIndexes` took 1 hour
-16 minutes on its own: 1.27 billion states generated, depth 35. At that size
+Last run in full on 2026-11-10, after the models took the thesis's terms; the
+counts are the same as before the renaming, as they should be. The first
+three took 24 minutes together, `FPaxosThreeEpochs` and `FPaxosGrid` under
+five each. `FPaxosMajorityTwoIndexes` took 1 hour 20 minutes: 1.27 billion
+states generated, depth 35. At that size
 TLC's own estimate of the chance that a fingerprint collision hid a state is
 between 0.002 and 0.007, where for the others it is negligible.
 
@@ -128,9 +130,9 @@ Two epochs, two indexes, one value. The invariant is `LearnedAgree`.
 
 | Config | Expect | Result |
 |---|---|---|
-| `Reconfig` | holds | 44.3 million states, 22 minutes |
+| `Reconfig` | holds | 44.3 million states, 25 minutes |
 | `ReconfigNoJoint` | fails: straight to the new configuration | violated in seconds |
-| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after 13.5 million states, 5 minutes |
+| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after 13.9 million states, 6 minutes |
 | `ReconfigReachableFinal` | fails: a change completes | seconds |
 | `ReconfigReachableRaised` | fails: a promise raises the bar | seconds |
 
