@@ -206,6 +206,10 @@ make tlc        # formal/check_all.sh quick  (a few minutes)
 make tlc-long   # the configs with tens of millions of states
 ```
 
+The TLC targets skip any config whose model and config are as they were when
+it was last checked ([formal/checked.tsv](formal/checked.tsv)), so the long
+runs are paid for when the model changes and not otherwise.
+
 `make dst` needs eta. The `dst` profile names it as a git dependency; for
 local work, link a checkout at `_checkouts/eta`.
 

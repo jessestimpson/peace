@@ -1,4 +1,4 @@
-.PHONY: all compile test dst tlc tlc-long check
+.PHONY: all compile test dst tlc tlc-long tlc-soak check
 
 all: compile
 
@@ -19,11 +19,15 @@ test:
 dst:
 	ERL_FLAGS="+S 1" rebar3 as dst eunit
 
-# Model checking with TLC. See formal/README.md.
+# Model checking with TLC. See formal/README.md. A config whose model has not
+# changed since it was last checked is skipped; FORCE=1 runs it anyway.
 tlc:
 	formal/check_all.sh quick
 
 tlc-long:
 	formal/check_all.sh long
+
+tlc-soak:
+	formal/check_all.sh soak
 
 check: test dst tlc

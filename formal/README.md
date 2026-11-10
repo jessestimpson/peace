@@ -66,6 +66,17 @@ the thesis beyond revision A.
 `./check_all.sh quick` runs the first three groups; `./check_all.sh long` the
 last, and the membership model below. `./check.sh <Config> pass|fail` runs one. States are distinct states.
 
+**A config is run again only when its inputs change.** TLC's answer depends
+on the model and the config and on nothing in `src/`, so `check_all.sh`
+keeps a ledger, [`checked.tsv`](checked.tsv): for each config, a hash of the
+config, the two modules it instantiates, `check.sh` and the jar's name, with
+the date and size of the run that last behaved as expected. A config whose
+hash is in the ledger is reported and skipped. `FORCE=1` runs it anyway. The
+ledger is committed, so a clone knows what was checked without spending the
+hours again; it is a record, not a proof, and anyone who doubts it can force
+the run. The rows for the four long `FPaxos` configs were written from the
+run of 2026-11-10 described below, the files being unchanged since.
+
 **Hold** (quick):
 
 | Config | Acceptors | Quorums | Epochs × indexes | States |
@@ -137,6 +148,25 @@ Two epochs, two indexes, one value. The invariant is `LearnedAgree`.
 | `ReconfigReachableRaised` | fails: a promise raises the bar | seconds |
 
 `ReconfigNoJoint` is in the quick set and the rest in the long one.
+
+**Co-located roles.** In the model as first written a proposer is nobody in
+particular: any epoch may be prepared at any time, whatever its owner has
+promised. peace's servers are proposer and acceptor at once (§3.7), and a
+candidate promises its own epoch as it sends the prepare, and accepts its own
+proposals as it sends them. `CoLocated = TRUE` says that. It is a restriction
+to what peace can do, so it proves less about the protocol in general and the
+same about peace, and it is twenty times smaller:
+
+| Config | Expect | Result |
+|---|---|---|
+| `ReconfigCoLocated` | holds | 2.2 million states, about a minute |
+| `ReconfigCoLocatedNoJoint` | fails | seconds |
+| `ReconfigCoLocatedNoClosure` | fails | violated after 644 thousand states, seconds |
+| `ReconfigCoLocatedReachableFinal` | fails: a change completes | seconds |
+| `ReconfigCoLocatedReachableRaised` | fails: a promise raises the bar | seconds |
+| `ReconfigReachableAfterFinal` | fails: at three indexes, a value is decided after a completed change | seconds |
+
+All of these are in the quick set.
 
 The first version of this model failed, with both safeguards on, in nineteen
 steps: a deposed leader whose joint entry had lost took the index being

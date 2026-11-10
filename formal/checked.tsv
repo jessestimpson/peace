@@ -1,0 +1,25 @@
+FPaxosAllAboard	pass	1720a96285e89c70	2026-11-10	32147 distinct states, 02s
+FPaxosEvenNodes	pass	4574b7e85b9f9281	2026-11-10	365995 distinct states, 44s
+FPaxosGrid	pass	123713b45d2b4a22	2026-11-10	16.0 million distinct states, from the run recorded in README.md
+FPaxosMajority	pass	a842636940f6090a	2026-11-10	38095 distinct states, 03s
+FPaxosMajorityTwoIndexes	pass	5fdfc2b1cba618f1	2026-11-10	116.9 million distinct states, from the run recorded in README.md
+FPaxosNoConflictStepDown	fail	04297f456da3256f	2026-11-10	606791 distinct states, 01min 56s
+FPaxosNoFence	fail	9afce5b0293074bc	2026-11-10	6945 distinct states, 01s
+FPaxosNoSnapshotGuard	fail	8391b31848e7944b	2026-11-10	25570 distinct states, 02s
+FPaxosReachableAllLearned	fail	ea183e52805c5ba1	2026-11-10	1739 distinct states, 00s
+FPaxosReachableConflict	fail	905f6ad3644edde6	2026-11-10	25718 distinct states, 05s
+FPaxosReachableDecided	fail	03834e58c114ba96	2026-11-10	268 distinct states, 00s
+FPaxosReachableRecovery	fail	940ac7f4f575c869	2026-11-10	3876 distinct states, 01s
+FPaxosReachableSnapshot	fail	bcc0080f072e9a8f	2026-11-10	1681 distinct states, 00s
+FPaxosSingleton	pass	3cee6cab5ac33d32	2026-11-10	6315 distinct states, 01s
+FPaxosSingletonTwoIndexes	pass	5b2930eb3cdb190e	2026-11-10	21.9 million distinct states, from the run recorded in README.md
+FPaxosSnapshots	pass	3c5a343c5f1b94c9	2026-11-10	253533 distinct states, 11s
+FPaxosThreeEpochs	pass	1ccab2547901bfbb	2026-11-10	13.0 million distinct states, from the run recorded in README.md
+FPaxosUnsafeQuorums	fail	cea398d23634ddb8	2026-11-10	1608 distinct states, 00s
+ReconfigCoLocated	pass	aaa126d57de021a0	2026-11-10	2164083 distinct states, 03min 02s
+ReconfigCoLocatedNoClosure	fail	b135e28b2456b0cf	2026-11-10	648742 distinct states, 40s
+ReconfigCoLocatedNoJoint	fail	04bf97ed13cfb96a	2026-11-10	13239 distinct states, 02s
+ReconfigCoLocatedReachableFinal	fail	f6e16972698e247e	2026-11-10	16218 distinct states, 02s
+ReconfigCoLocatedReachableRaised	fail	b672987737b5b4d0	2026-11-10	156 distinct states, 00s
+ReconfigNoJoint	fail	1b15108b0971449b	2026-11-10	242814 distinct states, 10s
+ReconfigReachableAfterFinal	fail	a25e683d32bdbbb2	2026-11-10	178032 distinct states, 15s

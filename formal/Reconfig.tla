@@ -55,8 +55,17 @@ CONSTANTS
     None,
     UseJoint,       \* FALSE: a leader goes straight to `final`.  A mutation;
                     \* see ReconfigNoJoint.cfg.
-    UseClosure      \* FALSE: a candidate asks only the configuration it has
+    UseClosure,     \* FALSE: a candidate asks only the configuration it has
                     \* applied.  A mutation; see ReconfigNoClosure.cfg.
+    CoLocated       \* TRUE: a proposer is also an acceptor and acts as one at
+                    \* once (thesis section 3.7), as a peace server does: a
+                    \* candidate promises its own epoch when it starts it, a
+                    \* leader accepts its own proposal when it makes it, and
+                    \* a server that has promised a later epoch no longer
+                    \* proposes in an earlier one.  FALSE leaves all three to
+                    \* happen in any order or not at all, which is more than
+                    \* peace can do and costs states; see
+                    \* ReconfigThreeIndexes.cfg.
 
 VARIABLES
     promised,       \* promised[a]
@@ -113,8 +122,14 @@ Prepare(a, b) ==
     /\ owner[b] = None
     /\ owner' = [owner EXCEPT ![b] = a]
     /\ camp' = [camp EXCEPT ![b] = [from |-> FirstOpen(a), base |-> Applied(a, FirstOpen(a))]]
-    /\ Send([type |-> "prepare", epoch |-> b])
-    /\ UNCHANGED <<promised, accepted>>
+    /\ IF CoLocated
+          THEN /\ b > promised[a]
+               /\ promised' = [promised EXCEPT ![a] = b]
+               /\ msgs' = msgs \cup {[type |-> "prepare", epoch |-> b],
+                                      [type |-> "promise", epoch |-> b, acc |-> a, votes |-> accepted[a]]}
+          ELSE /\ Send([type |-> "prepare", epoch |-> b])
+               /\ UNCHANGED promised
+    /\ UNCHANGED accepted
 
 Promise(a, b) ==
     /\ [type |-> "prepare", epoch |-> b] \in msgs
@@ -205,8 +220,16 @@ Propose(b, s, v) ==
                        /\ vt.epoch # -1
                        /\ vt.epoch = Max({w.epoch : w \in votes})
                        /\ vt.val = v
-    /\ Send([type |-> "propose", epoch |-> b, index |-> s, val |-> v])
-    /\ UNCHANGED <<promised, accepted, owner, camp>>
+    /\ IF CoLocated
+          THEN /\ promised[owner[b]] = b
+               /\ msgs' = msgs \cup {[type |-> "propose", epoch |-> b, index |-> s, val |-> v],
+                                      [type |-> "accept", epoch |-> b, index |-> s, acc |-> owner[b]]}
+               /\ IF IsLearned(owner[b], s)
+                     THEN UNCHANGED accepted
+                     ELSE accepted' = [accepted EXCEPT ![owner[b]][s] = [epoch |-> b, val |-> v]]
+          ELSE /\ Send([type |-> "propose", epoch |-> b, index |-> s, val |-> v])
+               /\ UNCHANGED accepted
+    /\ UNCHANGED <<promised, owner, camp>>
 
 Accept(a, b, s) ==
     /\ \E m \in Proposals(b) :
@@ -262,6 +285,13 @@ LearnedAgree ==
 \* No change ever completes.
 NeverFinal == \A a \in Acceptors, s \in Indexes :
     ~ (IsLearned(a, s) /\ accepted[a][s].val \in ConfigEntries /\ accepted[a][s].val.type = "final")
+
+\* No ordinary value is ever decided after a change has completed.  Needs
+\* three indexes: joint, final, and the value.
+NeverAfterFinal == \A a \in Acceptors, s \in Indexes, t \in Indexes :
+    ~ (/\ s < t
+       /\ IsLearned(a, s) /\ accepted[a][s].val \in ConfigEntries /\ accepted[a][s].val.type = "final"
+       /\ IsLearned(a, t) /\ accepted[a][t].val \in Ordinary)
 
 \* No promise ever raises the bar.
 NeverRaised == \A b \in Epochs :
