@@ -31,7 +31,7 @@ set +e
 # -noGenerateSpecTE: no trace-explorer files left behind by the configs that
 # are meant to fail.
 # -deadlock disables deadlock checking: a bounded model legitimately runs out
-# of enabled actions once every ballot and slot is used up.
+# of enabled actions once every epoch and index is used up.
 java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
   -workers auto -deadlock -noGenerateSpecTE -metadir "$META" \
   -config "${CFG}.cfg" "$MODULE" 2>&1 | tee "$OUT"

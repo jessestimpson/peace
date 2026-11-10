@@ -1,6 +1,6 @@
 --------------------------- MODULE FlexiblePaxos ---------------------------
 (***************************************************************************)
-(* Multi-decree Flexible Paxos, as implemented by `src/peace_core.erl`.    *)
+(* Flexible Multi-Paxos, as implemented by `src/peace_core.erl`.           *)
 (*                                                                         *)
 (* Flexible Paxos weakens Paxos's quorum requirement.  It is "revision A"  *)
 (* of Howard's thesis (UCAM-CL-TR-935, in docs/; chapter 4, section 4.1),  *)
@@ -8,53 +8,53 @@
 (* system for both phases and needs any two quorums to intersect.          *)
 (* Flexible Paxos uses two:                                                *)
 (*                                                                         *)
-(*   Quorum1 - who must promise before a proposer may propose (phase 1)    *)
-(*   Quorum2 - who must accept before a value is chosen       (phase 2)    *)
+(*   Quorum1 - who must promise before a proposer may propose (phase one)  *)
+(*   Quorum2 - who must accept before a value is decided       (phase two) *)
 (*                                                                         *)
-(* and needs only that every phase-1 quorum intersects every phase-2       *)
-(* quorum (equation 4.4).  Two phase-2 quorums need not intersect, and     *)
-(* neither need two phase-1 quorums.  The thesis's epochs are ballots      *)
+(* and needs only that every phase-one quorum intersects every phase-two   *)
+(* quorum (equation 4.4).  Two phase-two quorums need not intersect, and   *)
+(* neither need two phase-one quorums.  The thesis's epochs are epochs     *)
 (* here.  This module does NOT assume the intersection: it is              *)
 (* a property of the constants, so that a config can violate it and show   *)
 (* TLC finding the disagreement (FPaxosUnsafeQuorums.cfg).                 *)
 (*                                                                         *)
 (* What is modelled                                                        *)
-(*   - Ballots, promises, and per-slot accepted (ballot, value) pairs.     *)
-(*   - Phase 1 over the whole log at once: a 1b carries every vote the     *)
+(*   - Epochs, promises, and per-index accepted (epoch, value) pairs.      *)
+(*   - Phase one over the whole log at once: a promise carries every proposal the *)
 (*     acceptor holds, as peace's `promise` carries its log suffix.        *)
-(*   - Phase 2 per slot, value selection by highest reported ballot.       *)
+(*   - Phase two per index, value selection by highest reported epoch.     *)
 (*   - Learning, the optional phase three of section 3.3: an acceptor      *)
-(*     that learns a slot is chosen keeps the value under the marker       *)
-(*     ballot `Decided`, above every real ballot, and reports it that      *)
-(*     way in later 1b messages.  It is the one place                      *)
+(*     that learns an index is decided keeps the value under the marker    *)
+(*     epoch `Learned`, above every real epoch, and reports it that        *)
+(*     way in later promises.  It is the one place                         *)
 (*     peace departs from textbook Paxos, so it is the part most worth     *)
 (*     checking, and it is modelled the way the code does it, by three     *)
-(*     routes: a leader counts a phase-2 quorum (`LeaderDecide`), a        *)
+(*     routes: a leader counts a phase-two quorum (`LeaderLearn`), a       *)
 (*     follower trusts its leader's commit index (`SendCommit`,            *)
-(*     `FollowerCommit`), and anybody copies a decided slot from somebody  *)
+(*     `FollowerCommit`), and anybody copies a decided index from somebody *)
 (*     who has it (`CatchUp`).                                             *)
 (*   - The hazard in the second route.  A follower marks its own entry     *)
-(*     decided when the entry is from its leader's ballot and the leader   *)
-(*     says the slot is committed.  Section 3.3 states the condition:      *)
+(*     decided when the entry is from its leader's epoch and the leader    *)
+(*     says the index is committed.  Section 3.3 states the condition:     *)
 (*     "decided in epoch e" lets an acceptor holding a proposal from e     *)
 (*     conclude it is decided, where e is the epoch the value was decided  *)
 (*     in.  So it is sound only while "committed" means "my proposal was   *)
-(*     chosen, or agrees with what was".  A deposed leader that has not    *)
-(*     heard it was deposed can catch a slot up from the new regime, find  *)
+(*     decided, or agrees with what was".  A deposed leader that has not   *)
+(*     heard it was deposed can catch an index up from the new regime, find*)
 (*     a different value there, and would then be advertising a commit     *)
-(*     index that covers a slot where its own proposal lost.  peace steps  *)
+(*     index that covers an index where its own proposal lost.  peace steps*)
 (*     down the moment it sees that (`ConflictStepDown`);                  *)
 (*     FPaxosNoConflictStepDown.cfg is the protocol without it.            *)
-(*   - An acceptor holding a decided slot still answers a 2a for it        *)
-(*     without changing what it holds (`Phase2b`, second disjunct).        *)
-(*   - Snapshots.  An acceptor may drop a slot it knows is decided, as     *)
-(*     peace drops its log below a snapshot (`Snapshot`).  It still knows   *)
-(*     the slot is decided, but its 1b no longer says what it accepted      *)
-(*     there, only that the slot is dropped.  A proposer that took silence  *)
-(*     to mean "free" could have a second value chosen, so it does not      *)
-(*     propose in a slot any promise reported dropped (`SnapshotGuard`);    *)
-(*     peace abandons the whole campaign and catches up.                    *)
-(*     FPaxosNoSnapshotGuard.cfg is the protocol without it.                *)
+(*   - An acceptor holding a decided index still answers a propose for it  *)
+(*     without changing what it holds (`Accept`, second disjunct).         *)
+(*   - Snapshots.  An acceptor may drop an index it knows is decided, as   *)
+(*     peace drops its log below a snapshot (`Snapshot`).  It still knows  *)
+(*     the index is decided, but its promise no longer says what it accepted *)
+(*     there, only that the index is dropped.  A proposer that took silence*)
+(*     to mean "free" could have a second value decided, so it does not    *)
+(*     propose in an index any promise reported dropped (`SnapshotGuard`); *)
+(*     peace abandons the whole campaign and catches up.                   *)
+(*     FPaxosNoSnapshotGuard.cfg is the protocol without it.               *)
 (*   - Message loss, duplication and reordering: `msgs` is a set that      *)
 (*     only grows and nothing is ever obliged to be received.              *)
 (*                                                                         *)
@@ -69,7 +69,7 @@
 (*     model.  The DST harness covers the claim that the code really does  *)
 (*     persist before it replies.                                          *)
 (*   - Leader election timing, heartbeats, client replies, the state       *)
-(*     machine.  Any proposer may start any ballot at any time here, which *)
+(*     machine.  Any proposer may start any epoch at any time here, which  *)
 (*     is a superset of what election timers allow.                        *)
 (*   - Membership change.                                                  *)
 (*   - Quorums that vary by epoch (revision B, section 4.2), completing    *)
@@ -81,63 +81,63 @@ EXTENDS Integers, FiniteSets
 CONSTANTS
     Acceptors,      \* set of acceptor ids
     Values,         \* set of proposable values
-    MaxBallot,      \* ballots are 1..MaxBallot
-    MaxSlot,        \* log slots are 1..MaxSlot
-    Quorum1,        \* set of phase-1 quorums (subsets of Acceptors)
-    Quorum2,        \* set of phase-2 quorums (subsets of Acceptors)
-    None,           \* the value of an empty vote, and the owner of an unused ballot
-    FenceAccept,    \* TRUE: an acceptor refuses a 2a below its promise.
+    MaxEpoch,      \* epochs are 1..MaxEpoch
+    MaxIndex,        \* log indexes are 1..MaxIndex
+    Quorum1,        \* set of phase-one quorums (subsets of Acceptors)
+    Quorum2,        \* set of phase-two quorums (subsets of Acceptors)
+    None,           \* the value of no proposal, and the owner of an unused epoch
+    FenceAccept,    \* TRUE: an acceptor refuses a propose below its promise.
                     \* FALSE is a mutation; see FPaxosNoFence.cfg.
-    ConflictStepDown, \* TRUE: a leader that learns a slot was decided against
+    ConflictStepDown, \* TRUE: a leader that learns an index was decided against
                     \* its own proposal stops advertising commits.  FALSE is
                     \* a mutation; see FPaxosNoConflictStepDown.cfg.
-    Snapshots,      \* TRUE: acceptors may drop decided slots.  FALSE keeps
+    Snapshots,      \* TRUE: acceptors may drop decided indexes.  FALSE keeps
                     \* the state space of configs that are about other things.
-    SnapshotGuard   \* TRUE: a proposer does not propose in a slot a promise
+    SnapshotGuard   \* TRUE: a proposer does not propose in an index a promise
                     \* reported dropped.  FALSE is a mutation; see
                     \* FPaxosNoSnapshotGuard.cfg.
 
 VARIABLES
-    promised,       \* promised[a]: highest ballot a has promised, 0 if none
-    accepted,       \* accepted[a][s]: a's vote for slot s
-    owner,          \* owner[b]: the acceptor that started ballot b, or None.
-                    \* peace ballots are {Round, ServerId} pairs, so a ballot
+    promised,       \* promised[a]: highest epoch a has promised, 0 if none
+    accepted,       \* accepted[a][s]: the proposal a last accepted for index s
+    owner,          \* owner[b]: the acceptor that started epoch b, or None.
+                    \* peace epochs are {Round, ServerId} pairs, so an epoch
                     \* has exactly one possible leader.
     msgs,           \* every message ever sent
-    dropped         \* dropped[a]: the slots a has dropped under a snapshot
+    dropped         \* dropped[a]: the indexes a has dropped under a snapshot
 
 vars == <<promised, accepted, owner, msgs, dropped>>
 
-Ballots == 1..MaxBallot
-Slots   == 1..MaxSlot
+Epochs == 1..MaxEpoch
+Indexes   == 1..MaxIndex
 
-\* The marker "ballot" of a slot an acceptor knows to be chosen.  Above every
-\* real ballot, so highest-ballot value selection always prefers it.
-Decided == MaxBallot + 1
+\* The marker "epoch" of an index an acceptor knows to be decided.  Above every
+\* real epoch, so highest-epoch value selection always prefers it.
+Learned == MaxEpoch + 1
 
-NoVote == [bal |-> -1, val |-> None]
+NoVote == [epoch |-> -1, val |-> None]
 
-Vote == [bal : Ballots \cup {Decided}, val : Values] \cup {NoVote}
+Vote == [epoch : Epochs \cup {Learned}, val : Values] \cup {NoVote}
 
 Message ==
-         [type : {"1a"}, bal : Ballots]
-    \cup [type : {"1b"}, bal : Ballots, acc : Acceptors, votes : [Slots -> Vote],
-          dropped : SUBSET Slots]
-    \cup [type : {"2a"}, bal : Ballots, slot : Slots, val : Values]
-    \cup [type : {"2b"}, bal : Ballots, slot : Slots, acc : Acceptors]
-    \cup [type : {"commit"}, bal : Ballots, slot : Slots]
+         [type : {"prepare"}, epoch : Epochs]
+    \cup [type : {"promise"}, epoch : Epochs, acc : Acceptors, votes : [Indexes -> Vote],
+          dropped : SUBSET Indexes]
+    \cup [type : {"propose"}, epoch : Epochs, index : Indexes, val : Values]
+    \cup [type : {"accept"}, epoch : Epochs, index : Indexes, acc : Acceptors]
+    \cup [type : {"commit"}, epoch : Epochs, index : Indexes]
 
 TypeOK ==
-    /\ promised \in [Acceptors -> 0..MaxBallot]
-    /\ accepted \in [Acceptors -> [Slots -> Vote]]
-    /\ owner \in [Ballots -> Acceptors \cup {None}]
+    /\ promised \in [Acceptors -> 0..MaxEpoch]
+    /\ accepted \in [Acceptors -> [Indexes -> Vote]]
+    /\ owner \in [Epochs -> Acceptors \cup {None}]
     /\ msgs \subseteq Message
-    /\ dropped \in [Acceptors -> SUBSET Slots]
+    /\ dropped \in [Acceptors -> SUBSET Indexes]
 
 Init ==
     /\ promised = [a \in Acceptors |-> 0]
-    /\ accepted = [a \in Acceptors |-> [s \in Slots |-> NoVote]]
-    /\ owner = [b \in Ballots |-> None]
+    /\ accepted = [a \in Acceptors |-> [s \in Indexes |-> NoVote]]
+    /\ owner = [b \in Epochs |-> None]
     /\ msgs = {}
     /\ dropped = [a \in Acceptors |-> {}]
 
@@ -146,181 +146,182 @@ Send(m) == msgs' = msgs \cup {m}
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 -----------------------------------------------------------------------------
-(* A value is chosen at a slot once some phase-2 quorum has accepted it in  *)
-(* one ballot.  A 2b names no value; the 2a of the same ballot and slot     *)
-(* does, and there is at most one of those (`Phase2a`).                     *)
+(* A value is decided at an index once some phase-two quorum has accepted it in *)
+(* one epoch.  An accept names no value; the propose of the same epoch and index *)
+(* does, and there is at most one of those (`Propose`).                    *)
 
-ChosenAt(b, s, v) ==
-    /\ [type |-> "2a", bal |-> b, slot |-> s, val |-> v] \in msgs
+DecidedAt(b, s, v) ==
+    /\ [type |-> "propose", epoch |-> b, index |-> s, val |-> v] \in msgs
     /\ \E Q \in Quorum2 :
-          \A a \in Q : [type |-> "2b", bal |-> b, slot |-> s, acc |-> a] \in msgs
+          \A a \in Q : [type |-> "accept", epoch |-> b, index |-> s, acc |-> a] \in msgs
 
-Chosen(s, v) == \E b \in Ballots : ChosenAt(b, s, v)
+Decided(s, v) == \E b \in Epochs : DecidedAt(b, s, v)
 
 -----------------------------------------------------------------------------
-(* peace: a candidate broadcasts `{prepare, Ballot, From}`.  A ballot is   *)
-(* started once, by one acceptor.                                           *)
-Phase1a(a, b) ==
+(* peace: a candidate broadcasts `{prepare, Epoch, From}`.  An epoch is    *)
+(* started once, by one acceptor.                                          *)
+Prepare(a, b) ==
     /\ owner[b] = None
     /\ owner' = [owner EXCEPT ![b] = a]
-    /\ Send([type |-> "1a", bal |-> b])
+    /\ Send([type |-> "prepare", epoch |-> b])
     /\ UNCHANGED <<promised, accepted, dropped>>
 
-(* peace: `{promise, Ballot, Entries, Snapshot}`.  Strictly greater, so an  *)
-(* acceptor answers a given ballot at most once and a proposer never sees   *)
-(* two different reports from the same acceptor.  Of a dropped slot it      *)
-(* reports no vote, and that it is dropped.                                 *)
-Phase1b(a, b) ==
-    /\ [type |-> "1a", bal |-> b] \in msgs
+(* peace: `{promise, Epoch, Entries, Snapshot}`.  Strictly greater, so an  *)
+(* acceptor answers a given epoch at most once and a proposer never sees   *)
+(* two different reports from the same acceptor.  Of a dropped index it    *)
+(* reports no proposal, and that it is dropped.                            *)
+Promise(a, b) ==
+    /\ [type |-> "prepare", epoch |-> b] \in msgs
     /\ b > promised[a]
     /\ promised' = [promised EXCEPT ![a] = b]
-    /\ Send([type |-> "1b", bal |-> b, acc |-> a,
-             votes |-> [s \in Slots |-> IF s \in dropped[a] THEN NoVote
+    /\ Send([type |-> "promise", epoch |-> b, acc |-> a,
+             votes |-> [s \in Indexes |-> IF s \in dropped[a] THEN NoVote
                                                             ELSE accepted[a][s]],
              dropped |-> dropped[a]])
     /\ UNCHANGED <<accepted, owner, dropped>>
 
-(* peace: on a phase-1 quorum of promises the new leader re-proposes, for   *)
-(* every slot anybody reported, the value reported at the highest ballot,   *)
-(* and is free to propose anything where nobody reported a vote.            *)
-Phase2a(b, s, v) ==
-    /\ ~ \E m \in msgs : m.type = "2a" /\ m.bal = b /\ m.slot = s
+(* peace: on a phase-one quorum of promises the new leader re-proposes, for*)
+(* every index anybody reported, the value reported at the highest epoch,  *)
+(* and is free to propose anything where nobody reported a proposal.       *)
+Propose(b, s, v) ==
+    /\ ~ \E m \in msgs : m.type = "propose" /\ m.epoch = b /\ m.index = s
     /\ \E Q \in Quorum1 :
-          LET reports == {m \in msgs : m.type = "1b" /\ m.bal = b /\ m.acc \in Q}
+          LET reports == {m \in msgs : m.type = "promise" /\ m.epoch = b /\ m.acc \in Q}
               votes   == {m.votes[s] : m \in reports}
           IN  /\ \A a \in Q : \E m \in reports : m.acc = a
               /\ SnapshotGuard => \A m \in reports : s \notin m.dropped
-              /\ \/ \A vt \in votes : vt.bal = -1
+              /\ \/ \A vt \in votes : vt.epoch = -1
                  \/ \E vt \in votes :
-                       /\ vt.bal = Max({w.bal : w \in votes})
+                       /\ vt.epoch = Max({w.epoch : w \in votes})
                        /\ vt.val = v
-    /\ Send([type |-> "2a", bal |-> b, slot |-> s, val |-> v])
+    /\ Send([type |-> "propose", epoch |-> b, index |-> s, val |-> v])
     /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
-(* peace: `{accept, Ballot, Entries, Commit}` answered by `{accepted, ...}`.*)
-(* A slot already known decided is acknowledged and left alone: the         *)
-(* acceptor must never replace a decided entry with a lower-ballot one,     *)
-(* and it must still answer or a leader that has not yet learned the slot   *)
-(* is decided could wait forever for a phase-2 quorum.                      *)
-Phase2b(a, b, s) ==
+(* peace: `{propose, Epoch, Entries, Commit}` answered by `{accept, ...}`. *)
+(* An index already known decided is acknowledged and left alone: the      *)
+(* acceptor must never replace a decided entry with a lower-epoch one,     *)
+(* and it must still answer or a leader that has not yet learned the index *)
+(* is decided could wait forever for a phase-two quorum.                   *)
+Accept(a, b, s) ==
     /\ \E m \in msgs :
-          /\ m.type = "2a" /\ m.bal = b /\ m.slot = s
+          /\ m.type = "propose" /\ m.epoch = b /\ m.index = s
           /\ FenceAccept => b >= promised[a]
           /\ promised' = [promised EXCEPT ![a] = IF b > @ THEN b ELSE @]
-          /\ IF accepted[a][s].bal = Decided
+          /\ IF accepted[a][s].epoch = Learned
                 THEN UNCHANGED accepted
                 ELSE accepted' = [accepted EXCEPT ![a][s] =
-                                    [bal |-> b, val |-> m.val]]
-    /\ Send([type |-> "2b", bal |-> b, slot |-> s, acc |-> a])
+                                    [epoch |-> b, val |-> m.val]]
+    /\ Send([type |-> "accept", epoch |-> b, index |-> s, acc |-> a])
     /\ UNCHANGED <<owner, dropped>>
 
 -----------------------------------------------------------------------------
-(* Learning.                                                                *)
+(* Learning.                                                               *)
 
-\* peace_core's leader role: it has promised nothing above its own ballot.
+\* peace_core's leader role: it has promised nothing above its own epoch.
 \* (It also steps down on a nack; fewer behaviours, not more.)
 Leads(a, b) == owner[b] = a /\ promised[a] = b
 
-(* peace: the leader counts `accepted` replies and marks the slot decided   *)
-(* once they form a phase-2 quorum.                                         *)
-LeaderDecide(b, s) ==
+(* peace: the leader counts `accepted` replies and marks the index decided *)
+(* once they form a phase-two quorum.                                      *)
+LeaderLearn(b, s) ==
     /\ owner[b] # None
     /\ Leads(owner[b], b)
-    /\ accepted[owner[b]][s].bal # Decided
+    /\ accepted[owner[b]][s].epoch # Learned
     /\ \E v \in Values :
-          /\ ChosenAt(b, s, v)
+          /\ DecidedAt(b, s, v)
           /\ accepted' = [accepted EXCEPT ![owner[b]][s] =
-                             [bal |-> Decided, val |-> v]]
+                             [epoch |-> Learned, val |-> v]]
     /\ UNCHANGED <<promised, owner, msgs, dropped>>
 
-\* The leader of b holds a slot decided with a value other than the one it
-\* proposed there.  Only a later ballot can have chosen that value.
+\* The leader of b holds an index decided with a value other than the one it
+\* proposed there.  Only a later epoch can have decided that value.
 Conflict(b) ==
     \E m \in msgs :
-        /\ m.type = "2a" /\ m.bal = b
-        /\ accepted[owner[b]][m.slot].bal = Decided
-        /\ accepted[owner[b]][m.slot].val # m.val
+        /\ m.type = "propose" /\ m.epoch = b
+        /\ accepted[owner[b]][m.index].epoch = Learned
+        /\ accepted[owner[b]][m.index].val # m.val
 
-(* peace: every `accept` (and so every heartbeat) carries the leader's      *)
-(* commit index.                                                            *)
+(* peace: every `accept` (and so every heartbeat) carries the leader's     *)
+(* commit index.                                                           *)
 SendCommit(b, s) ==
     /\ owner[b] # None
     /\ Leads(owner[b], b)
-    /\ accepted[owner[b]][s].bal = Decided
+    /\ accepted[owner[b]][s].epoch = Learned
     /\ ConflictStepDown => ~ Conflict(b)
-    /\ Send([type |-> "commit", bal |-> b, slot |-> s])
+    /\ Send([type |-> "commit", epoch |-> b, index |-> s])
     /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
-(* peace: a follower marks decided each slot the leader's commit index      *)
-(* covers, provided its own entry there is from that leader's ballot.  An   *)
-(* entry from an older ballot may be a different value; that slot waits     *)
-(* for `CatchUp`.                                                           *)
+(* peace: a follower marks decided each index the leader's commit index    *)
+(* covers, provided its own entry there is from that leader's epoch.  An   *)
+(* entry from an older epoch may be a different value; that index waits    *)
+(* for `CatchUp`.                                                          *)
 FollowerCommit(a, b, s) ==
-    /\ [type |-> "commit", bal |-> b, slot |-> s] \in msgs
+    /\ [type |-> "commit", epoch |-> b, index |-> s] \in msgs
     /\ b >= promised[a]
-    /\ accepted[a][s].bal = b
+    /\ accepted[a][s].epoch = b
     /\ promised' = [promised EXCEPT ![a] = b]
-    /\ accepted' = [accepted EXCEPT ![a][s].bal = Decided]
+    /\ accepted' = [accepted EXCEPT ![a][s].epoch = Learned]
     /\ UNCHANGED <<owner, msgs, dropped>>
 
-(* peace: `{catchup, From}` answered by `{learned, Entries}` or, from a     *)
-(* server that has dropped the entries, by `{install, Index, State}`; and   *)
-(* decided entries carried in a `promise`.  A decided slot never changes,   *)
-(* so copying it atomically loses nothing against copying it by message.    *)
+(* peace: `{catchup, From}` answered by `{learned, Entries}` or, from a    *)
+(* server that has dropped the entries, by `{install, Index, State}`; and  *)
+(* decided entries carried in a `promise`.  A decided index never changes, *)
+(* so copying it atomically loses nothing against copying it by message.   *)
 CatchUp(a, from, s) ==
-    /\ accepted[from][s].bal = Decided
-    /\ accepted[a][s].bal # Decided
+    /\ accepted[from][s].epoch = Learned
+    /\ accepted[a][s].epoch # Learned
     /\ accepted' = [accepted EXCEPT ![a][s] = accepted[from][s]]
     /\ UNCHANGED <<promised, owner, msgs, dropped>>
 
-(* peace: a server writes a snapshot and drops its log up to there.  Only   *)
-(* decided slots are ever under a snapshot.                                 *)
+(* peace: a server writes a snapshot and drops its log up to there.  Only  *)
+(* decided indexes are ever under a snapshot.                              *)
 Snapshot(a, s) ==
     /\ Snapshots
-    /\ accepted[a][s].bal = Decided
+    /\ accepted[a][s].epoch = Learned
     /\ s \notin dropped[a]
     /\ dropped' = [dropped EXCEPT ![a] = @ \cup {s}]
     /\ UNCHANGED <<promised, accepted, owner, msgs>>
 
 Next ==
-    \/ \E a \in Acceptors, b \in Ballots : Phase1a(a, b)
-    \/ \E a \in Acceptors, b \in Ballots : Phase1b(a, b)
-    \/ \E b \in Ballots, s \in Slots, v \in Values : Phase2a(b, s, v)
-    \/ \E a \in Acceptors, b \in Ballots, s \in Slots : Phase2b(a, b, s)
-    \/ \E b \in Ballots, s \in Slots : LeaderDecide(b, s)
-    \/ \E b \in Ballots, s \in Slots : SendCommit(b, s)
-    \/ \E a \in Acceptors, b \in Ballots, s \in Slots : FollowerCommit(a, b, s)
-    \/ \E a, from \in Acceptors, s \in Slots : CatchUp(a, from, s)
-    \/ \E a \in Acceptors, s \in Slots : Snapshot(a, s)
+    \/ \E a \in Acceptors, b \in Epochs : Prepare(a, b)
+    \/ \E a \in Acceptors, b \in Epochs : Promise(a, b)
+    \/ \E b \in Epochs, s \in Indexes, v \in Values : Propose(b, s, v)
+    \/ \E a \in Acceptors, b \in Epochs, s \in Indexes : Accept(a, b, s)
+    \/ \E b \in Epochs, s \in Indexes : LeaderLearn(b, s)
+    \/ \E b \in Epochs, s \in Indexes : SendCommit(b, s)
+    \/ \E a \in Acceptors, b \in Epochs, s \in Indexes : FollowerCommit(a, b, s)
+    \/ \E a, from \in Acceptors, s \in Indexes : CatchUp(a, from, s)
+    \/ \E a \in Acceptors, s \in Indexes : Snapshot(a, s)
 
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-(* Safety.                                                                  *)
+(* Safety.                                                                 *)
 
-\* At most one value is ever chosen per slot.  The whole point.
+\* At most one value is ever decided per index.  The whole point.
 Agreement ==
-    \A s \in Slots, v1, v2 \in Values :
-        Chosen(s, v1) /\ Chosen(s, v2) => v1 = v2
+    \A s \in Indexes, v1, v2 \in Values :
+        Decided(s, v1) /\ Decided(s, v2) => v1 = v2
 
-\* Whatever an acceptor holds as decided is the chosen value.  This is what
+\* The thesis's safe learning: "If a participant learns a value, it must
+\* learn the decided value."  This is what
 \* a peace server applies to its state machine, so it is the property the
 \* state machines' agreement actually rests on.
-DecidedSound ==
-    \A a \in Acceptors, s \in Slots :
-        accepted[a][s].bal = Decided => Chosen(s, accepted[a][s].val)
+LearnedSound ==
+    \A a \in Acceptors, s \in Indexes :
+        accepted[a][s].epoch = Learned => Decided(s, accepted[a][s].val)
 
-\* A ballot proposes at most one value per slot.
-OneValuePerBallot ==
+\* An epoch proposes at most one value per index.
+OneValuePerEpoch ==
     \A m1, m2 \in msgs :
-        (m1.type = "2a" /\ m2.type = "2a" /\ m1.bal = m2.bal /\ m1.slot = m2.slot)
+        (m1.type = "propose" /\ m2.type = "propose" /\ m1.epoch = m2.epoch /\ m1.index = m2.index)
             => m1.val = m2.val
 
-\* Decided entries agree across acceptors.  Implied by the two above; stated
+\* Learned entries agree across acceptors.  Implied by the two above; stated
 \* because it is literally what the DST harness checks on the running code.
-DecidedAgree ==
-    \A a1, a2 \in Acceptors, s \in Slots :
-        (accepted[a1][s].bal = Decided /\ accepted[a2][s].bal = Decided)
+LearnedAgree ==
+    \A a1, a2 \in Acceptors, s \in Indexes :
+        (accepted[a1][s].epoch = Learned /\ accepted[a2][s].epoch = Learned)
             => accepted[a1][s].val = accepted[a2][s].val
 
 \* What Flexible Paxos asks of the quorum system, and all it asks.
@@ -328,29 +329,29 @@ QuorumIntersection ==
     \A Q1 \in Quorum1, Q2 \in Quorum2 : Q1 \cap Q2 # {}
 
 -----------------------------------------------------------------------------
-(* Reachability.  These are meant to FAIL: each is the negation of a state  *)
-(* the model has to be able to reach for the invariants above to mean       *)
-(* anything.  See FPaxosReachable.cfg.                                      *)
+(* Reachability.  These are meant to FAIL: each is the negation of a state *)
+(* the model has to be able to reach for the invariants above to mean      *)
+(* anything.  See FPaxosReachable.cfg.                                     *)
 
-NothingChosen == \A s \in Slots, v \in Values : ~ Chosen(s, v)
+NothingDecided == \A s \in Indexes, v \in Values : ~ Decided(s, v)
 
-NothingLearned == \A a \in Acceptors, s \in Slots : accepted[a][s].bal # Decided
+NothingLearned == \A a \in Acceptors, s \in Indexes : accepted[a][s].epoch # Learned
 
-\* Never does every acceptor know every slot: followers never finish learning.
-NotAllLearned == \E a \in Acceptors, s \in Slots : accepted[a][s].bal # Decided
+\* Never does every acceptor know every index: followers never finish learning.
+NotAllLearned == \E a \in Acceptors, s \in Indexes : accepted[a][s].epoch # Learned
 
-\* No ballot is ever promised by an acceptor that has dropped a slot, i.e.
+\* No epoch is ever promised by an acceptor that has dropped an index, i.e.
 \* the SnapshotGuard guards nothing.
-NoPromiseAfterSnapshot == \A m \in msgs : m.type = "1b" => m.dropped = {}
+NoPromiseAfterSnapshot == \A m \in msgs : m.type = "promise" => m.dropped = {}
 
 \* A leader never finds itself contradicted, i.e. the ConflictStepDown guard
 \* guards nothing.
-NoConflict == \A b \in Ballots : owner[b] # None => ~ Conflict(b)
+NoConflict == \A b \in Epochs : owner[b] # None => ~ Conflict(b)
 
-\* No value chosen in one ballot is ever re-proposed by a later one, i.e. a
+\* No value decided in one epoch is ever re-proposed by a later one, i.e. a
 \* leader change never has to recover anything.
 NoRecovery ==
-    \A s \in Slots, v \in Values, b1, b2 \in Ballots :
-        ~ (b1 < b2 /\ ChosenAt(b1, s, v) /\ ChosenAt(b2, s, v))
+    \A s \in Indexes, v \in Values, b1, b2 \in Epochs :
+        ~ (b1 < b2 /\ DecidedAt(b1, s, v) /\ DecidedAt(b2, s, v))
 
 =============================================================================

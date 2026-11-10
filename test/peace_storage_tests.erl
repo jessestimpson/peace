@@ -120,7 +120,7 @@ batches(Rand0) ->
     {N, Rand1} = rand:uniform_s(8, Rand0),
     lists:mapfoldl(fun(_, R) -> batch(R) end, Rand1, lists:seq(1, N)).
 
-%% Promises, entries, both, neither or a snapshot, over few enough slots that
+%% Promises, entries, both, neither or a snapshot, over few enough indexes that
 %% entries are overwritten, as an acceptor overwrites them, and dropped.
 batch(Rand0) ->
     {Kind, Rand1} = rand:uniform_s(5, Rand0),
@@ -130,17 +130,17 @@ batch(Rand0) ->
         fun(_, R0) ->
             {I, R1} = rand:uniform_s(12, R0),
             {Decided, R2} = rand:uniform_s(3, R1),
-            Ballot =
+            Epoch =
                 case Decided of
                     1 -> decided;
                     _ -> {Round, ?ID}
                 end,
-            {{I, {Ballot, {'$usr', {{Round, ?ID}, I}, {put, I, Round}}}}, R2}
+            {{I, {Epoch, {'$usr', {{Round, ?ID}, I}, {put, I, Round}}}}, R2}
         end,
         Rand3,
         lists:seq(1, Count)
     ),
-    %% One write per slot in a batch: peace never sends two.
+    %% One write per index in a batch: peace never sends two.
     Unique = maps:to_list(maps:from_list(Entries)),
     Batch =
         case Kind of
@@ -156,7 +156,7 @@ batch(Rand0) ->
 apply_batch(Batch, Model = #{entries := Entries}) ->
     Model1 =
         case Batch of
-            #{promised := Ballot} -> Model#{promised => Ballot};
+            #{promised := Epoch} -> Model#{promised => Epoch};
             _ -> Model
         end,
     Model2 = maps:merge(Model1, maps:with([snapshot], Batch)),

@@ -2,7 +2,7 @@
 (***************************************************************************)
 (* Model-checking instances of Reconfig.                                   *)
 (*                                                                         *)
-(* Three acceptors and two configurations chosen to share nobody:          *)
+(* Three acceptors and two configurations decided to share nobody:         *)
 (*   cA - a1 and a2, `{counting, 1, 2}': either may lead, both must        *)
 (*        accept;                                                          *)
 (*   cB - a3 alone.                                                        *)

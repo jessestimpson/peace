@@ -4,13 +4,13 @@
 %% answer after a restart. Two things carry that obligation:
 %%
 %% <ul>
-%% <li>the highest ballot it has promised, and</li>
-%% <li>every log entry it has accepted, with the ballot it accepted it in (or
-%%   the marker `decided' once it knows the entry was chosen).</li>
+%% <li>the highest epoch it has promised, and</li>
+%% <li>every log entry it has accepted, with the epoch it accepted it in (or
+%%   the marker `decided' once it knows the entry was decided).</li>
 %% </ul>
 %%
 %% and a third stands in for entries that have been dropped: a snapshot, the
-%% machine state as of some slot, below which the log is no longer kept.
+%% machine state as of some index, below which the log is no longer kept.
 %%
 %% `peace_server' writes both before it sends the reply that depends on
 %% them, and the `write/2' callback must not return until the data would
@@ -29,7 +29,7 @@
 
 %% What a server recovers on start.
 -type stored() :: #{
-    promised => peace:ballot(),
+    promised => peace:epoch(),
     entries => #{peace:index() => peace_core:entry()},
     snapshot => {peace:index(), peace_core:snapshot()}
 }.
@@ -41,7 +41,7 @@
 %% that cannot do both at once writes the snapshot first: `peace_core'
 %% ignores entries under the snapshot it recovers.
 -type batch() :: #{
-    promised => peace:ballot(),
+    promised => peace:epoch(),
     entries => [{peace:index(), peace_core:entry()}],
     snapshot => {peace:index(), peace_core:snapshot()}
 }.

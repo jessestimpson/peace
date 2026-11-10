@@ -1,5 +1,5 @@
 %% The machine the simulation replicates: it remembers every command with the
-%% slot it was applied at, and answers each with that slot. Enough for the
+%% index it was applied at, and answers each with that index. Enough for the
 %% harness to compare what a client was told against what was decided.
 -module(peace_dst_machine).
 

@@ -45,9 +45,38 @@ Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 `state_enter/2` to react to becoming leader. See
 [peace_machine](src/peace_machine.erl).
 
+## The thesis
+
+peace follows Heidi Howard's thesis,
+[Distributed consensus revised](docs/UCAM-CL-TR-935.pdf) (UCAM-CL-TR-935),
+and uses its words. Section numbers in the code and in this file are to it.
+
+| Here | Thesis |
+|---|---|
+| epoch, `{Round, ServerId}` | epoch (§2.2); unique by construction, where §3.9 has acceptors vote for one |
+| `prepare`, `promise` | phase one (§2.2) |
+| `propose`, `accept` | phase two (§2.2) |
+| `nack` | NACKs (§3.1) |
+| decided, learned | decided; learning (§3.3) |
+| leader, one phase one for the whole sequence | Multi-Paxos (§3.6) |
+| every server a proposer and an acceptor | roles (§3.7) |
+| phase-one and phase-two quorums | revision A (§4.1), published as Flexible Paxos |
+| `{counting, N, 1}`, `{counting, 1, N}` | Singleton Paxos, All aboard Paxos (§4.3.2) |
+| `{counting, N div 2 + 1, N div 2}` | the even nodes optimisation (§4.3.3) |
+| `{grid, Rows}` | the grid of §4.1.3 |
+| `propose_to => quorum` | proposing to a phase-two quorum (§4.3.3) |
+| command | value |
+
+Not in the thesis, and named as Raft and Viewstamped Replication name them:
+the pre-vote, a leader standing down for want of a quorum, the commit index,
+sessions, snapshots, read leases, and membership change by joint
+configurations. Membership change is in the direction of revision B (§4.2)
+but is not that revision. The programming model is
+[ra](https://github.com/rabbitmq/ra)'s.
+
 ## Quorum systems
 
-| `quorum` | Phase 1 (elect) | Phase 2 (commit) |
+| `quorum` | Phase one (elect) | Phase two (commit) |
 |---|---|---|
 | `majority` (default) | more than half | more than half |
 | `{counting, Q1, Q2}` | any `Q1` members | any `Q2` members, `Q1 + Q2 > N` |
@@ -75,7 +104,7 @@ callbacks.
 ## Retries, snapshots, reads and elections
 
 **Sessions.** A client that times out cannot know whether its command was
-chosen. Submitted with `#{session => {ClientId, Seq}}`, a command is applied
+decided. Submitted with `#{session => {ClientId, Seq}}`, a command is applied
 at most once however often it is retried, and the retry gets the reply the
 first application got. One command in flight per client, `Seq` increasing.
 
@@ -83,7 +112,7 @@ first application got. One command in flight per client, `Seq` increasing.
 {ok, Reply, _} = peace:process_command(Ids, Cmd, #{session => {my_id, 17}, timeout => 2000}).
 ```
 
-**Snapshots.** Every `snapshot_interval` applied slots (default 4096) a
+**Snapshots.** Every `snapshot_interval` applied indexes (default 4096) a
 server stores its machine state and drops the log up to there. It restarts
 from the snapshot, and a follower too far behind for the log is sent the
 state. The snapshot is the machine state as an Erlang term, written and sent
@@ -100,7 +129,7 @@ ten per cent of each other.
 **Membership.** `peace:change_members(Servers, Members, Quorum)` moves the
 cluster to any other configuration: other members, more, fewer, none in
 common, or the same members under another quorum system. It passes through
-a joint configuration in which a command needs a phase-2 quorum of the old
+a joint configuration in which a command needs a phase-two quorum of the old
 and of the new, so the two can never decide apart, and the change is in the
 log, so it survives the leader that started it. A server to be added is
 started first with `members` set to the cluster as it is, and waits.
@@ -110,9 +139,17 @@ ok = peace:start_server(#{id => D, members => [A, B, C], machine => Machine}),
 {ok, ok, _} = peace:change_members([A, B, C], [B, C, D], majority).
 ```
 
-**Elections.** A follower asks before it raises its ballot (pre-vote), so a
+**Proposing to a phase-two quorum** (§4.3.3). With `propose_to => quorum`
+a leader sends each proposal to the fewest peers that make a phase-two quorum
+with it. Under `{counting, 4, 2}` over five that is one peer per command, not
+four. A proposal those peers do not accept within two heartbeats goes to
+everybody. Off by default. The thesis's standbys hold no copy of the value;
+peace's are a heartbeat behind and learn by asking, so the saving is in
+messages, not storage.
+
+**Elections.** A follower asks before it raises its epoch (pre-vote), so a
 server that was cut off does not depose a healthy leader on its return. A
-leader that a phase-2 quorum has stopped answering steps down, so clients
+leader that a phase-two quorum has stopped answering steps down, so clients
 are told instead of left to time out.
 
 ## How it is checked
@@ -121,7 +158,7 @@ Three layers, each covering what the one before cannot.
 
 **TLA+ and TLC** ([formal/](formal/README.md)). The protocol as a model,
 checked exhaustively at small bounds: agreement, and that everything a server
-treats as decided really was chosen. The model has mutations that TLC must
+treats as decided really was decided. The model has mutations that TLC must
 find a counterexample for (quorums that do not intersect, an acceptor that
 ignores its promise, a deposed leader that keeps advertising its commit
 index, a candidate that leads from behind a snapshot) and reachability
@@ -137,7 +174,7 @@ checked after every step, among them agreement across the whole run, that
 memory never runs ahead of disk, and that a linearizable read contains every
 command acknowledged before it. A second workload goes after leadership
 instead: forced elections, two-server splits and long-delayed `learned`
-messages. Servers snapshot every five slots and clients retry under
+messages. Servers snapshot every five indexes and clients retry under
 sessions, so truncation, recovery and catching up by snapshot are in every
 run. A third workload changes the membership as it goes, between five
 configurations of five servers. Seven planted bugs prove the suite can fail:
@@ -154,7 +191,7 @@ closes and kills.
 
 ```
 make test       # rebar3 eunit
-make dst        # rebar3 as dst eunit, on one scheduler thread (about five minutes)
+make dst        # rebar3 as dst eunit, on one scheduler thread (six to seven minutes)
 make tlc        # formal/check_all.sh quick  (a few minutes)
 make tlc-long   # the configs with tens of millions of states
 ```

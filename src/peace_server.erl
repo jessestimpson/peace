@@ -171,7 +171,7 @@ persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
     {ok, Storage} = peace_storage:write(Mod, lists:foldl(fun merge_batch/2, #{}, Batches), Storage0),
     State#state{storage = Storage}.
 
-%% Later batches win, slot by slot, and a snapshot takes out of the write
+%% Later batches win, index by index, and a snapshot takes out of the write
 %% every entry it covers.
 merge_batch(Batch, Acc0) ->
     Acc1 = maps:merge(Acc0, maps:with([promised, snapshot], Batch)),

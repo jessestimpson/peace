@@ -108,7 +108,7 @@ durable_restart(Ids0) ->
             [ok = peace:start_server(Config(Id)) || Id <- Ids],
             NewLeader = await_leader(Ids),
             {ok, 1, NewLeader} = peace:process_command(NewLeader, {get, a}),
-            %% Ballots moved on from where they were, not from zero.
+            %% Epochs moved on from where they were, not from zero.
             #{promised := {Round, _}} = peace:overview(NewLeader),
             ?assert(Round >= 2)
         end)}.
@@ -138,7 +138,7 @@ sessions_snapshots_and_leases(Ids0) ->
             {error, {session_superseded, 7}} = Put(2),
             #{snapshot_index := Snapshot, sessions := 1} = peace:overview(Leader),
             ?assert(Snapshot >= 6),
-            %% A read under a lease takes no slot.
+            %% A read under a lease takes no index.
             %% On a machine too busy to keep the heartbeat the lease lapses
             %% and the read goes through the log, so look for one that
             %% did not.

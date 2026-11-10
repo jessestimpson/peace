@@ -20,12 +20,13 @@
 %% peace:start_cluster(Ids, Machine, #{quorum => {counting, 4, 2}}).
 %% '''
 %%
-%% == Not here yet ==
+%% == Against the thesis ==
 %%
-%% Membership change, snapshots and log truncation, leader leases, and
-%% pre-vote. The log grows without bound, a `consistent_query/2' costs a round
-%% of replication, and a member that was partitioned away disrupts the leader
-%% once when it returns.
+%% The protocol and its words are from Heidi Howard's thesis
+%% (UCAM-CL-TR-935, in `docs/'): Multi-Paxos (section 3.6) under revision A's
+%% quorums (4.1). `peace_core' says section by section what is from it and
+%% what is not. The programming model, the names in this module among them,
+%% is ra's: a command here is what the thesis calls a value.
 -module(peace).
 
 -include("peace.hrl").
@@ -52,7 +53,7 @@
 
 -export_type([
     server_id/0,
-    ballot/0,
+    epoch/0,
     index/0,
     role/0,
     server_config/0,
@@ -62,7 +63,7 @@
 
 %% A server is a locally registered name on a node, as in ra.
 -type server_id() :: {Name :: atom(), node()}.
--type ballot() :: {Round :: non_neg_integer(), server_id() | none}.
+-type epoch() :: {Round :: non_neg_integer(), server_id() | none}.
 -type index() :: pos_integer().
 -type role() :: follower | candidate | leader.
 
@@ -78,11 +79,16 @@
     %% Default a fifth of the election timeout.
     heartbeat_ms => pos_integer(),
     %% A server snapshots its machine state and drops its log every this many
-    %% applied slots. Default 4096; `infinity' for never.
+    %% applied indexes. Default 4096; `infinity' for never.
     snapshot_interval => pos_integer() | infinity,
     %% How many clients' sessions are remembered. Must be the same on every
     %% member. Default 10000.
     max_sessions => pos_integer(),
+    %% `quorum': a leader sends each proposal to a phase-two quorum of
+    %% acceptors and no further, and the rest learn on the heartbeat
+    %% (thesis section 4.3.3). Default `all'. See "Proposing to a phase-two
+    %% quorum" in `peace_core'.
+    propose_to => all | quorum,
     %% Lets a leader answer `consistent_query' from its own state. Must be
     %% the same on every member, at most the election timeout, and assumes
     %% clocks that run within ten per cent of each other. Off by default.
@@ -101,6 +107,7 @@
     snapshot_interval => pos_integer() | infinity,
     max_sessions => pos_integer(),
     read_lease_ms => pos_integer(),
+    propose_to => all | quorum,
     %% For tests that plant a bug, to show a check can fail. Never set these.
     unsafe_no_quorum_check => boolean(),
     unsafe_no_conflict_step_down => boolean(),
@@ -130,7 +137,7 @@
 %% @doc Starts one server on each member's node, and returns which started.
 %%
 %% The `peace' application must be running on every node. A cluster is usable
-%% as soon as a phase-1 quorum of it is up; the first election happens by
+%% as soon as a phase-one quorum of it is up; the first election happens by
 %% timeout, or straight away with `trigger_election/1'.
 -spec start_cluster([server_id()], peace_machine:machine(), cluster_opts()) ->
     {ok, Started :: [server_id()], NotStarted :: [server_id()]} | {error, term()}.
@@ -198,7 +205,7 @@ process_command(ServerOrServers, Command) ->
 %% Given one server, the command goes there and follows redirects to the
 %% leader. Given a list, each is tried in turn until one knows a leader.
 %%
-%% `{ok, Reply, Leader}' means the command was chosen and applied, and
+%% `{ok, Reply, Leader}' means the command was decided and applied, and
 %% `Reply' is what the machine returned.
 %%
 %% `{timeout, Server}', `{error, leadership_lost}' and
@@ -292,7 +299,7 @@ change_members(ServerOrServers, Members, Quorum) ->
 %%
 %% Any configuration to any other: adding, removing, replacing every member,
 %% or keeping the members and changing the quorum system. The cluster passes
-%% through a joint configuration, in which a command needs a phase-2 quorum
+%% through a joint configuration, in which a command needs a phase-two quorum
 %% of the old and of the new, so there is no moment at which the two could
 %% decide separately. `{ok, ok, Leader}' means the new configuration alone
 %% is in force.
@@ -306,7 +313,7 @@ change_members(ServerOrServers, Members, Quorum) ->
 %% The change survives a change of leader: `{error, leadership_lost}' and a
 %% timeout mean it may yet complete, and `members/1' says whether it has.
 %% One change at a time: `{error, reconfiguration_in_progress}'. A new
-%% configuration needs a phase-2 quorum of its own members reachable, or
+%% configuration needs a phase-two quorum of its own members reachable, or
 %% nothing more is decided until they are.
 -spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec(), timeout()) ->
     command_ret().

@@ -17,23 +17,24 @@ implements, for a config to substitute.
 - **Flexible quorums** (revision A, §4.1). `Quorum1` for promises, `Quorum2`
   for acceptances. Their intersection is *not* assumed: it is a property of
   the constants, so a config can break it.
-- **Multi-decree Paxos** (§3.6). One phase 1 covers the whole log; a 1b
-  carries every vote the acceptor holds. Phase 2 is per slot.
-- **Learning** (§3.3). A slot an acceptor knows is chosen is held under a
-  marker ballot above every real one. Three routes, as in the code: the
-  leader counts a phase-2 quorum (`LeaderDecide`); a follower trusts its
-  leader's commit index for entries from that leader's ballot (`SendCommit`,
-  `FollowerCommit`); anybody copies a decided slot from somebody who has it
+- **Multi-Paxos** (§3.6). One phase one covers the whole sequence; a
+  promise carries every proposal the acceptor has accepted. Phase two is per
+  index.
+- **Learning** (§3.3). An index an acceptor knows is decided is held under a
+  marker epoch above every real one. Three routes, as in the code: the
+  leader counts a phase-two quorum (`LeaderLearn`); a follower trusts its
+  leader's commit index for entries from that leader's epoch (`SendCommit`,
+  `FollowerCommit`); anybody copies a decided index from somebody who has it
   (`CatchUp`).
 - **The stale-leader hazard.** A deposed leader that has not heard it was
-  deposed can catch up a slot that a later ballot decided differently from
-  its own proposal. If it went on advertising a commit index over that slot,
+  deposed can catch up an index that a later epoch decided differently from
+  its own proposal. If it went on advertising a commit index over that index,
   a follower holding the old proposal would take it as decided.
   `ConflictStepDown` is the guard; peace steps down at that moment.
-- **Snapshots.** An acceptor may drop a decided slot, after which its
-  promise says only that the slot is dropped, not what it held. A proposer
-  that read that as "free" could get a second value chosen, so it does not
-  propose in a slot any promise reported dropped (`SnapshotGuard`); peace
+- **Snapshots.** An acceptor may drop a decided index, after which its
+  promise says only that the index is dropped, not what it held. A proposer
+  that read that as "free" could get a second value decided, so it does not
+  propose in an index any promise reported dropped (`SnapshotGuard`); peace
   abandons the campaign and catches up. Off (`Snapshots = FALSE`) in the
   configs that are about something else, so their state spaces are as they
   were.
@@ -44,7 +45,7 @@ implements, for a config to substitute.
 are durable in peace, so a restarted acceptor is a slow one; the simulation
 checks the code really does persist before it replies); election timing,
 heartbeats, pre-vote and a leader stepping down for want of a quorum, all of
-which only restrict when a ballot starts or stops and the model lets that
+which only restrict when an epoch starts or stops and the model lets that
 happen at any time; read leases, which rest on clocks the model does not
 have; client replies, sessions and the state machine; membership change; and
 the thesis beyond revision A.
@@ -54,11 +55,11 @@ the thesis beyond revision A.
 | Invariant | Meaning |
 |---|---|
 | `TypeOK` | state stays within declared shapes |
-| `Agreement` | at most one value is ever chosen per slot |
-| `DecidedSound` | whatever an acceptor holds as decided is the chosen value |
-| `DecidedAgree` | decided entries agree across acceptors; what the simulation checks on the code |
-| `OneValuePerBallot` | a ballot proposes one value per slot |
-| `QuorumIntersection` | every phase-1 quorum meets every phase-2 quorum (equation 4.4) |
+| `Agreement` | at most one value is ever decided per index |
+| `LearnedSound` | the thesis's safe learning: what an acceptor has learned is the decided value |
+| `LearnedAgree` | decided entries agree across acceptors; what the simulation checks on the code |
+| `OneValuePerEpoch` | an epoch proposes one value per index |
+| `QuorumIntersection` | every phase-one quorum meets every phase-two quorum (equation 4.4) |
 
 ## Configs
 
@@ -67,7 +68,7 @@ last, and the membership model below. `./check.sh <Config> pass|fail` runs one. 
 
 **Hold** (quick):
 
-| Config | Acceptors | Quorums | Ballots × slots | States |
+| Config | Acceptors | Quorums | Epochs × indexes | States |
 |---|---|---|---|---|
 | `FPaxosMajority` | 3 | 2 / 2 | 2 × 1 | small |
 | `FPaxosSingleton` | 3 | 3 / 1, Singleton Paxos (§4.3.2) | 2 × 1 | 6 thousand |
@@ -82,31 +83,31 @@ invariant violation, not a parse error.
 |---|---|---|
 | `FPaxosUnsafeQuorums` | quorums 2 / 1 over 3: they need not intersect | `Agreement` |
 | `FPaxosNoFence` | an acceptor accepts below its promise | `Agreement` |
-| `FPaxosNoConflictStepDown` | a contradicted leader keeps sending commits (5 acceptors) | `DecidedSound` |
-| `FPaxosNoSnapshotGuard` | a proposer proposes in a slot a promise reported dropped | `Agreement` |
+| `FPaxosNoConflictStepDown` | a contradicted leader keeps sending commits (5 acceptors) | `LearnedSound` |
+| `FPaxosNoSnapshotGuard` | a proposer proposes in an index a promise reported dropped | `Agreement` |
 
 **Reachability** (quick): each invariant denies a state the model has to be
 able to reach for the properties above to mean anything, so each must fail.
 
 | Config | Shows reachable |
 |---|---|
-| `FPaxosReachableChosen` | a value is chosen |
-| `FPaxosReachableAllLearned` | every acceptor learns every slot |
-| `FPaxosReachableRecovery` | a later ballot re-proposes a chosen value |
+| `FPaxosReachableDecided` | a value is decided |
+| `FPaxosReachableAllLearned` | every acceptor learns every index |
+| `FPaxosReachableRecovery` | a later epoch re-proposes a decided value |
 | `FPaxosReachableConflict` | a leader finds itself contradicted, so the guard guards something |
-| `FPaxosReachableSnapshot` | an acceptor promises after dropping a slot, so that guard does too |
+| `FPaxosReachableSnapshot` | an acceptor promises after dropping an index, so that guard does too |
 
 **Hold** (long):
 
-| Config | Acceptors | Quorums | Ballots × slots | States |
+| Config | Acceptors | Quorums | Epochs × indexes | States |
 |---|---|---|---|---|
-| `FPaxosThreeBallots` | 3 | 2 / 2 | 3 × 1 | 13.0 million |
+| `FPaxosThreeEpochs` | 3 | 2 / 2 | 3 × 1 | 13.0 million |
 | `FPaxosGrid` | 4 | 2 × 2 grid (§4.1.3) | 2 × 1 | 16.0 million |
-| `FPaxosSingletonTwoSlots` | 3 | 3 / 1 | 2 × 2 | 21.9 million |
-| `FPaxosMajorityTwoSlots` | 3 | 2 / 2 | 2 × 2 | 116.9 million |
+| `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 21.9 million |
+| `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | 116.9 million |
 
 The first three took about 25 minutes together on a busy machine,
-`FPaxosThreeBallots` under five of them. `FPaxosMajorityTwoSlots` took 1 hour
+`FPaxosThreeEpochs` under five of them. `FPaxosMajorityTwoIndexes` took 1 hour
 16 minutes on its own: 1.27 billion states generated, depth 35. At that size
 TLC's own estimate of the chance that a fingerprint collision hid a state is
 between 0.002 and 0.007, where for the others it is negligible.
@@ -115,7 +116,7 @@ between 0.002 and 0.007, where for the others it is negligible.
 
 `Reconfig.tla` is a second model, for `peace:change_members/3`, written and
 checked before the code. Members and quorum systems are decided in the log
-and move through a joint configuration; a candidate needs a phase-1 quorum
+and move through a joint configuration; a candidate needs a phase-one quorum
 of every configuration its promises give it reason to respect. The header of
 the module gives the argument. It is in the direction of the thesis's
 revision B (§4.2), which lets quorums vary by epoch and leaves open how a
@@ -123,7 +124,7 @@ proposer learns what the earlier ones were.
 
 `MCReconfig.tla` instantiates it with three acceptors and two configurations
 that share nobody: `a1` and `a2` under `{counting, 1, 2}`, and `a3` alone.
-Two ballots, two slots, one command. The invariant is `DecidedAgree`.
+Two epochs, two indexes, one command. The invariant is `LearnedAgree`.
 
 | Config | Expect | Result |
 |---|---|---|
@@ -136,15 +137,15 @@ Two ballots, two slots, one command. The invariant is `DecidedAgree`.
 `ReconfigNoJoint` is in the quick set and the rest in the long one.
 
 The first version of this model failed, with both safeguards on, in nineteen
-steps: a deposed leader whose joint entry had lost took the slot being
+steps: a deposed leader whose joint entry had lost took the index being
 decided for its entry being decided, and went on to `final`. The model had
 left out the rule that a contradicted leader stops, which `FlexiblePaxos.tla`
 has as `ConflictStepDown`. So membership change depends on that rule, and
 the model now says so.
 
-**Limits.** Two slots are enough for a whole change, joint then final, and
+**Limits.** Two indexes are enough for a whole change, joint then final, and
 for the final entry to be decided by the new configuration alone, but not
-for a command after it; three slots did not finish. The commit index and
+for a command after it; three indexes did not finish. The commit index and
 snapshots are not in this model, and neither model combines them with
 membership change. The simulation does.
 

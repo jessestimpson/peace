@@ -151,6 +151,28 @@ joint_configuration_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
+%% Proposals sent to a phase-two quorum and no further (thesis section
+%% 4.3.3), under every workload:
+%% the servers left out learn by asking, and still have to end up the same.
+propose_to_quorum_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Flexible = #{servers => 5, quorum => {counting, 4, 2}, propose_to => quorum},
+        Row = fun(Is) -> [peace_dst:id(I) || I <- Is] end,
+        sweep(lists:seq(1, 20), fun(Seed) -> calm(Seed, Flexible) end),
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, Flexible) end),
+        sweep(lists:seq(1, 40), fun(Seed) ->
+            opts(Seed, #{servers => 4, quorum => {grid, [Row([1, 2]), Row([3, 4])]}, propose_to => quorum})
+        end),
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, #{servers => 5, churn => true, propose_to => quorum}) end),
+        sweep(lists:seq(1, 40), fun(Seed) ->
+            opts(Seed, #{servers => 5, reconfigure => true, propose_to => quorum, read_lease_ms => 40})
+        end),
+        #{runs := Runs, acknowledged := Acked, leaderships := Leaderships} = Stats = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(Leaderships > Runs, Stats)
+    end}.
+
 %% Read leases, under both workloads. Reads are answered from the leader's
 %% state whenever it holds a lease, and are held to the same check as reads
 %% that go through the log.
@@ -211,7 +233,7 @@ amnesia_is_caught_test_() ->
         ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
     end}.
 
-%% A deposed leader that learns a slot went against it and leads on gets a
+%% A deposed leader that learns an index went against it and leads on gets a
 %% follower to decide the value that lost. With the guard, the same seed is
 %% clean.
 stale_leader_is_caught_test_() ->
@@ -226,7 +248,7 @@ stale_leader_is_caught_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
-%% A candidate that leads on a promise from a server that has dropped slots
+%% A candidate that leads on a promise from a server that has dropped indexes
 %% the candidate never saw puts its own commands in them.
 snapshot_guard_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->

@@ -7,8 +7,8 @@
 EXTENDS FlexiblePaxos, TLC
 
 CONSTANTS
-    Q1Size,     \* counting quorums: a phase-1 quorum is any Q1Size acceptors
-    Q2Size,     \* counting quorums: a phase-2 quorum is any Q2Size acceptors
+    Q1Size,     \* counting quorums: a phase-one quorum is any Q1Size acceptors
+    Q2Size,     \* counting quorums: a phase-two quorum is any Q2Size acceptors
     GridRows    \* grid quorums: a set of disjoint rows covering Acceptors
 
 \* peace_quorum: `majority` and `{counting, Q1, Q2}`.  Safe iff
@@ -18,8 +18,8 @@ CONSTANTS
 CountQ1 == {Q \in SUBSET Acceptors : Cardinality(Q) = Q1Size}
 CountQ2 == {Q \in SUBSET Acceptors : Cardinality(Q) = Q2Size}
 
-\* peace_quorum: `{grid, Rows}`.  Phase 1 needs one acceptor from every row
-\* (a "column", not necessarily straight); phase 2 needs one whole row.
+\* peace_quorum: `{grid, Rows}`.  Phase one needs one acceptor from every row
+\* (a "column", not necessarily straight); phase two needs one whole row.
 \* With two rows of two this is the thesis's example of section 4.1.3.  A
 \* set that meets every row meets any one row, so they always intersect,
 \* while two rows do not: replication survives the loss of all rows but one.

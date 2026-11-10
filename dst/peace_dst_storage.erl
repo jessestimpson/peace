@@ -20,7 +20,7 @@ open(Id, Args = #{tab := Tab}) ->
     Stored1 =
         case promised(Tab, Id) of
             undefined -> Stored0;
-            Ballot -> Stored0#{promised => Ballot}
+            Epoch -> Stored0#{promised => Epoch}
         end,
     Stored =
         case ets:lookup(Tab, {Id, snapshot}) of
@@ -34,7 +34,7 @@ write(Batch, State = {Tab, Id}) ->
     Entries = [{{Id, I}, Entry} || {I, Entry} <- maps:get(entries, Batch, [])],
     true = ets:insert(Tab, Promised ++ Entries),
     %% The harness's record of what was decided is kept here, at the write,
-    %% and not read off the disks between steps: a server may decide a slot
+    %% and not read off the disks between steps: a server may decide an index
     %% and drop it under a snapshot in the one step.
     lists:foreach(
         fun
@@ -70,7 +70,7 @@ close(_State) ->
 
 promised(Tab, Id) ->
     case ets:lookup(Tab, {Id, promised}) of
-        [{_, Ballot}] -> Ballot;
+        [{_, Epoch}] -> Epoch;
         [] -> undefined
     end.
 

@@ -21,8 +21,8 @@ open({Name, Node}, #{dir := Dir}) ->
     {ok, Tab} = dets:open_file(Tab, [{file, to_list(File)}, {type, set}, {auto_save, infinity}]),
     Stored = dets:foldl(
         fun
-            ({?PROMISED, Ballot}, Acc) ->
-                Acc#{promised => Ballot};
+            ({?PROMISED, Epoch}, Acc) ->
+                Acc#{promised => Epoch};
             ({?SNAPSHOT, Snapshot}, Acc) ->
                 Acc#{snapshot => Snapshot};
             ({Index, Entry}, Acc = #{entries := Entries}) when is_integer(Index) ->

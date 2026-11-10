@@ -28,26 +28,26 @@
 %%   back in its receive loop, having sent whatever it was going to send,
 %%   this is "persist before you reply" observed from outside.</li>
 %% <li>`promise_never_regresses' - a server's durable promise only grows.</li>
-%% <li>`agreement' - no slot is ever decided with two values, by anybody, at
-%%   any time in the run. TLA+ `DecidedAgree'.</li>
+%% <li>`agreement' - no index is ever decided with two values, by anybody, at
+%%   any time in the run. TLA+ `LearnedAgree'.</li>
 %% <li>`applied_matches_decided' - a server's machine has applied exactly the
 %%   decided log up to its commit index, in order, each session's command
 %%   once. The decided log is the harness's own record, so this holds a
 %%   server that was sent a snapshot to the same account as one that
 %%   applied every entry.</li>
 %% <li>`acknowledged_is_decided' - a client told `{ok, Index}' finds its
-%%   command decided at that slot.</li>
+%%   command decided at that index.</li>
 %% <li>`applied_once' - no machine has applied a command twice, however many
-%%   slots a client's retries put it in.</li>
+%%   indexes a client's retries put it in.</li>
 %% <li>`linearizable_read' - a consistent query returns a prefix of the
 %%   decided log that contains every command acknowledged before the query
 %%   was issued.</li>
 %% </ul>
 %%
 %% and at the end of a run with `converge' on: every server has applied the
-%% same slots to the same state and at least one command was acknowledged.
+%% same indexes to the same state and at least one command was acknowledged.
 %%
-%% Servers snapshot every few slots, so that truncation, recovery from a
+%% Servers snapshot every few indexes, so that truncation, recovery from a
 %% snapshot and catching up by one are part of every run. Clients submit
 %% under a session and retry when they cannot tell what happened.
 %%
@@ -70,16 +70,16 @@
 %%   `formal/FPaxosUnsafeQuorums.cfg'.</li>
 %% <li>`amnesia' - a disk that comes back empty after a restart.</li>
 %% <li>`no_snapshot_guard' - a candidate leads on a promise from an acceptor
-%%   that has dropped slots the candidate never learned. The same change as
+%%   that has dropped indexes the candidate never learned. The same change as
 %%   `formal/FPaxosNoSnapshotGuard.cfg'.</li>
 %% <li>`no_joint' - a change of membership goes straight to the new
 %%   configuration. The same change as `formal/ReconfigNoJoint.cfg'.</li>
-%% <li>`no_lease_fence' - with read leases on, servers promise other ballots
+%% <li>`no_lease_fence' - with read leases on, servers promise other epochs
 %%   while a leader still counts on them, and a deposed leader answers a
 %%   read from its own stale state.</li>
 %% <li>`bare_retries' - clients retry without a session, and a command is
 %%   applied twice. Not a bug in peace: it shows `applied_once' can fail.</li>
-%% <li>`no_conflict_step_down' - a leader that learns a slot was decided
+%% <li>`no_conflict_step_down' - a leader that learns an index was decided
 %%   against its own proposal goes on leading. The same change as
 %%   `formal/FPaxosNoConflictStepDown.cfg'.</li>
 %% </ul>
@@ -95,7 +95,7 @@
 %% <li>`{split, I, J}' - two servers are cut off together from the rest, so
 %%   that a leader can keep a follower while a new leader rises without
 %%   either of them hearing of it.</li>
-%% <li>`{rumour, I}' - a server receives `learned' for the latest slots
+%% <li>`{rumour, I}' - a server receives `learned' for the latest indexes
 %%   anybody has decided, through any cut. It stands for an answer to a
 %%   catch-up request that was sent long ago and is only now arriving, and
 %%   it is the TLA+ `CatchUp' action, which the model allows anybody at any
@@ -298,7 +298,7 @@ execute({split, I, J}, S = #{n := N}) ->
     bump(splits),
     S;
 execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
-    Decided = lists:sort([{Slot, Command} || [Slot, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
+    Decided = lists:sort([{Index, Command} || [Index, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
     case lists:nthtail(max(0, length(Decided) - 4), Decided) of
         [] ->
             S;
@@ -424,12 +424,12 @@ promise_never_regresses(Tab, Disks) ->
     end.
 
 %% Read from the disks, not from the servers, so that a server that decided
-%% something and was then killed still counts. Each slot's value is
+%% something and was then killed still counts. Each index's value is
 %% remembered the first time anybody decides it and compared ever after.
 agreement(Tab, Disks) ->
     Conflicts =
         [
-            #{slot => I, server => Id, decided => Command, earlier => Earlier}
+            #{index => I, server => Id, decided => Command, earlier => Earlier}
          || {Id, _Promised, Stored} <- Disks,
             {I, {decided, Command}} <- lists:sort(maps:to_list(Stored)),
             Earlier <- [remembered(Tab, {decided, I}, Command)],
@@ -437,7 +437,7 @@ agreement(Tab, Disks) ->
         ] ++
             %% Noted by the disk at the write: see `peace_dst_storage'.
             [
-                #{slot => I, server => Id, decided => Command, earlier => Earlier}
+                #{index => I, server => Id, decided => Command, earlier => Earlier}
              || [I, Id, Command, Earlier] <- ets:match(Tab, {{conflict, '$1', '$2'}, '$3', '$4'})
             ],
     case Conflicts of
@@ -459,7 +459,7 @@ applied_matches_decided(Views, Record) ->
         _ -> violation(applied_matches_decided, #{servers => Wrong})
     end.
 
-%% What a machine holds after the first `Commit' slots of the decided log:
+%% What a machine holds after the first `Commit' indexes of the decided log:
 %% every command without a session, and each session's command the first
 %% time it appears. `missing' if the record does not reach that far, which
 %% no server's commit index may run ahead of.
@@ -602,7 +602,7 @@ remembered(Tab, Key, Value) ->
 stored_promised(Tab, Id) ->
     case peace_dst_storage:promised(Tab, Id) of
         undefined -> {0, none};
-        Ballot -> Ballot
+        Epoch -> Epoch
     end.
 
 %% ---------------------------------------------------------------------------
@@ -625,11 +625,7 @@ server_config(_I, Id, Founders, Mode, Tab, Config) ->
         %% and sends one.
         snapshot_interval => maps:get(snapshot_interval, Config, 5)
     },
-    Leased =
-        case Config of
-            #{read_lease_ms := LeaseMs} -> Base#{read_lease_ms => LeaseMs};
-            _ -> Base
-        end,
+    Leased = maps:merge(Base, maps:with([read_lease_ms, propose_to], Config)),
     case Mode of
         correct ->
             Leased;
@@ -766,7 +762,7 @@ bump(Key, By) ->
     end,
     ok.
 
-%% Ballots somebody led with. More than one in a run means leadership moved.
+%% Epochs somebody led with. More than one in a run means leadership moved.
 note_leaders(Views) ->
     lists:foreach(
         fun
@@ -799,7 +795,7 @@ record_stats(Tab) ->
     bump(rejected, length([ok || {rejected, _} <- Results])),
     bump(unknown, length([ok || {unknown, _} <- Results])),
     bump(queries_answered, length(ets:match(Tab, {{query, '_'}, '_', {ok, '_'}}))),
-    bump(slots_decided, length(ets:match(Tab, {{decided, '_'}, '_'}))),
+    bump(indexes_decided, length(ets:match(Tab, {{decided, '_'}, '_'}))),
     bump(reconfigured, length(ets:match(Tab, {{reconfigure, '_'}, {ok, '_'}}))),
     bump(
         configurations,
