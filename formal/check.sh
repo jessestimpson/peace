@@ -16,6 +16,11 @@ elif [ -f tla2tools.jar ]; then
 else
   JAR="vendor/tla2tools-v1.8.0.jar"
 fi
+# The module a config instantiates goes by the config's name.
+case "$CFG" in
+  Reconfig*) MODULE="MCReconfig.tla" ;;
+  *) MODULE="MCFlexiblePaxos.tla" ;;
+esac
 OUT="$(mktemp)"
 # A private metadir per run, so concurrent invocations cannot delete each
 # other's state pools.
@@ -29,7 +34,7 @@ set +e
 # of enabled actions once every ballot and slot is used up.
 java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
   -workers auto -deadlock -noGenerateSpecTE -metadir "$META" \
-  -config "${CFG}.cfg" MCFlexiblePaxos.tla 2>&1 | tee "$OUT"
+  -config "${CFG}.cfg" "$MODULE" 2>&1 | tee "$OUT"
 STATUS=${PIPESTATUS[0]}
 set -e
 

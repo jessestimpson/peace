@@ -44,6 +44,8 @@
     local_query/3,
     members/1,
     members/2,
+    change_members/3,
+    change_members/4,
     overview/1,
     trigger_election/1
 ]).
@@ -54,6 +56,7 @@
     index/0,
     role/0,
     server_config/0,
+    command_opts/0,
     cluster_opts/0
 ]).
 
@@ -73,7 +76,18 @@
     %% Default 1000.
     election_timeout_ms => pos_integer(),
     %% Default a fifth of the election timeout.
-    heartbeat_ms => pos_integer()
+    heartbeat_ms => pos_integer(),
+    %% A server snapshots its machine state and drops its log every this many
+    %% applied slots. Default 4096; `infinity' for never.
+    snapshot_interval => pos_integer() | infinity,
+    %% How many clients' sessions are remembered. Must be the same on every
+    %% member. Default 10000.
+    max_sessions => pos_integer(),
+    %% Lets a leader answer `consistent_query' from its own state. Must be
+    %% the same on every member, at most the election timeout, and assumes
+    %% clocks that run within ten per cent of each other. Off by default.
+    %% See "Read leases" in `peace_core'.
+    read_lease_ms => pos_integer()
 }.
 
 -type server_config() :: #{
@@ -84,9 +98,20 @@
     storage => peace_storage:storage(),
     election_timeout_ms => pos_integer(),
     heartbeat_ms => pos_integer(),
+    snapshot_interval => pos_integer() | infinity,
+    max_sessions => pos_integer(),
+    read_lease_ms => pos_integer(),
     %% For tests that plant a bug, to show a check can fail. Never set these.
     unsafe_no_quorum_check => boolean(),
-    unsafe_no_conflict_step_down => boolean()
+    unsafe_no_conflict_step_down => boolean(),
+    unsafe_no_snapshot_guard => boolean(),
+    unsafe_no_lease_fence => boolean()
+}.
+
+%% `session' makes the command safe to retry: see `process_command/3'.
+-type command_opts() :: #{
+    timeout => timeout(),
+    session => {ClientId :: term(), Seq :: non_neg_integer()}
 }.
 
 -type command_ret() ::
@@ -177,14 +202,35 @@ process_command(ServerOrServers, Command) ->
 %% `Reply' is what the machine returned.
 %%
 %% `{timeout, Server}', `{error, leadership_lost}' and
-%% `{error, {server_down, Reason}}' mean the outcome is unknown: the command may be applied later, or never. peace does not
-%% deduplicate, so a command that is retried after either must be safe to
-%% apply twice, or carry an id the machine can recognise.
+%% `{error, {server_down, Reason}}' mean the outcome is unknown: the command
+%% may be applied later, or never.
 %%
 %% `{error, no_leader}', `{error, noproc}' and `{error, too_many_redirects}'
 %% mean the command was not submitted.
--spec process_command(server_id() | [server_id()], peace_machine:command(), timeout()) ->
+%%
+%% The third argument is a timeout, or options. With
+%% `session => {ClientId, Seq}' a command whose outcome is unknown can be
+%% submitted again with the same session and will be applied at most once;
+%% the retry is answered with the reply the first application got. A client
+%% picks an id nobody else uses, has one command in flight at a time, and
+%% gives each new command a higher `Seq' than the last. A copy of a command
+%% the client has since moved on from is answered
+%% `{error, {session_superseded, Seq}}' and not applied. Without a session,
+%% a retried command may be applied twice.
+-spec process_command(server_id() | [server_id()], peace_machine:command(), timeout() | command_opts()) ->
     command_ret().
+process_command(ServerOrServers, Command, Opts) when is_map(Opts) ->
+    Timeout = maps:get(timeout, Opts, ?DEFAULT_CALL_TIMEOUT_MS),
+    Request =
+        case Opts of
+            #{session := Session = {_ClientId, Seq}} when is_integer(Seq), Seq >= 0 ->
+                {command, Command, Session};
+            #{session := Bad} ->
+                error({badarg, {session, Bad}});
+            _ ->
+                {command, Command}
+        end,
+    leader_call(servers(ServerOrServers), Request, Timeout, ?MAX_HOPS, no_leader);
 process_command(ServerOrServers, Command, Timeout) ->
     leader_call(servers(ServerOrServers), {command, Command}, Timeout, ?MAX_HOPS, no_leader).
 
@@ -203,7 +249,9 @@ consistent_query(ServerOrServers, Fun) ->
 
 %% @doc Runs `Fun' on the machine state at a point in the log that follows
 %% every command acknowledged before the query was made: a linearizable read.
-%% It is ordered by replicating a no-op, so it costs what a command costs.
+%% It is ordered by replicating a no-op, so it costs what a command costs,
+%% unless the cluster has `read_lease_ms' set and the leader holds a lease,
+%% in which case it is answered at once from the leader's state.
 -spec consistent_query(server_id() | [server_id()], fun((peace_machine:state()) -> Result), timeout()) ->
     {ok, Result, server_id()} | {error, term()} | {timeout, server_id()}.
 consistent_query(ServerOrServers, Fun, Timeout) when is_function(Fun, 1) ->
@@ -234,6 +282,36 @@ members(Server) ->
     {ok, [server_id()], Leader :: server_id() | undefined} | {error, term()} | {timeout, server_id()}.
 members(Server, Timeout) ->
     call(Server, members, Timeout).
+
+%% @equiv change_members(ServerOrServers, Members, Quorum, 5000)
+-spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> command_ret().
+change_members(ServerOrServers, Members, Quorum) ->
+    change_members(ServerOrServers, Members, Quorum, ?DEFAULT_CALL_TIMEOUT_MS).
+
+%% @doc Changes who the members are, how they form quorums, or both.
+%%
+%% Any configuration to any other: adding, removing, replacing every member,
+%% or keeping the members and changing the quorum system. The cluster passes
+%% through a joint configuration, in which a command needs a phase-2 quorum
+%% of the old and of the new, so there is no moment at which the two could
+%% decide separately. `{ok, ok, Leader}' means the new configuration alone
+%% is in force.
+%%
+%% A server being added must be running first. Start it with `members' set
+%% to the cluster as it is now, without the new server in it:
+%% `start_server(#{id => New, members => Current, ...})'. It waits to be
+%% told. A server that is removed stops taking part and may then be stopped.
+%% If the leader is removed it sees the change through and stands down.
+%%
+%% The change survives a change of leader: `{error, leadership_lost}' and a
+%% timeout mean it may yet complete, and `members/1' says whether it has.
+%% One change at a time: `{error, reconfiguration_in_progress}'. A new
+%% configuration needs a phase-2 quorum of its own members reachable, or
+%% nothing more is decided until they are.
+-spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec(), timeout()) ->
+    command_ret().
+change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) ->
+    leader_call(servers(ServerOrServers), {reconfigure, {Members, Quorum}}, Timeout, ?MAX_HOPS, no_leader).
 
 %% @doc A snapshot of one server's view, for people and for tests.
 -spec overview(server_id()) -> map() | {error, term()} | {timeout, server_id()}.

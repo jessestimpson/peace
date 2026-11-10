@@ -12,6 +12,8 @@ peace_test_() ->
         fun leader_failover/1,
         fun flexible_quorum_survives_what_majority_cannot/1,
         fun durable_restart/1,
+        fun sessions_snapshots_and_leases/1,
+        fun change_members/1,
         fun machine_effects/1,
         fun unsafe_quorum_is_refused/1
     ]}.
@@ -110,6 +112,81 @@ durable_restart(Ids0) ->
             #{promised := {Round, _}} = peace:overview(NewLeader),
             ?assert(Round >= 2)
         end)}.
+
+%% The three together, through the public API and the dets backend.
+sessions_snapshots_and_leases(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    Dir = filename:join([
+        filename:basedir(user_cache, "peace_tests"),
+        integer_to_list(erlang:unique_integer([positive]))
+    ]),
+    Opts = (fast())#{
+        storage => {peace_storage_dets, #{dir => Dir}},
+        snapshot_interval => 3,
+        read_lease_ms => 100
+    },
+    Config = fun(Id) -> Opts#{id => Id, members => Ids, machine => ?TEST_MACHINE} end,
+    {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
+        ?_test(begin
+            {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
+            Leader = await_leader(Ids),
+            Put = fun(N) -> peace:process_command(Ids, {put, N, N}, #{session => {me, N}}) end,
+            [{ok, ok, Leader} = Put(N) || N <- lists:seq(1, 7)],
+            %% A retry of the last command changes nothing and is answered.
+            {ok, ok, Leader} = Put(7),
+            %% Nor does a late copy of an earlier one, which is refused.
+            {error, {session_superseded, 7}} = Put(2),
+            #{snapshot_index := Snapshot, sessions := 1} = peace:overview(Leader),
+            ?assert(Snapshot >= 6),
+            %% A read under a lease takes no slot.
+            %% On a machine too busy to keep the heartbeat the lease lapses
+            %% and the read goes through the log, so look for one that
+            %% did not.
+            ok = await(fun() ->
+                #{last_index := Before} = peace:overview(Leader),
+                {ok, 7, Leader} = peace:consistent_query(Leader, fun(#{kv := KV}) -> map_size(KV) end),
+                case peace:overview(Leader) of
+                    #{last_index := Before} -> {ok, ok};
+                    _ -> retry
+                end
+            end),
+            %% Everybody restarts from a snapshot and the tail of the log.
+            [ok = peace:stop_server(Id) || Id <- Ids],
+            [ok = peace:start_server(Config(Id)) || Id <- Ids],
+            NewLeader = await_leader(Ids),
+            {ok, 7, NewLeader} = peace:consistent_query(Ids, fun(#{kv := KV}) -> map_size(KV) end),
+            %% The session table came back too.
+            {ok, ok, NewLeader} = Put(7),
+            {ok, 7, NewLeader} = peace:process_command(NewLeader, {get, 7})
+        end)}.
+
+%% One server out and one in, on real processes.
+change_members(Ids0) ->
+    [A, B, C, D | _] = Ids0,
+    Old = [A, B, C],
+    ?_test(begin
+        {ok, Old, []} = peace:start_cluster(Old, ?TEST_MACHINE, ?FAST),
+        Leader = await_leader(Old),
+        {ok, ok, Leader} = peace:process_command(Old, {put, a, 1}),
+        %% The newcomer is told who the cluster is, and waits.
+        ok = peace:start_server((fast())#{id => D, members => Old, machine => ?TEST_MACHINE}),
+        [Gone | Stay] = [Leader | Old -- [Leader]],
+        New = lists:sort([D | Stay]),
+        {ok, ok, Leader} = peace:change_members(Old, New, majority),
+        %% The leader removed itself, saw it through and stood down.
+        NewLeader = await_leader(New),
+        ?assert(lists:member(NewLeader, New)),
+        {ok, New, NewLeader} = peace:members(NewLeader),
+        ok = peace:stop_server(Gone),
+        {ok, 1, NewLeader} = peace:process_command(New, {get, a}),
+        %% The newcomer has the history from before it arrived.
+        ok = await(fun() ->
+            case history(D) of
+                [{_, {put, a, 1}}, {_, {get, a}}] -> {ok, ok};
+                _ -> retry
+            end
+        end)
+    end).
 
 machine_effects(Ids0) ->
     Ids = lists:sublist(Ids0, 3),

@@ -33,7 +33,8 @@ conforms(Mod, Seed) ->
     with_dir(fun(Dir) ->
         lists:foldl(
             fun(_Round, {Model0, Rand0}) ->
-                {Batches, Rand1} = batches(Rand0),
+                {Raw, Rand1} = batches(Rand0),
+                Batches = lawful(Raw, Model0),
                 {Roll, Rand2} = rand:uniform_s(Rand1),
                 End =
                     case Roll < 0.5 of
@@ -96,14 +97,33 @@ in_owner(Mod, Dir, Fun) ->
     end,
     Stored.
 
+%% What `peace_core' never writes is left out: an entry at or below the
+%% snapshot, and a snapshot older than the one there is.
+lawful([], _Model) ->
+    [];
+lawful([Batch0 | Rest], Model) ->
+    {Floor, _} = maps:get(snapshot, Model, {0, none}),
+    Batch1 =
+        case Batch0 of
+            #{snapshot := {Index, _}} when Index =< Floor -> maps:remove(snapshot, Batch0);
+            _ -> Batch0
+        end,
+    {Floor1, _} = maps:get(snapshot, Batch1, {Floor, none}),
+    Batch =
+        case Batch1 of
+            #{entries := Entries} -> Batch1#{entries := [E || E = {I, _} <- Entries, I > Floor1]};
+            _ -> Batch1
+        end,
+    [Batch | lawful(Rest, apply_batch(Batch, Model))].
+
 batches(Rand0) ->
     {N, Rand1} = rand:uniform_s(8, Rand0),
     lists:mapfoldl(fun(_, R) -> batch(R) end, Rand1, lists:seq(1, N)).
 
-%% Promises, entries, both or neither, over few enough slots that entries
-%% are overwritten, as an acceptor overwrites them.
+%% Promises, entries, both, neither or a snapshot, over few enough slots that
+%% entries are overwritten, as an acceptor overwrites them, and dropped.
 batch(Rand0) ->
-    {Kind, Rand1} = rand:uniform_s(4, Rand0),
+    {Kind, Rand1} = rand:uniform_s(5, Rand0),
     {Round, Rand2} = rand:uniform_s(50, Rand1),
     {Count, Rand3} = rand:uniform_s(5, Rand2),
     {Entries, Rand4} = lists:mapfoldl(
@@ -127,7 +147,9 @@ batch(Rand0) ->
             1 -> #{promised => {Round, ?ID}};
             2 -> #{entries => Unique};
             3 -> #{promised => {Round, ?ID}, entries => Unique};
-            4 -> #{}
+            4 -> #{};
+            %% A snapshot, and with it only entries above it.
+            5 -> #{snapshot => {Count, {{state, Round}, #{}}}, entries => [E || E = {I, _} <- Unique, I > Count]}
         end,
     {Batch, Rand4}.
 
@@ -137,7 +159,10 @@ apply_batch(Batch, Model = #{entries := Entries}) ->
             #{promised := Ballot} -> Model#{promised => Ballot};
             _ -> Model
         end,
-    Model1#{entries := maps:merge(Entries, maps:from_list(maps:get(entries, Batch, [])))}.
+    Model2 = maps:merge(Model1, maps:with([snapshot], Batch)),
+    {Floor, _} = maps:get(snapshot, Model2, {0, none}),
+    Merged = maps:merge(Entries, maps:from_list(maps:get(entries, Batch, []))),
+    Model2#{entries := maps:filter(fun(I, _) -> I > Floor end, Merged)}.
 
 with_dir(Fun) ->
     Dir = filename:join([

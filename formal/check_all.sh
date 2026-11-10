@@ -6,12 +6,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-QUICK_PASS="FPaxosMajority FPaxosSingleton FPaxosAllAboard FPaxosEvenNodes"
+QUICK_PASS="FPaxosMajority FPaxosSingleton FPaxosAllAboard FPaxosEvenNodes FPaxosSnapshots"
 # Mutations: each must produce a counterexample.
-QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown"
+QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown FPaxosNoSnapshotGuard ReconfigNoJoint"
 # Reachability: each must reach the state its invariant denies.
-QUICK_REACH="FPaxosReachableChosen FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict"
-LONG_PASS="FPaxosThreeBallots FPaxosGrid FPaxosSingletonTwoSlots FPaxosMajorityTwoSlots"
+QUICK_REACH="FPaxosReachableChosen FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict FPaxosReachableSnapshot"
+LONG_PASS="FPaxosThreeBallots FPaxosGrid FPaxosSingletonTwoSlots FPaxosMajorityTwoSlots Reconfig"
+# Membership change: a mutation and two reachability checks that take minutes.
+LONG_FAIL="ReconfigNoClosure ReconfigReachableFinal ReconfigReachableRaised"
 
 run() { # config expectation
   echo "=== $1 (expect $2)"
@@ -35,5 +37,6 @@ if [ "$SET" = quick ] || [ "$SET" = all ]; then
 fi
 if [ "$SET" = long ] || [ "$SET" = all ]; then
   for c in $LONG_PASS; do run "$c" pass; done
+  for c in $LONG_FAIL; do run "$c" fail; done
 fi
 echo "all $SET configs behaved as expected"

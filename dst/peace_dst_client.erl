@@ -8,7 +8,7 @@
 
 -include("peace_eta.hrl").
 
--export([command/4, query/3, restart/1, deliver/3]).
+-export([command/5, query/3, reconfigure/5, restart/1, deliver/3]).
 
 -define(CALL_TIMEOUT_MS, 200).
 -define(RETRY_AFTER_MS, 60).
@@ -16,10 +16,20 @@
 
 %% Submits one command and records what the client was told. `Op' is unique
 %% to this operation, so the harness can find the command in the log.
-command(Tab, N, Servers, Op) ->
+%%
+%% `Retry' is what the client does when it cannot tell what happened:
+%% `session' submits again under the same session, which is what sessions
+%% are for; `bare' submits again without one, which is the mistake they
+%% prevent; `none' gives up.
+command(Tab, N, Servers, Op, Retry) ->
     ?ETA_LABEL({client, N}),
     true = ets:insert(Tab, {{op, Op}, invoked}),
-    Result = submit(fun() -> peace:process_command(Servers, {put, Op}, ?CALL_TIMEOUT_MS) end, ?ATTEMPTS),
+    Opts =
+        case Retry of
+            session -> #{timeout => ?CALL_TIMEOUT_MS, session => {N, 1}};
+            _ -> #{timeout => ?CALL_TIMEOUT_MS}
+        end,
+    Result = submit(fun() -> peace:process_command(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
     _ = ?ETA_LOG({client, N, Op, Result}),
     true = ets:insert(Tab, {{op, Op}, Result}),
     ok.
@@ -36,10 +46,20 @@ query(Tab, N, Servers) ->
                 Servers, fun(History) -> [Op || {_I, {put, Op}} <- History] end, ?CALL_TIMEOUT_MS
             )
         end,
-        ?ATTEMPTS
+        ?ATTEMPTS,
+        false
     ),
     _ = ?ETA_LOG({client, N, query, element(1, Result)}),
     true = ets:insert(Tab, {{query, N}, lists:sort(Before), Result}),
+    ok.
+
+%% Asks for a change of membership. Not retried: whether it happened is in
+%% the log, and the next request finds out.
+reconfigure(Tab, N, Servers, Members, Quorum) ->
+    ?ETA_LABEL({client, N}),
+    Result = submit(fun() -> peace:change_members(Servers, Members, Quorum, ?CALL_TIMEOUT_MS) end, ?ATTEMPTS, false),
+    _ = ?ETA_LOG({client, N, reconfigure, element(1, Result)}),
+    true = ets:insert(Tab, {{reconfigure, N}, Result}),
     ok.
 
 %% Brings a killed server back, from inside the schedule: a start from the
@@ -58,18 +78,21 @@ restart(Config) ->
             ok
     end.
 
-%% Retries only the answers that mean the request was never submitted.
-%% Anything else, a timeout included, may have been: the client stops and
-%% reports the outcome as unknown.
-submit(Fun, Attempts) ->
+%% Always retries the answers that mean the request was never submitted.
+%% Anything else, a timeout included, may have been, and is retried only if
+%% `Again': otherwise the client stops and reports the outcome as unknown.
+submit(Fun, Attempts, Again) ->
     case Fun() of
         {ok, Reply, _Leader} ->
             {ok, Reply};
         {error, Reason} when Attempts > 1, (Reason =:= no_leader orelse Reason =:= noproc) ->
             timer:sleep(?RETRY_AFTER_MS),
-            submit(Fun, Attempts - 1);
+            submit(Fun, Attempts - 1, Again);
         {error, Reason} when Reason =:= no_leader; Reason =:= noproc; Reason =:= too_many_redirects ->
             {rejected, Reason};
+        _Unknown when Again, Attempts > 1 ->
+            timer:sleep(?RETRY_AFTER_MS),
+            submit(Fun, Attempts - 1, Again);
         Other ->
             {unknown, Other}
     end.

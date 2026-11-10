@@ -47,6 +47,14 @@
 (*     FPaxosNoConflictStepDown.cfg is the protocol without it.            *)
 (*   - An acceptor holding a decided slot still answers a 2a for it        *)
 (*     without changing what it holds (`Phase2b`, second disjunct).        *)
+(*   - Snapshots.  An acceptor may drop a slot it knows is decided, as     *)
+(*     peace drops its log below a snapshot (`Snapshot`).  It still knows   *)
+(*     the slot is decided, but its 1b no longer says what it accepted      *)
+(*     there, only that the slot is dropped.  A proposer that took silence  *)
+(*     to mean "free" could have a second value chosen, so it does not      *)
+(*     propose in a slot any promise reported dropped (`SnapshotGuard`);    *)
+(*     peace abandons the whole campaign and catches up.                    *)
+(*     FPaxosNoSnapshotGuard.cfg is the protocol without it.                *)
 (*   - Message loss, duplication and reordering: `msgs` is a set that      *)
 (*     only grows and nothing is ever obliged to be received.              *)
 (*                                                                         *)
@@ -80,9 +88,14 @@ CONSTANTS
     None,           \* the value of an empty vote, and the owner of an unused ballot
     FenceAccept,    \* TRUE: an acceptor refuses a 2a below its promise.
                     \* FALSE is a mutation; see FPaxosNoFence.cfg.
-    ConflictStepDown \* TRUE: a leader that learns a slot was decided against
+    ConflictStepDown, \* TRUE: a leader that learns a slot was decided against
                     \* its own proposal stops advertising commits.  FALSE is
                     \* a mutation; see FPaxosNoConflictStepDown.cfg.
+    Snapshots,      \* TRUE: acceptors may drop decided slots.  FALSE keeps
+                    \* the state space of configs that are about other things.
+    SnapshotGuard   \* TRUE: a proposer does not propose in a slot a promise
+                    \* reported dropped.  FALSE is a mutation; see
+                    \* FPaxosNoSnapshotGuard.cfg.
 
 VARIABLES
     promised,       \* promised[a]: highest ballot a has promised, 0 if none
@@ -90,9 +103,10 @@ VARIABLES
     owner,          \* owner[b]: the acceptor that started ballot b, or None.
                     \* peace ballots are {Round, ServerId} pairs, so a ballot
                     \* has exactly one possible leader.
-    msgs            \* every message ever sent
+    msgs,           \* every message ever sent
+    dropped         \* dropped[a]: the slots a has dropped under a snapshot
 
-vars == <<promised, accepted, owner, msgs>>
+vars == <<promised, accepted, owner, msgs, dropped>>
 
 Ballots == 1..MaxBallot
 Slots   == 1..MaxSlot
@@ -107,7 +121,8 @@ Vote == [bal : Ballots \cup {Decided}, val : Values] \cup {NoVote}
 
 Message ==
          [type : {"1a"}, bal : Ballots]
-    \cup [type : {"1b"}, bal : Ballots, acc : Acceptors, votes : [Slots -> Vote]]
+    \cup [type : {"1b"}, bal : Ballots, acc : Acceptors, votes : [Slots -> Vote],
+          dropped : SUBSET Slots]
     \cup [type : {"2a"}, bal : Ballots, slot : Slots, val : Values]
     \cup [type : {"2b"}, bal : Ballots, slot : Slots, acc : Acceptors]
     \cup [type : {"commit"}, bal : Ballots, slot : Slots]
@@ -117,12 +132,14 @@ TypeOK ==
     /\ accepted \in [Acceptors -> [Slots -> Vote]]
     /\ owner \in [Ballots -> Acceptors \cup {None}]
     /\ msgs \subseteq Message
+    /\ dropped \in [Acceptors -> SUBSET Slots]
 
 Init ==
     /\ promised = [a \in Acceptors |-> 0]
     /\ accepted = [a \in Acceptors |-> [s \in Slots |-> NoVote]]
     /\ owner = [b \in Ballots |-> None]
     /\ msgs = {}
+    /\ dropped = [a \in Acceptors |-> {}]
 
 Send(m) == msgs' = msgs \cup {m}
 
@@ -147,17 +164,21 @@ Phase1a(a, b) ==
     /\ owner[b] = None
     /\ owner' = [owner EXCEPT ![b] = a]
     /\ Send([type |-> "1a", bal |-> b])
-    /\ UNCHANGED <<promised, accepted>>
+    /\ UNCHANGED <<promised, accepted, dropped>>
 
-(* peace: `{promise, Ballot, Entries}`.  Strictly greater, so an acceptor   *)
-(* answers a given ballot at most once and a proposer never sees two        *)
-(* different reports from the same acceptor.                                *)
+(* peace: `{promise, Ballot, Entries, Snapshot}`.  Strictly greater, so an  *)
+(* acceptor answers a given ballot at most once and a proposer never sees   *)
+(* two different reports from the same acceptor.  Of a dropped slot it      *)
+(* reports no vote, and that it is dropped.                                 *)
 Phase1b(a, b) ==
     /\ [type |-> "1a", bal |-> b] \in msgs
     /\ b > promised[a]
     /\ promised' = [promised EXCEPT ![a] = b]
-    /\ Send([type |-> "1b", bal |-> b, acc |-> a, votes |-> accepted[a]])
-    /\ UNCHANGED <<accepted, owner>>
+    /\ Send([type |-> "1b", bal |-> b, acc |-> a,
+             votes |-> [s \in Slots |-> IF s \in dropped[a] THEN NoVote
+                                                            ELSE accepted[a][s]],
+             dropped |-> dropped[a]])
+    /\ UNCHANGED <<accepted, owner, dropped>>
 
 (* peace: on a phase-1 quorum of promises the new leader re-proposes, for   *)
 (* every slot anybody reported, the value reported at the highest ballot,   *)
@@ -168,12 +189,13 @@ Phase2a(b, s, v) ==
           LET reports == {m \in msgs : m.type = "1b" /\ m.bal = b /\ m.acc \in Q}
               votes   == {m.votes[s] : m \in reports}
           IN  /\ \A a \in Q : \E m \in reports : m.acc = a
+              /\ SnapshotGuard => \A m \in reports : s \notin m.dropped
               /\ \/ \A vt \in votes : vt.bal = -1
                  \/ \E vt \in votes :
                        /\ vt.bal = Max({w.bal : w \in votes})
                        /\ vt.val = v
     /\ Send([type |-> "2a", bal |-> b, slot |-> s, val |-> v])
-    /\ UNCHANGED <<promised, accepted, owner>>
+    /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
 (* peace: `{accept, Ballot, Entries, Commit}` answered by `{accepted, ...}`.*)
 (* A slot already known decided is acknowledged and left alone: the         *)
@@ -190,7 +212,7 @@ Phase2b(a, b, s) ==
                 ELSE accepted' = [accepted EXCEPT ![a][s] =
                                     [bal |-> b, val |-> m.val]]
     /\ Send([type |-> "2b", bal |-> b, slot |-> s, acc |-> a])
-    /\ UNCHANGED owner
+    /\ UNCHANGED <<owner, dropped>>
 
 -----------------------------------------------------------------------------
 (* Learning.                                                                *)
@@ -209,7 +231,7 @@ LeaderDecide(b, s) ==
           /\ ChosenAt(b, s, v)
           /\ accepted' = [accepted EXCEPT ![owner[b]][s] =
                              [bal |-> Decided, val |-> v]]
-    /\ UNCHANGED <<promised, owner, msgs>>
+    /\ UNCHANGED <<promised, owner, msgs, dropped>>
 
 \* The leader of b holds a slot decided with a value other than the one it
 \* proposed there.  Only a later ballot can have chosen that value.
@@ -227,7 +249,7 @@ SendCommit(b, s) ==
     /\ accepted[owner[b]][s].bal = Decided
     /\ ConflictStepDown => ~ Conflict(b)
     /\ Send([type |-> "commit", bal |-> b, slot |-> s])
-    /\ UNCHANGED <<promised, accepted, owner>>
+    /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
 (* peace: a follower marks decided each slot the leader's commit index      *)
 (* covers, provided its own entry there is from that leader's ballot.  An   *)
@@ -239,16 +261,26 @@ FollowerCommit(a, b, s) ==
     /\ accepted[a][s].bal = b
     /\ promised' = [promised EXCEPT ![a] = b]
     /\ accepted' = [accepted EXCEPT ![a][s].bal = Decided]
-    /\ UNCHANGED <<owner, msgs>>
+    /\ UNCHANGED <<owner, msgs, dropped>>
 
-(* peace: `{catchup, From}` answered by `{learned, Entries}`, and decided   *)
-(* entries carried in a `promise`.  A decided slot never changes, so        *)
-(* copying it atomically loses nothing against copying it by message.       *)
+(* peace: `{catchup, From}` answered by `{learned, Entries}` or, from a     *)
+(* server that has dropped the entries, by `{install, Index, State}`; and   *)
+(* decided entries carried in a `promise`.  A decided slot never changes,   *)
+(* so copying it atomically loses nothing against copying it by message.    *)
 CatchUp(a, from, s) ==
     /\ accepted[from][s].bal = Decided
     /\ accepted[a][s].bal # Decided
     /\ accepted' = [accepted EXCEPT ![a][s] = accepted[from][s]]
-    /\ UNCHANGED <<promised, owner, msgs>>
+    /\ UNCHANGED <<promised, owner, msgs, dropped>>
+
+(* peace: a server writes a snapshot and drops its log up to there.  Only   *)
+(* decided slots are ever under a snapshot.                                 *)
+Snapshot(a, s) ==
+    /\ Snapshots
+    /\ accepted[a][s].bal = Decided
+    /\ s \notin dropped[a]
+    /\ dropped' = [dropped EXCEPT ![a] = @ \cup {s}]
+    /\ UNCHANGED <<promised, accepted, owner, msgs>>
 
 Next ==
     \/ \E a \in Acceptors, b \in Ballots : Phase1a(a, b)
@@ -259,6 +291,7 @@ Next ==
     \/ \E b \in Ballots, s \in Slots : SendCommit(b, s)
     \/ \E a \in Acceptors, b \in Ballots, s \in Slots : FollowerCommit(a, b, s)
     \/ \E a, from \in Acceptors, s \in Slots : CatchUp(a, from, s)
+    \/ \E a \in Acceptors, s \in Slots : Snapshot(a, s)
 
 Spec == Init /\ [][Next]_vars
 
@@ -305,6 +338,10 @@ NothingLearned == \A a \in Acceptors, s \in Slots : accepted[a][s].bal # Decided
 
 \* Never does every acceptor know every slot: followers never finish learning.
 NotAllLearned == \E a \in Acceptors, s \in Slots : accepted[a][s].bal # Decided
+
+\* No ballot is ever promised by an acceptor that has dropped a slot, i.e.
+\* the SnapshotGuard guards nothing.
+NoPromiseAfterSnapshot == \A m \in msgs : m.type = "1b" => m.dropped = {}
 
 \* A leader never finds itself contradicted, i.e. the ConflictStepDown guard
 \* guards nothing.

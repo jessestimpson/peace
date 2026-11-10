@@ -9,6 +9,9 @@
 %%   the marker `decided' once it knows the entry was chosen).</li>
 %% </ul>
 %%
+%% and a third stands in for entries that have been dropped: a snapshot, the
+%% machine state as of some slot, below which the log is no longer kept.
+%%
 %% `peace_server' writes both before it sends the reply that depends on
 %% them, and the `write/2' callback must not return until the data would
 %% survive whatever failure the deployment is meant to survive.
@@ -27,13 +30,20 @@
 %% What a server recovers on start.
 -type stored() :: #{
     promised => peace:ballot(),
-    entries => #{peace:index() => peace_core:entry()}
+    entries => #{peace:index() => peace_core:entry()},
+    snapshot => {peace:index(), peace_core:snapshot()}
 }.
 
-%% One atomic write. Either key may be absent.
+%% One atomic write. Any key may be absent.
+%%
+%% `snapshot' replaces the stored snapshot and deletes every entry at or
+%% below its index; the entries of the same batch are all above it. A backend
+%% that cannot do both at once writes the snapshot first: `peace_core'
+%% ignores entries under the snapshot it recovers.
 -type batch() :: #{
     promised => peace:ballot(),
-    entries => [{peace:index(), peace_core:entry()}]
+    entries => [{peace:index(), peace_core:entry()}],
+    snapshot => {peace:index(), peace_core:snapshot()}
 }.
 
 -callback open(peace:server_id(), Args :: term()) -> {ok, State :: term(), stored()}.

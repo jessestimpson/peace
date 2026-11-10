@@ -30,18 +30,35 @@
 %% <li>`promise_never_regresses' - a server's durable promise only grows.</li>
 %% <li>`agreement' - no slot is ever decided with two values, by anybody, at
 %%   any time in the run. TLA+ `DecidedAgree'.</li>
-%% <li>`applied_matches_decided' - a server's machine has applied exactly its
-%%   decided prefix, in order.</li>
+%% <li>`applied_matches_decided' - a server's machine has applied exactly the
+%%   decided log up to its commit index, in order, each session's command
+%%   once. The decided log is the harness's own record, so this holds a
+%%   server that was sent a snapshot to the same account as one that
+%%   applied every entry.</li>
 %% <li>`acknowledged_is_decided' - a client told `{ok, Index}' finds its
 %%   command decided at that slot.</li>
-%% <li>`decided_once' - no command occupies two slots.</li>
+%% <li>`applied_once' - no machine has applied a command twice, however many
+%%   slots a client's retries put it in.</li>
 %% <li>`linearizable_read' - a consistent query returns a prefix of the
 %%   decided log that contains every command acknowledged before the query
 %%   was issued.</li>
 %% </ul>
 %%
-%% and at the end of a run with `converge' on: every server has the same
-%% decided log and at least one command was acknowledged.
+%% and at the end of a run with `converge' on: every server has applied the
+%% same slots to the same state and at least one command was acknowledged.
+%%
+%% Servers snapshot every few slots, so that truncation, recovery from a
+%% snapshot and catching up by one are part of every run. Clients submit
+%% under a session and retry when they cannot tell what happened.
+%%
+%% == Membership ==
+%%
+%% With `reconfigure' on, the first three servers are the cluster and the
+%% rest are running outside it, waiting to be told. One more operation asks
+%% whoever leads to move to another configuration from a fixed list: other
+%% members, more, fewer, none in common, another quorum system. Everything
+%% above is checked as before, across every configuration the run passes
+%% through, and convergence is asked of the members of the last one.
 %%
 %% == Planted bugs ==
 %%
@@ -52,6 +69,16 @@
 %%   server's own validation switched off. The same constants as
 %%   `formal/FPaxosUnsafeQuorums.cfg'.</li>
 %% <li>`amnesia' - a disk that comes back empty after a restart.</li>
+%% <li>`no_snapshot_guard' - a candidate leads on a promise from an acceptor
+%%   that has dropped slots the candidate never learned. The same change as
+%%   `formal/FPaxosNoSnapshotGuard.cfg'.</li>
+%% <li>`no_joint' - a change of membership goes straight to the new
+%%   configuration. The same change as `formal/ReconfigNoJoint.cfg'.</li>
+%% <li>`no_lease_fence' - with read leases on, servers promise other ballots
+%%   while a leader still counts on them, and a deposed leader answers a
+%%   read from its own stale state.</li>
+%% <li>`bare_retries' - clients retry without a session, and a command is
+%%   applied twice. Not a bug in peace: it shows `applied_once' can fail.</li>
 %% <li>`no_conflict_step_down' - a leader that learns a slot was decided
 %%   against its own proposal goes on leading. The same change as
 %%   `formal/FPaxosNoConflictStepDown.cfg'.</li>
@@ -93,7 +120,7 @@
     settle_done/1,
     terminate/1
 ]).
--export([stats/0, reset_stats/0, id/1]).
+-export([stats/0, reset_stats/0, id/1, bump/1]).
 
 -define(STATS, peace_dst_stats).
 
@@ -111,7 +138,17 @@ init(_Seed, Config) ->
     %% Ordered, so that reading one server's disk is a range and not a scan.
     Tab = ets:new(peace_dst, [public, ordered_set]),
     Ids = [id(I) || I <- lists:seq(1, N)],
-    Configs = maps:from_list([{I, server_config(I, Ids, Mode, Tab, Config)} || I <- lists:seq(1, N)]),
+    Reconfigure = maps:get(reconfigure, Config, false),
+    %% Who the cluster is to begin with. The others know it and wait.
+    Founders =
+        case Reconfigure of
+            true -> lists:sublist(Ids, 3);
+            false -> Ids
+        end,
+    Configs = maps:from_list([
+        {I, server_config(I, lists:nth(I, Ids), Founders, Mode, Tab, Config)}
+     || I <- lists:seq(1, N)
+    ]),
     ok = clear_leftovers(N),
     Pids = [start(maps:get(I, Configs)) || I <- lists:seq(1, N)],
     ok = await_idle(Pids, 1000),
@@ -136,6 +173,12 @@ init(_Seed, Config) ->
         configs => Configs,
         faults => maps:get(faults, Config, true),
         churn => maps:get(churn, Config, false),
+        reconfigure => Reconfigure,
+        retry =>
+            case Mode of
+                bare_retries -> bare;
+                _ -> maps:get(retry, Config, session)
+            end,
         converge => maps:get(converge, Config, false),
         %% Every client process ever spawned, oldest first.
         ops => [],
@@ -152,7 +195,21 @@ processes(#{n := N, ops := Ops, sups := Sups}) ->
     [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)] ++
         [Pid || Pid <- Ops ++ Sups, is_process_alive(Pid)].
 
-generate(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
+generate(S = #{reconfigure := true}, Rand0) ->
+    %% One draw more than a run without, and only here, so that turning
+    %% this on does not change what every other seed means.
+    {Roll, Rand1} = rand:uniform_s(Rand0),
+    case Roll < 0.07 of
+        true ->
+            {K, Rand2} = rand:uniform_s(length(targets(S)), Rand1),
+            {{reconfigure, K}, Rand2};
+        false ->
+            generate1(S, Rand1)
+    end;
+generate(S, Rand) ->
+    generate1(S, Rand).
+
+generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
     {Roll, Rand1} = rand:uniform_s(Rand0),
     {I, Rand2} = rand:uniform_s(N, Rand1),
     Op =
@@ -183,7 +240,8 @@ generate(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
 execute({command, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
-    spawn_op(clients, fun() -> peace_dst_client:command(Tab, C, Servers, C) end, S#{clients := C});
+    Retry = maps:get(retry, S),
+    spawn_op(clients, fun() -> peace_dst_client:command(Tab, C, Servers, C, Retry) end, S#{clients := C});
 execute({query, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
@@ -219,6 +277,15 @@ execute({elect, I}, S = #{ids := Ids}) ->
     bump(forced_elections),
     Id = lists:nth(I, Ids),
     spawn_op(node_name(I), fun() -> peace:trigger_election(Id) end, S);
+execute({reconfigure, K}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
+    C = C0 + 1,
+    {Members, Quorum} = lists:nth(K, targets(S)),
+    Servers = rotate((K rem length(Ids)) + 1, Ids),
+    spawn_op(
+        clients,
+        fun() -> peace_dst_client:reconfigure(Tab, C, Servers, Members, Quorum) end,
+        S#{clients := C}
+    );
 execute({split, I, J}, S = #{n := N}) ->
     Others = lists:seq(1, N) -- [I, J],
     lists:foreach(
@@ -259,21 +326,22 @@ execute({restart, I}, S = #{configs := Configs}) ->
 check(#{tab := Tab, ids := Ids}) ->
     Views = [{Id, view(Id)} || Id <- Ids],
     Disks = [{Id, stored_promised(Tab, Id), peace_dst_storage:entries(Tab, Id)} || Id <- Ids],
+    Record = decided_record(Tab),
     ok = note_leaders(Views),
     first_violation([
-        fun() -> storage_matches_memory(Views, Disks) end,
+        fun() -> storage_matches_memory(Tab, Views, Disks) end,
         fun() -> promise_never_regresses(Tab, Disks) end,
         fun() -> agreement(Tab, Disks) end,
-        fun() -> applied_matches_decided(Views) end,
+        fun() -> applied_matches_decided(Views, Record) end,
         fun() -> acknowledged_is_decided(Tab) end,
-        fun() -> decided_once(Tab) end,
-        fun() -> linearizable_read(Tab) end
+        fun() -> applied_once(Views) end,
+        fun() -> linearizable_read(Tab, Record) end
     ]).
 
 check_final(_Settled, #{converge := false}) ->
     ok;
 check_final(Settled, #{tab := Tab, ids := Ids, converge := true}) ->
-    Logs = [{Id, peace_core:decided(Core)} || Id <- Ids, {live, Core} <- [view(Id)]],
+    Logs = [{Id, applied(Core)} || {Id, Core} <- current_members(Ids)],
     Acked = [Op || [Op] <- ets:match(Tab, {{op, '$1'}, {ok, '_'}})],
     case lists:usort([Log || {_Id, Log} <- Logs]) of
         [_One] when Acked =/= [] ->
@@ -291,7 +359,7 @@ check_final(Settled, #{tab := Tab, ids := Ids, converge := true}) ->
 settle_done(#{ops := Ops, converge := Converge, ids := Ids}) ->
     not lists:any(fun is_process_alive/1, Ops) andalso
         (not Converge orelse
-            case lists:usort([peace_core:decided(Core) || Id <- Ids, {live, Core} <- [view(Id)]]) of
+            case lists:usort([applied(Core) || {_Id, Core} <- current_members(Ids)]) of
                 [_One] -> true;
                 _ -> false
             end).
@@ -323,17 +391,19 @@ kill(Pids) ->
 %% Invariants
 %% ---------------------------------------------------------------------------
 
-storage_matches_memory(Views, Disks) ->
+storage_matches_memory(Tab, Views, Disks) ->
     Wrong = [
         {Id, #{
             promised => {peace_core:promised(Core), Promised},
+            snapshot => {peace_core:snapshot_index(Core), peace_dst_storage:snapshot_index(Tab, Id)},
             only_in_memory => maps:without(maps:keys(Stored), Log),
             only_on_disk => maps:without(maps:keys(Log), Stored),
             differ => [I || {I, E} <- maps:to_list(Log), maps:get(I, Stored, E) =/= E]
         }}
      || {{Id, {live, Core}}, {Id, Promised, Stored}} <- lists:zip(Views, Disks),
         Log <- [peace_core:log(Core)],
-        peace_core:promised(Core) =/= Promised orelse Log =/= Stored
+        peace_core:promised(Core) =/= Promised orelse Log =/= Stored orelse
+            peace_core:snapshot_index(Core) =/= peace_dst_storage:snapshot_index(Tab, Id)
     ],
     case Wrong of
         [] -> ok;
@@ -357,35 +427,100 @@ promise_never_regresses(Tab, Disks) ->
 %% something and was then killed still counts. Each slot's value is
 %% remembered the first time anybody decides it and compared ever after.
 agreement(Tab, Disks) ->
-    Conflicts = [
-        #{slot => I, server => Id, decided => Command, earlier => Earlier}
-     || {Id, _Promised, Stored} <- Disks,
-        {I, {decided, Command}} <- lists:sort(maps:to_list(Stored)),
-        Earlier <- [remembered(Tab, {decided, I}, Command)],
-        Earlier =/= Command
-    ],
+    Conflicts =
+        [
+            #{slot => I, server => Id, decided => Command, earlier => Earlier}
+         || {Id, _Promised, Stored} <- Disks,
+            {I, {decided, Command}} <- lists:sort(maps:to_list(Stored)),
+            Earlier <- [remembered(Tab, {decided, I}, Command)],
+            Earlier =/= Command
+        ] ++
+            %% Noted by the disk at the write: see `peace_dst_storage'.
+            [
+                #{slot => I, server => Id, decided => Command, earlier => Earlier}
+             || [I, Id, Command, Earlier] <- ets:match(Tab, {{conflict, '$1', '$2'}, '$3', '$4'})
+            ],
     case Conflicts of
         [] -> ok;
         _ -> violation(agreement, #{conflicts => Conflicts})
     end.
 
-applied_matches_decided(Views) ->
+applied_matches_decided(Views, Record) ->
     Wrong = [
         {Id, #{commit => Commit, applied => Applied, decided => Expected}}
      || {Id, {live, Core}} <- Views,
         Commit <- [peace_core:commit_index(Core)],
-        Decided <- [peace_core:decided(Core)],
         Applied <- [lists:reverse(peace_core:machine_state(Core))],
-        Expected <- [
-            [{I, Command} || I <- lists:seq(1, Commit), {usr, Command} <- [maps:get(I, Decided, missing)]]
-        ],
-        Applied =/= Expected orelse
-            not lists:all(fun(I) -> maps:is_key(I, Decided) end, lists:seq(1, Commit))
+        Expected <- [expected(Commit, Record)],
+        Applied =/= Expected
     ],
     case Wrong of
         [] -> ok;
         _ -> violation(applied_matches_decided, #{servers => Wrong})
     end.
+
+%% What a machine holds after the first `Commit' slots of the decided log:
+%% every command without a session, and each session's command the first
+%% time it appears. `missing' if the record does not reach that far, which
+%% no server's commit index may run ahead of.
+expected(Commit, Record) ->
+    expected(1, Commit, Record, #{}, []).
+
+expected(I, Commit, _Record, _Sessions, Acc) when I > Commit ->
+    lists:reverse(Acc);
+expected(I, Commit, Record, Sessions, Acc) ->
+    case Record of
+        #{I := {'$usr', _Tag, Command}} ->
+            expected(I + 1, Commit, Record, Sessions, [{I, Command} | Acc]);
+        #{I := {'$ses', _Tag, {Client, Seq}, Command}} ->
+            case Sessions of
+                #{Client := Last} when Last >= Seq ->
+                    expected(I + 1, Commit, Record, Sessions, Acc);
+                _ ->
+                    expected(I + 1, Commit, Record, Sessions#{Client => Seq}, [{I, Command} | Acc])
+            end;
+        #{I := {'$noop', _Tag}} ->
+            expected(I + 1, Commit, Record, Sessions, Acc);
+        #{I := {'$cfg', _Tag, _Cfg}} ->
+            expected(I + 1, Commit, Record, Sessions, Acc);
+        _ ->
+            {missing, I}
+    end.
+
+decided_record(Tab) ->
+    maps:from_list([{I, Command} || [I, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]).
+
+%% The live members of the latest configuration anybody has: the one in
+%% force at whoever has applied most. A server that was removed stops being
+%% told anything and is not expected to keep up.
+current_members(Ids) ->
+    Live = [{Id, Core} || Id <- Ids, {live, Core} <- [view(Id)]],
+    case lists:sort([{peace_core:commit_index(Core), Id} || {Id, Core} <- Live]) of
+        [] ->
+            [];
+        Sorted ->
+            {_Commit, Furthest} = lists:last(Sorted),
+            Members = peace_core:members(proplists:get_value(Furthest, Live)),
+            [{Id, Core} || {Id, Core} <- Live, lists:member(Id, Members)]
+    end.
+
+%% The configurations a run moves between. Over five servers: back to the
+%% founders, a set that shares one server with them, everybody with two to
+%% commit, a pair with nothing in common with the founders, and four.
+targets(#{ids := Ids}) ->
+    Pick = fun(Is) -> [lists:nth(I, Ids) || I <- Is, I =< length(Ids)] end,
+    [
+        {Pick([1, 2, 3]), majority},
+        {Pick([3, 4, 5]), majority},
+        {Pick([1, 2, 3, 4, 5]), {counting, 4, 2}},
+        {Pick([4, 5]), majority},
+        {Pick([1, 2, 4, 5]), {counting, 3, 2}}
+    ].
+
+%% What is compared between servers at the end: how far each has applied,
+%% and to what.
+applied(Core) ->
+    {peace_core:commit_index(Core), peace_core:machine_state(Core)}.
 
 acknowledged_is_decided(Tab) ->
     Wrong = [
@@ -399,38 +534,49 @@ acknowledged_is_decided(Tab) ->
         _ -> violation(acknowledged_is_decided, #{commands => Wrong})
     end.
 
-decided_once(Tab) ->
-    Slots = lists:sort([{Op, I} || [I, {'$usr', _Tag, {put, Op}}] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
-    case [{Op, I, J} || {{Op, I}, {Op, J}} <- lists:zip(lists:droplast([x | Slots]), Slots)] of
+applied_once(Views) ->
+    Twice = [
+        {Id, lists:usort(Ops -- lists:usort(Ops))}
+     || {Id, {live, Core}} <- Views,
+        Ops <- [[Op || {_I, {put, Op}} <- peace_core:machine_state(Core)]],
+        length(Ops) =/= length(lists:usort(Ops))
+    ],
+    case Twice of
         [] -> ok;
-        Twice -> violation(decided_once, #{commands => Twice})
+        _ -> violation(applied_once, #{servers => Twice})
     end.
 
-linearizable_read(Tab) ->
+linearizable_read(Tab, Record) ->
     Wrong = [
         #{query => N, missing => Before -- Saw, saw => Saw}
      || [N, Before, Saw] <- ets:match(Tab, {{query, '$1'}, '$2', {ok, '$3'}}),
-        Before -- Saw =/= [] orelse not is_decided_prefix(Tab, lists:reverse(Saw))
+        Before -- Saw =/= [] orelse not is_applied_prefix(Record, lists:reverse(Saw))
     ],
     case Wrong of
         [] -> ok;
         _ -> violation(linearizable_read, #{queries => Wrong})
     end.
 
-%% Whether `Ops', oldest first, is exactly the commands of some prefix of the
-%% decided log.
-is_decided_prefix(Tab, Ops) ->
-    Decided = [
-        Op
-     || {_I, Command} <- lists:sort([{I, C} || [I, C] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
-        {'$usr', _Tag, {put, Op}} <- [Command]
-    ],
-    lists:prefix(Ops, Decided).
+%% Whether `Ops', oldest first, is what a machine holds after some prefix of
+%% the decided log.
+is_applied_prefix(Record, Ops) ->
+    Last = lists:max([0 | maps:keys(Record)]),
+    lists:any(
+        fun(Commit) ->
+            case expected(Commit, Record) of
+                {missing, _} -> false;
+                Applied -> [Op || {_I, {put, Op}} <- Applied] =:= Ops
+            end
+        end,
+        lists:seq(0, Last)
+    ).
 
 decided_at(Tab, Index) ->
     case ets:lookup(Tab, {decided, Index}) of
         [{_, {'$usr', _Tag, Command}}] -> Command;
+        [{_, {'$ses', _Tag, _Session, Command}}] -> Command;
         [{_, {'$noop', _Tag}}] -> noop;
+        [{_, {'$cfg', _Tag, _Cfg}}] -> cfg;
         [] -> undecided
     end.
 
@@ -463,26 +609,42 @@ stored_promised(Tab, Id) ->
 %% The cluster
 %% ---------------------------------------------------------------------------
 
-server_config(I, Ids, Mode, Tab, Config) ->
+server_config(_I, Id, Founders, Mode, Tab, Config) ->
     Base = #{
-        id => lists:nth(I, Ids),
-        members => Ids,
+        id => Id,
+        members => Founders,
         machine => {module, peace_dst_machine, []},
         quorum => maps:get(quorum, Config, majority),
         storage => {peace_dst_storage, #{tab => Tab}},
         %% Short against the pace of the workload. A run injects its
         %% operations within a few virtual seconds, so an election that took
         %% one of them would leave most clients with nobody to talk to.
-        election_timeout_ms => 50,
-        heartbeat_ms => 10
+        election_timeout_ms => maps:get(election_timeout_ms, Config, 50),
+        heartbeat_ms => 10,
+        %% Often enough that every run truncates, restarts from a snapshot
+        %% and sends one.
+        snapshot_interval => maps:get(snapshot_interval, Config, 5)
     },
+    Leased =
+        case Config of
+            #{read_lease_ms := LeaseMs} -> Base#{read_lease_ms => LeaseMs};
+            _ -> Base
+        end,
     case Mode of
         correct ->
-            Base;
+            Leased;
+        no_lease_fence ->
+            Leased#{unsafe_no_lease_fence => true};
+        no_joint ->
+            Leased#{unsafe_no_joint => true};
         unsafe_quorums ->
             Base#{quorum => {counting, 2, 1}, unsafe_no_quorum_check => true};
         no_conflict_step_down ->
             Base#{unsafe_no_conflict_step_down => true};
+        no_snapshot_guard ->
+            Base#{unsafe_no_snapshot_guard => true};
+        bare_retries ->
+            Base;
         amnesia ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}
     end.
@@ -638,5 +800,10 @@ record_stats(Tab) ->
     bump(unknown, length([ok || {unknown, _} <- Results])),
     bump(queries_answered, length(ets:match(Tab, {{query, '_'}, '_', {ok, '_'}}))),
     bump(slots_decided, length(ets:match(Tab, {{decided, '_'}, '_'}))),
+    bump(reconfigured, length(ets:match(Tab, {{reconfigure, '_'}, {ok, '_'}}))),
+    bump(
+        configurations,
+        length([ok || [{'$cfg', _Tag, {final, _}}] <- ets:match(Tab, {{decided, '_'}, '$1'})])
+    ),
     catch ets:match_delete(?STATS, {{led, '_', '_'}, '_'}),
     ok.

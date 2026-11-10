@@ -26,7 +26,9 @@
 ).
 log_event({msg, Peer, Msg}) -> {msg, Peer, element(1, Msg)};
 log_event({command, _From, _Command}) -> command;
+log_event({command, _From, _Command, _Session}) -> command;
 log_event({query, _From, _Fun}) -> query;
+log_event({reconfigure, _From, _New}) -> reconfigure;
 log_event(Event) -> Event.
 -else.
 -define(TRACE(Event, Core), ok).
@@ -66,7 +68,7 @@ init(Config = #{id := Id, members := Members}) ->
         ok ->
             {StorageMod, StorageArgs} = maps:get(storage, Config, {peace_storage_mem, #{}}),
             {ok, Storage, Stored} = peace_storage:open(StorageMod, Id, StorageArgs),
-            {Core, Effects} = peace_core:init(Config, Stored),
+            {Core, Effects} = peace_core:init(Config, Stored, now_ms()),
             ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
             State = #state{
                 core = Core,
@@ -82,6 +84,10 @@ init(Config = #{id := Id, members := Members}) ->
 
 handle_call({command, Command}, From, State) ->
     {noreply, event({command, From, Command}, State)};
+handle_call({command, Command, Session}, From, State) ->
+    {noreply, event({command, From, Command, Session}, State)};
+handle_call({reconfigure, New}, From, State) ->
+    {noreply, event({reconfigure, From, New}, State)};
 handle_call({consistent_query, Fun}, From, State) ->
     {noreply, event({query, From, Fun}, State)};
 handle_call({local_query, Fun}, _From, State = #state{core = Core}) ->
@@ -102,7 +108,7 @@ handle_call(_Other, _From, State) ->
 handle_cast({command, Command}, State) ->
     {noreply, event({command, undefined, Command}, State)};
 handle_cast(trigger_election, State) ->
-    {noreply, event(election_timeout, State)};
+    {noreply, event(force_election, State)};
 handle_cast(_Other, State) ->
     {noreply, State}.
 
@@ -138,10 +144,18 @@ check_quorum(#{unsafe_no_quorum_check := true}, _Members) ->
     %% For tests that need a broken cluster on purpose.
     ok;
 check_quorum(Config, Members) ->
-    peace_quorum:validate(maps:get(quorum, Config, majority), Members).
+    Election = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
+    case Config of
+        %% Not for safety: a follower bound for longer than it waits before
+        %% campaigning would only wait again.
+        #{read_lease_ms := Lease} when not is_integer(Lease); Lease < 1; Lease > Election ->
+            {error, {read_lease_must_not_exceed_election_timeout, Lease, Election}};
+        _ ->
+            peace_quorum:validate(maps:get(quorum, Config, majority), Members)
+    end.
 
 event(Event, State = #state{core = Core0}) ->
-    {Core, Effects} = peace_core:handle(Event, Core0),
+    {Core, Effects} = peace_core:handle(Event, now_ms(), Core0),
     _ = ?TRACE(Event, Core),
     perform(Effects, State#state{core = Core}).
 
@@ -157,22 +171,22 @@ persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
     {ok, Storage} = peace_storage:write(Mod, lists:foldl(fun merge_batch/2, #{}, Batches), Storage0),
     State#state{storage = Storage}.
 
-%% Later batches win, slot by slot.
+%% Later batches win, slot by slot, and a snapshot takes out of the write
+%% every entry it covers.
 merge_batch(Batch, Acc0) ->
-    Acc1 =
-        case Batch of
-            #{promised := Ballot} -> Acc0#{promised => Ballot};
-            _ -> Acc0
+    Acc1 = maps:merge(Acc0, maps:with([promised, snapshot], Batch)),
+    Entries = maps:merge(
+        maps:from_list(maps:get(entries, Acc1, [])),
+        maps:from_list(maps:get(entries, Batch, []))
+    ),
+    Floor =
+        case Acc1 of
+            #{snapshot := {Index, _}} -> Index;
+            _ -> 0
         end,
-    case Batch of
-        #{entries := Entries} ->
-            Merged = maps:merge(
-                maps:from_list(maps:get(entries, Acc1, [])),
-                maps:from_list(Entries)
-            ),
-            Acc1#{entries => lists:sort(maps:to_list(Merged))};
-        _ ->
-            Acc1
+    case lists:sort([E || E = {I, _} <- maps:to_list(Entries), I > Floor]) of
+        [] -> maps:remove(entries, Acc1);
+        Kept -> Acc1#{entries => Kept}
     end.
 
 effect({send, To, Msg}, State = #state{core = Core}) ->
@@ -206,6 +220,10 @@ send(To = {_Name, Node}, Msg, State = #state{connecting = Connecting}) ->
         _ ->
             State
     end.
+
+%% Module-qualified, so that a simulation can put its own clock behind it.
+now_ms() ->
+    erlang:monotonic_time(millisecond).
 
 cancel(Timer, State = #state{timers = Timers}) ->
     case maps:take(Timer, Timers) of

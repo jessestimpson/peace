@@ -115,6 +115,79 @@ churn_test_() ->
         ?assert(Rumours >= Runs * 5, Stats)
     end}.
 
+%% Membership changing under the run: three founders out of five servers,
+%% and requests to move to other members and other quorum systems arriving
+%% among the commands and the faults.
+membership_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 20), fun(Seed) ->
+            calm(Seed, #{servers => 5, reconfigure => true})
+        end),
+        sweep(lists:seq(1, 80), fun(Seed) -> opts(Seed, #{servers => 5, reconfigure => true}) end),
+        sweep(lists:seq(1, 80), fun(Seed) ->
+            opts(Seed, #{servers => 5, reconfigure => true, churn => true})
+        end),
+        sweep(lists:seq(1, 40), fun(Seed) ->
+            opts(Seed, #{servers => 5, reconfigure => true, churn => true, read_lease_ms => 40})
+        end),
+        #{runs := Runs, acknowledged := Acked, reconfigured := Told, configurations := Changes} =
+            Stats = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(Told >= Runs, Stats),
+        ?assert(Changes >= Runs, Stats)
+    end}.
+
+%% Straight to the new configuration, and the old and the new decide apart.
+joint_configuration_is_needed_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Config = #{servers => 5, reconfigure => true, churn => true},
+        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
+            opts(Seed, Config#{mode => no_joint})
+        end),
+        {violation, #{property := Property}} = maps:get(outcome, Result),
+        ?assert(lists:member(Property, [agreement, applied_matches_decided, acknowledged_is_decided]), Property),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
+    end}.
+
+%% Read leases, under both workloads. Reads are answered from the leader's
+%% state whenever it holds a lease, and are held to the same check as reads
+%% that go through the log.
+leases_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, #{read_lease_ms => 40}) end),
+        sweep(lists:seq(1, 60), fun(Seed) ->
+            opts(Seed, #{servers => 5, churn => true, read_lease_ms => 40})
+        end),
+        sweep(lists:seq(1, 40), fun(Seed) ->
+            opts(Seed, #{servers => 5, quorum => {counting, 4, 2}, churn => true, read_lease_ms => 40})
+        end),
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, long_lease()) end),
+        #{runs := Runs, queries_answered := Queries, leaderships := Leaderships} = Stats = peace_dst:stats(),
+        ?assert(Queries >= Runs * 2, Stats),
+        ?assert(Leaderships > Runs, Stats)
+    end}.
+
+long_lease() ->
+    #{servers => 3, churn => true, read_lease_ms => 200, election_timeout_ms => 200}.
+
+%% Without the fence a lease is a leader's unfounded belief, and a read sees
+%% a state that is missing acknowledged commands.
+lease_fence_is_needed_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        %% A lease long enough for a cut-off leader to be asked something
+        %% before it expires.
+        Config = long_lease(),
+        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
+            opts(Seed, Config#{mode => no_lease_fence})
+        end),
+        ?assertMatch({violation, #{property := linearizable_read}}, maps:get(outcome, Result)),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
+    end}.
+
 %% The suite can fail. Quorums that do not intersect lose agreement, and the
 %% failure shrinks to a trace that still reproduces it.
 unsafe_quorums_are_caught_test_() ->
@@ -151,6 +224,29 @@ stale_leader_is_caught_test_() ->
         Shrunk = eta_shrink:shrink(peace_dst, maps:get(trace, Result), opts(Seed, Planted)),
         ?assertMatch(#{verified := true}, Shrunk, eta_run:summary(Shrunk)),
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
+    end}.
+
+%% A candidate that leads on a promise from a server that has dropped slots
+%% the candidate never saw puts its own commands in them.
+snapshot_guard_is_needed_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Config = #{mode => no_snapshot_guard},
+        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) -> opts(Seed, Config) end),
+        {violation, #{property := Property}} = maps:get(outcome, Result),
+        ?assert(lists:member(Property, [agreement, applied_matches_decided, acknowledged_is_decided]), Property),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, #{}))), {seed, Seed})
+    end}.
+
+%% Clients that retry without a session get commands applied twice, which
+%% is what the suite's clients would be doing to every run without them.
+bare_retries_apply_twice_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        {_Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
+            opts(Seed, #{mode => bare_retries})
+        end),
+        ?assertMatch({violation, #{property := applied_once}}, maps:get(outcome, Result))
     end}.
 
 %% ---------------------------------------------------------------------------
@@ -193,4 +289,5 @@ exercised(Stats) ->
     ?assert(Leaderships > Runs, Stats),
     ?assert(Isolations >= Runs, Stats),
     ?assert(Crashes >= Runs, Stats),
-    ?assert(Restarts >= Runs div 2, Stats).
+    ?assert(Restarts >= Runs div 2, Stats),
+    ?assert(maps:get(snapshots, Stats, 0) >= Runs * 3, Stats).
