@@ -36,6 +36,8 @@ log_event(Event) -> Event.
 
 -record(state, {
     core :: peace_core:core(),
+    %% The rate of this server's clock, as a fraction. See `clock_rate/1'.
+    clock = {1, 1} :: {pos_integer(), pos_integer()},
     storage_mod :: module(),
     storage :: term(),
     election_ms :: pos_integer(),
@@ -68,10 +70,12 @@ init(Config = #{id := Id, members := Members}) ->
         ok ->
             {StorageMod, StorageArgs} = maps:get(storage, Config, {peace_storage_mem, #{}}),
             {ok, Storage, Stored} = peace_storage:open(StorageMod, Id, StorageArgs),
-            {Core, Effects} = peace_core:init(Config, Stored, now_ms()),
+            Clock = clock_rate(Config),
+            {Core, Effects} = peace_core:init(Config, Stored, now_ms(Clock)),
             ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
             State = #state{
                 core = Core,
+                clock = Clock,
                 storage_mod = StorageMod,
                 storage = Storage,
                 election_ms = ElectionMs,
@@ -140,10 +144,15 @@ terminate(_Reason, #state{storage_mod = Mod, storage = Storage}) ->
 %% Internals
 %% ---------------------------------------------------------------------------
 
-check_quorum(#{unsafe_no_quorum_check := true}, _Members) ->
-    %% For tests that need a broken cluster on purpose.
-    ok;
-check_quorum(Config, Members) ->
+-ifdef(TEST).
+%% A test build may ask for a broken cluster on purpose.
+check_quorum(#{unsafe_no_quorum_check := true}, _Members) -> ok;
+check_quorum(Config, Members) -> check_quorum1(Config, Members).
+-else.
+check_quorum(Config, Members) -> check_quorum1(Config, Members).
+-endif.
+
+check_quorum1(Config, Members) ->
     Election = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
     case Config of
         %% Not for safety: a follower bound for longer than it waits before
@@ -155,7 +164,7 @@ check_quorum(Config, Members) ->
     end.
 
 event(Event, State = #state{core = Core0}) ->
-    {Core, Effects} = peace_core:handle(Event, now_ms(), Core0),
+    {Core, Effects} = peace_core:handle(Event, now_ms(State#state.clock), Core0),
     _ = ?TRACE(Event, Core),
     perform(Effects, State#state{core = Core}).
 
@@ -222,8 +231,17 @@ send(To = {_Name, Node}, Msg, State = #state{connecting = Connecting}) ->
     end.
 
 %% Module-qualified, so that a simulation can put its own clock behind it.
-now_ms() ->
-    erlang:monotonic_time(millisecond).
+%% The rate is 1 except in a test build that asks for a clock that drifts.
+now_ms({Num, Den}) ->
+    erlang:monotonic_time(millisecond) * Num div Den.
+
+%% Read leases assume clocks that run at nearly the same rate. A test build
+%% can give a server one that does not, to test that assumption's margin.
+-ifdef(TEST).
+clock_rate(Config) -> maps:get(test_clock_rate, Config, {1, 1}).
+-else.
+clock_rate(_Config) -> {1, 1}.
+-endif.
 
 cancel(Timer, State = #state{timers = Timers}) ->
     case maps:take(Timer, Timers) of

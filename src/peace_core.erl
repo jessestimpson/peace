@@ -137,7 +137,8 @@
 %% here does. A restarted acceptor has forgotten what it was bound by and
 %% honours a full lease from the moment it starts. A leader reads from its
 %% own state only once everything its phase one recovered has been decided
-%% again. This part is not in the TLA+ model, which has no time.
+%% again. This part is not in the TLA+ model, which has no time; the margin
+%% is tested in `peace_core_tests' with clocks a tenth and a quarter apart.
 %%
 %% == Proposing to a phase-two quorum ==
 %%
@@ -387,7 +388,7 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
             end,
             Log
         ),
-        use_joint = not maps:get(unsafe_no_joint, Config, false),
+        use_joint = not ?PLANTED(unsafe_no_joint, Config),
         to_quorum = maps:get(propose_to, Config, all) =:= quorum,
         machine = Machine,
         mstate = MState,
@@ -400,8 +401,8 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
         seen = Promised,
         log = Log,
         last = lists:max([Snap | maps:keys(Log)]),
-        conflict_step_down = not maps:get(unsafe_no_conflict_step_down, Config, false),
-        snapshot_guard = not maps:get(unsafe_no_snapshot_guard, Config, false),
+        conflict_step_down = not ?PLANTED(unsafe_no_conflict_step_down, Config),
+        snapshot_guard = not ?PLANTED(unsafe_no_snapshot_guard, Config),
         now = Now,
         lease_ms = LeaseMs,
         %% Whatever lease this server granted before it stopped, it has
@@ -411,7 +412,7 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
                 undefined -> Now;
                 _ -> Now + LeaseMs
             end,
-        lease_fence = not maps:get(unsafe_no_lease_fence, Config, false)
+        lease_fence = not ?PLANTED(unsafe_no_lease_fence, Config)
     },
     %% A follower has nobody waiting and performs no machine effects, so
     %% replaying the log produces none.

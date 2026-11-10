@@ -9,4 +9,13 @@
 -define(DEFAULT_SNAPSHOT_INTERVAL, 4096).
 -define(DEFAULT_MAX_SESSIONS, 10000).
 
+%% Planted bugs. A test build can switch a safeguard off, to show that the
+%% check which depends on it can fail. In any other build the key is not read
+%% and the safeguard cannot be switched off.
+-ifdef(TEST).
+-define(PLANTED(Key, Config), (maps:get(Key, Config, false) =:= true)).
+-else.
+-define(PLANTED(Key, Config), false).
+-endif.
+
 -endif.

@@ -178,21 +178,30 @@ instead: forced elections, two-server splits and long-delayed `learned`
 messages. Servers snapshot every five indexes and clients retry under
 sessions, so truncation, recovery and catching up by snapshot are in every
 run. A third workload changes the membership as it goes, between five
-configurations of five servers. Seven planted bugs prove the suite can fail:
-quorums that do not intersect, a disk that forgets, the deposed leader and
-the candidate behind a snapshot of the model's mutations, a lease nobody
-honours, a change of membership with no joint step, and clients that retry
-without a session.
+configurations of five servers. A fourth puts the shipped dets backend
+behind the simulation's own disk and compares the two whenever a server
+reopens its file; its dets calls go to eta's stand-in, which keeps the file
+but is not dets. Leases are also run with two servers in three on clocks
+six per cent fast. Nine planted bugs prove the suite can fail: quorums that
+do not intersect, a disk that forgets, a dets backend that loses promises,
+the deposed leader and the candidate behind a snapshot of the model's
+mutations, a lease nobody honours, clocks ten times apart, a change of
+membership with no joint step, and clients that retry without a session.
+
+The switches that plant those bugs are compiled in only when `TEST` is
+defined, as `rebar3 eunit` defines it. A shipped build does not read them:
+no configuration can turn a safeguard off.
 
 **Ordinary tests** ([test/](test/)). The protocol core as a pure function,
 including TLC's counterexample for the deposed leader replayed against the
-code; quorum arithmetic; whole clusters on real processes; and the dets
-backend against the contract the simulation assumes of a disk, through
-closes and kills.
+code; a lease with followers' clocks a tenth fast, which holds, and a
+quarter fast, which does not; quorum arithmetic; whole clusters on real
+processes; and the dets backend, on real dets, against the contract the
+simulation assumes of a disk, through closes and kills.
 
 ```
 make test       # rebar3 eunit
-make dst        # rebar3 as dst eunit, on one scheduler thread (six to seven minutes)
+make dst        # rebar3 as dst eunit, on one scheduler thread (about eight minutes)
 make tlc        # formal/check_all.sh quick  (a few minutes)
 make tlc-long   # the configs with tens of millions of states
 ```

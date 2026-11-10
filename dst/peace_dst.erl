@@ -60,6 +60,13 @@
 %% above is checked as before, across every configuration the run passes
 %% through, and convergence is asked of the members of the last one.
 %%
+%% == Disks and clocks ==
+%%
+%% `disk => dets' runs the shipped `peace_storage_dets' behind the
+%% simulation's disk: see `peace_dst_storage'. `clock_drift => P' gives two
+%% servers in three a clock P per cent fast, which matters only to read
+%% leases; far enough beyond the tenth a lease allows for, a read is stale.
+%%
 %% == Planted bugs ==
 %%
 %% `mode' selects one, so that the suite can show each check is able to fail:
@@ -69,6 +76,8 @@
 %%   server's own validation switched off. The same constants as
 %%   `formal/FPaxosUnsafeQuorums.cfg'.</li>
 %% <li>`amnesia' - a disk that comes back empty after a restart.</li>
+%% <li>`lossy_disk' - with `disk => dets', the dets backend behind a layer
+%%   that does not write promises. It shows `disk_recovers' can fail.</li>
 %% <li>`no_snapshot_guard' - a candidate leads on a promise from an acceptor
 %%   that has dropped indexes the candidate never learned. The same change as
 %%   `formal/FPaxosNoSnapshotGuard.cfg'.</li>
@@ -134,7 +143,7 @@ init(_Seed, Config) ->
     %% dst/ is not part of the peace application, so `preload => [peace]'
     %% does not reach these, and a module loaded mid-run is a call to the
     %% code server that the schedule does not own.
-    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage]],
+    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk]],
     %% Ordered, so that reading one server's disk is a range and not a scan.
     Tab = ets:new(peace_dst, [public, ordered_set]),
     Ids = [id(I) || I <- lists:seq(1, N)],
@@ -150,6 +159,7 @@ init(_Seed, Config) ->
      || I <- lists:seq(1, N)
     ]),
     ok = clear_leftovers(N),
+    ok = clear_disk(),
     Pids = [start(maps:get(I, Configs)) || I <- lists:seq(1, N)],
     ok = await_idle(Pids, 1000),
     %% Every process the run sends between is placed on a simulated node:
@@ -329,6 +339,7 @@ check(#{tab := Tab, ids := Ids}) ->
     Record = decided_record(Tab),
     ok = note_leaders(Views),
     first_violation([
+        fun() -> disk_recovers(Tab) end,
         fun() -> storage_matches_memory(Tab, Views, Disks) end,
         fun() -> promise_never_regresses(Tab, Disks) end,
         fun() -> agreement(Tab, Disks) end,
@@ -372,7 +383,23 @@ terminate(S = #{tab := Tab, n := N}) ->
     ok = kill(maps:get(ops, S) ++ [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)]),
     ok = await_unregistered(N, 1000),
     catch ets:delete(Tab),
+    ok = clear_disk(),
     ok.
+
+%% Where `disk => dets' keeps its files. One place, emptied before and after
+%% each run, so that a run's name for it does not differ from the last one's.
+disk_dir() ->
+    filename:join(filename:basedir(user_cache, "peace_dst"), "disk").
+
+%% With `prim_file': the file server is a process no schedule owns.
+clear_disk() ->
+    Dir = disk_dir(),
+    case prim_file:list_dir(Dir) of
+        {ok, Names} ->
+            lists:foreach(fun(Name) -> ok = prim_file:delete(filename:join(Dir, Name)) end, Names);
+        {error, enoent} ->
+            ok
+    end.
 
 %% Kills and waits, so that nothing from this run is still dying into the next.
 kill(Pids) ->
@@ -390,6 +417,14 @@ kill(Pids) ->
 %% ---------------------------------------------------------------------------
 %% Invariants
 %% ---------------------------------------------------------------------------
+
+%% With `disk => dets': a server that opened its dets file found what it had
+%% written, which is to say what the simulation's own disk holds.
+disk_recovers(Tab) ->
+    case ets:match(Tab, {{disk_differs, '$1'}, '$2', '$3'}) of
+        [] -> ok;
+        Differ -> violation(disk_recovers, #{servers => [{Id, #{dets => D, wrote => W}} || [Id, D, W] <- Differ]})
+    end.
 
 storage_matches_memory(Tab, Views, Disks) ->
     Wrong = [
@@ -609,13 +644,21 @@ stored_promised(Tab, Id) ->
 %% The cluster
 %% ---------------------------------------------------------------------------
 
-server_config(_I, Id, Founders, Mode, Tab, Config) ->
+server_config(I, Id, Founders, Mode, Tab, Config) ->
+    Storage =
+        case {maps:get(disk, Config, model), Mode} of
+            {model, _} -> #{tab => Tab};
+            {dets, lossy_disk} ->
+                #{tab => Tab, node => node_name(I), disk => {peace_dst_lossy_disk, #{dir => disk_dir()}}};
+            {dets, _} ->
+                #{tab => Tab, node => node_name(I), disk => {peace_storage_dets, #{dir => disk_dir()}}}
+        end,
     Base = #{
         id => Id,
         members => Founders,
         machine => {module, peace_dst_machine, []},
         quorum => maps:get(quorum, Config, majority),
-        storage => {peace_dst_storage, #{tab => Tab}},
+        storage => {peace_dst_storage, Storage},
         %% Short against the pace of the workload. A run injects its
         %% operations within a few virtual seconds, so an election that took
         %% one of them would leave most clients with nobody to talk to.
@@ -625,7 +668,18 @@ server_config(_I, Id, Founders, Mode, Tab, Config) ->
         %% and sends one.
         snapshot_interval => maps:get(snapshot_interval, Config, 5)
     },
-    Leased = maps:merge(Base, maps:with([read_lease_ms, propose_to], Config)),
+    Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to], Config)),
+    %% Clocks that run at different rates: every third server's is true and
+    %% the others run fast by `clock_drift' per cent, so that they count a
+    %% lease out sooner than a true leader does. (A slow server is no
+    %% threat: it stays bound, and so out of elections, for longer.) The
+    %% simulation's own clock is the true one, and timers run on it.
+    Leased =
+        case {maps:get(clock_drift, Config, 0), I rem 3} of
+            {0, _} -> Leased0;
+            {_, 0} -> Leased0;
+            {Drift, _} -> Leased0#{test_clock_rate => {100 + Drift, 100}}
+        end,
     case Mode of
         correct ->
             Leased;
@@ -640,6 +694,8 @@ server_config(_I, Id, Founders, Mode, Tab, Config) ->
         no_snapshot_guard ->
             Base#{unsafe_no_snapshot_guard => true};
         bare_retries ->
+            Base;
+        lossy_disk ->
             Base;
         amnesia ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}

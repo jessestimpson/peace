@@ -109,11 +109,15 @@
     max_sessions => pos_integer(),
     read_lease_ms => pos_integer(),
     propose_to => all | quorum,
-    %% For tests that plant a bug, to show a check can fail. Never set these.
+    %% For tests that plant a bug, to show a check can fail. Read only in a
+    %% test build (`TEST' defined); ignored in any other.
     unsafe_no_quorum_check => boolean(),
     unsafe_no_conflict_step_down => boolean(),
     unsafe_no_snapshot_guard => boolean(),
-    unsafe_no_lease_fence => boolean()
+    unsafe_no_lease_fence => boolean(),
+    unsafe_no_joint => boolean(),
+    %% The rate of this server's clock, `{Num, Den}'. Test builds only.
+    test_clock_rate => {pos_integer(), pos_integer()}
 }.
 
 %% `session' makes the value safe to retry: see `propose/3'.

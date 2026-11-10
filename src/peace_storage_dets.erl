@@ -11,13 +11,17 @@
 
 -export([open/2, write/2, close/1]).
 
+-include("peace_eta.hrl").
+
 -define(PROMISED, '$promised').
 -define(SNAPSHOT, '$snapshot').
 
 open({Name, Node}, #{dir := Dir}) ->
     File = filename:join(Dir, lists:concat([Name, "@", Node, ".peace"])),
     ok = filelib:ensure_dir(File),
-    Tab = {?MODULE, Name, Node},
+    %% An atom, one per server: a dets table may be named by any term, but
+    %% the simulation's stand-in for dets wants an atom.
+    Tab = binary_to_atom(<<"peace_storage_dets/", (atom_to_binary(Name))/binary, "@", (atom_to_binary(Node))/binary>>),
     {ok, Tab} = dets:open_file(Tab, [{file, to_list(File)}, {type, set}, {auto_save, infinity}]),
     Stored = dets:foldl(
         fun

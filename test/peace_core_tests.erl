@@ -332,6 +332,35 @@ lease_holders_do_not_promise_test() ->
     S3 = run(ev(b, force_election, at(200, S2))),
     ?assertEqual(leader, role(b, S3)).
 
+%% The assumption a lease rests on: clocks within ten per cent of each other.
+%% Followers whose clocks run a tenth fast count their lease out early, at
+%% 1909 true milliseconds, where the leader trusts it until 1900.
+lease_holds_with_clocks_a_tenth_apart_test() ->
+    Fast = #{b => {11, 10}, c => {11, 10}},
+    S0 = run(ev(a, force_election, at(1000, rates(Fast, new([a, b, c], majority, #{read_lease_ms => 1000}))))),
+    Gone = [{a, b}, {a, c}, {b, a}, {c, a}],
+    %% The last instant the leader answers on the lease, nobody can replace it.
+    S1 = run(ev(a, {query, q1, fun(#{kv := KV}) -> KV end}, block(Gone, at(1899, S0)))),
+    ?assertMatch({ok, _, a}, proplists:get_value(q1, replies(S1))),
+    S2 = run(ev(b, force_election, S1)),
+    ?assertEqual(follower, role(b, S2)),
+    %% The first instant somebody can, the leader no longer does.
+    S3 = run(ev(b, force_election, at(1910, S2))),
+    ?assertEqual(leader, role(b, S3)),
+    S4 = run(ev(a, {query, q2, fun(#{kv := KV}) -> KV end}, at(1900, S2))),
+    ?assertEqual(undefined, proplists:get_value(q2, replies(S4))).
+
+%% And it is an assumption. With followers a quarter fast there is a time
+%% when one of them has been elected and the old leader still answers.
+lease_fails_with_clocks_a_quarter_apart_test() ->
+    Fast = #{b => {5, 4}, c => {5, 4}},
+    S0 = run(ev(a, force_election, at(1000, rates(Fast, new([a, b, c], majority, #{read_lease_ms => 1000}))))),
+    Gone = [{a, b}, {a, c}, {b, a}, {c, a}],
+    S1 = run(ev(b, force_election, block(Gone, at(1850, S0)))),
+    ?assertEqual(leader, role(b, S1)),
+    S2 = run(ev(a, {query, q1, fun(#{kv := KV}) -> KV end}, S1)),
+    ?assertMatch({ok, _, a}, proplists:get_value(q1, replies(S2))).
+
 %% A server that restarts has forgotten its lease, and honours a full one.
 lease_survives_a_restart_test() ->
     S0 = run(ev(a, force_election, at(100, new([a, b, c], majority, #{read_lease_ms => 100})))),
@@ -579,12 +608,18 @@ restart(Id, S = #{ids := Ids, quorum := Quorum, cores := Cores, store := Store})
 at(Now, S) ->
     S#{now => Now}.
 
+%% Gives servers clocks that run at `{Num, Den}' times the true rate. `at/2'
+%% sets true time, and each server reads it through its own clock.
+rates(Rates, S) ->
+    S#{rates => Rates}.
+
 %% Replaces the set of one-way links that lose everything sent on them.
 block(Pairs, S) ->
     S#{blocked := Pairs}.
 
 ev(Id, Event, S = #{cores := Cores}) ->
-    {Core, Effects} = peace_core:handle(Event, maps:get(now, S, 0), maps:get(Id, Cores)),
+    {Num, Den} = maps:get(Id, maps:get(rates, S, #{}), {1, 1}),
+    {Core, Effects} = peace_core:handle(Event, maps:get(now, S, 0) * Num div Den, maps:get(Id, Cores)),
     ok = persist_precedes_what_depends_on_it(Effects),
     lists:foldl(fun(E, Acc) -> effect(Id, E, Acc) end, S#{cores := Cores#{Id := Core}}, Effects).
 

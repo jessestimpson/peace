@@ -187,6 +187,9 @@ leases_test_() ->
             opts(Seed, #{servers => 5, quorum => {counting, 4, 2}, churn => true, read_lease_ms => 40})
         end),
         sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, long_lease()) end),
+        %% Two servers in three with clocks six per cent fast: inside the
+        %% tenth a lease allows for.
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, (long_lease())#{clock_drift => 6}) end),
         #{runs := Runs, queries_answered := Queries, leaderships := Leaderships} = Stats = peace_dst:stats(),
         ?assert(Queries >= Runs * 2, Stats),
         ?assert(Leaderships > Runs, Stats)
@@ -210,6 +213,22 @@ lease_fence_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
+%% A lease assumes clocks that run at nearly one rate. With two servers in
+%% three running ten times fast they are free of a lease long before a true
+%% leader stops counting on it, and a read is stale. Not a bug in peace: it
+%% shows the simulation can tell when the assumption is broken. About one
+%% seed in three hundred finds it, so the search starts near one that does.
+lease_needs_clocks_that_agree_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Config = long_lease(),
+        {Seed, Result} = first_violation(lists:seq(500, 1300), fun(Seed) ->
+            opts(Seed, Config#{clock_drift => 900})
+        end),
+        ?assertMatch({violation, #{property := linearizable_read}}, maps:get(outcome, Result)),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config#{clock_drift => 6}))), {seed, Seed})
+    end}.
+
 %% The suite can fail. Quorums that do not intersect lose agreement, and the
 %% failure shrinks to a trace that still reproduces it.
 unsafe_quorums_are_caught_test_() ->
@@ -231,6 +250,30 @@ amnesia_is_caught_test_() ->
             opts(Seed, #{mode => amnesia})
         end),
         ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
+    end}.
+
+%% The shipped dets backend under the same faults: every server that reopens
+%% its file finds what it wrote, across kills, snapshots and truncation.
+dets_backend_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, #{disk => dets}) end),
+        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{disk => dets, servers => 5, quorum => {counting, 4, 2}}) end),
+        Stats = #{snapshots := Snapshots} = peace_dst:stats(),
+        exercised(Stats),
+        ?assert(Snapshots > 0, Stats)
+    end}.
+
+%% And that check can fail: a backend that does not write promises.
+lossy_disk_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Config = #{disk => dets},
+        {Seed, Result} = first_violation(lists:seq(1, 100), fun(Seed) ->
+            opts(Seed, Config#{mode => lossy_disk})
+        end),
+        ?assertMatch({violation, #{property := disk_recovers}}, maps:get(outcome, Result)),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
 %% A deposed leader that learns an index went against it and leads on gets a

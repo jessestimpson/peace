@@ -2,10 +2,10 @@
 %% of writes, an open returns exactly what was written, whether the previous
 %% owner closed the store or was killed holding it.
 %%
-%% The simulation runs on a disk of its own (`peace_dst_storage'), because a
-%% dets table is served by processes the simulation's scheduler does not own.
-%% So this is where the shipped backend is held to the contract the
-%% simulation assumes of a disk.
+%% The simulation runs the dets backend too, but on eta's stand-in for dets:
+%% a real dets table is served by processes the simulation's scheduler does
+%% not own. So this is where the backend is held, on real dets, to the
+%% contract the simulation assumes of a disk.
 -module(peace_storage_tests).
 
 -include_lib("eunit/include/eunit.hrl").

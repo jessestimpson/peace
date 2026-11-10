@@ -4,6 +4,13 @@
 %% Args: `#{tab := ets:table()}', or with `amnesia => true' a disk that comes
 %% back empty after a restart, which is the planted bug of
 %% `peace_dst:init/2''s `amnesia' mode.
+%%
+%% With `disk => {Mod, Args}' every write goes to that backend as well, and
+%% a server that opens is given what that backend recovered, not what is
+%% here. If the two differ the difference is noted for `disk_recovers' to
+%% report. That is how the shipped `peace_storage_dets' is run under the
+%% simulation: its dets calls go to `eta_dets', which keeps the file but is
+%% not dets, so this tests the backend's use of dets and not dets.
 -module(peace_dst_storage).
 
 -behaviour(peace_storage).
@@ -27,9 +34,24 @@ open(Id, Args = #{tab := Tab}) ->
             [{_, Snapshot}] -> Stored1#{snapshot => Snapshot};
             [] -> Stored1
         end,
-    {ok, {Tab, Id}, Stored}.
+    case Args of
+        #{disk := {Mod, DiskArgs}, node := Node} ->
+            %% On the server's node by name: table names are per node, and
+            %% the first start of a server is before it is placed on one.
+            {ok, Disk, Recovered} = eta_net:with_node(Node, fun() -> peace_storage:open(Mod, Id, DiskArgs) end),
+            _ = Recovered =:= Stored orelse ets:insert(Tab, {{disk_differs, Id}, Recovered, Stored}),
+            {ok, {Tab, Id, {Mod, Disk, Node}}, Recovered};
+        _ ->
+            {ok, {Tab, Id, none}, Stored}
+    end.
 
-write(Batch, State = {Tab, Id}) ->
+write(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
+    %% Nothing between the two writes yields to the scheduler, so a kill
+    %% cannot fall between them.
+    {ok, Disk} = eta_net:with_node(Node, fun() -> peace_storage:write(Mod, Batch, Disk0) end),
+    {ok, _} = write(Batch, {Tab, Id, none}),
+    {ok, {Tab, Id, {Mod, Disk, Node}}};
+write(Batch, State = {Tab, Id, none}) ->
     Promised = [{{Id, promised}, B} || {promised, B} <- maps:to_list(Batch)],
     Entries = [{{Id, I}, Entry} || {I, Entry} <- maps:get(entries, Batch, [])],
     true = ets:insert(Tab, Promised ++ Entries),
@@ -65,6 +87,8 @@ write(Batch, State = {Tab, Id}) ->
     end,
     {ok, State}.
 
+close({_Tab, _Id, {Mod, Disk, Node}}) ->
+    eta_net:with_node(Node, fun() -> peace_storage:close(Mod, Disk) end);
 close(_State) ->
     ok.
 
