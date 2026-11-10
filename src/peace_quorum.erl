@@ -10,7 +10,7 @@
 %%
 %% Two phase-two quorums may be disjoint, and so may two phase-one quorums. A
 %% cluster can therefore trade one phase against the other. Multi-Paxos runs
-%% phase two for every command and phase one only when the leader changes
+%% phase two for every value and phase one only when the leader changes
 %% (section 4.3.3), so small phase-two quorums make the steady state faster and
 %% more tolerant of slow members, and the price is paid at elections.
 %%
@@ -23,7 +23,7 @@
 %%   thesis (sections 4.3.2 and 4.3.3):
 %%   <ul>
 %%   <li>`{counting, N div 2 + 1, N div 2}' for even `N' - the even nodes
-%%     optimisation. One fewer acknowledgement per command than a majority,
+%%     optimisation. One fewer acknowledgement per value than a majority,
 %%     at no cost anywhere else.</li>
 %%   <li>`{counting, N, 1}' - Singleton Paxos. The leader commits alone;
 %%     electing one needs everybody.</li>

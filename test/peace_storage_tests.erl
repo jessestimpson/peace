@@ -132,7 +132,7 @@ batch(Rand0) ->
             {Decided, R2} = rand:uniform_s(3, R1),
             Epoch =
                 case Decided of
-                    1 -> decided;
+                    1 -> learned;
                     _ -> {Round, ?ID}
                 end,
             {{I, {Epoch, {'$usr', {{Round, ?ID}, I}, {put, I, Round}}}}, R2}

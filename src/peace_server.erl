@@ -25,8 +25,8 @@
     ?ETA_LOG({peace, peace_core:id(Core), log_event(Event), peace_core:role(Core)})
 ).
 log_event({msg, Peer, Msg}) -> {msg, Peer, element(1, Msg)};
-log_event({command, _From, _Command}) -> command;
-log_event({command, _From, _Command, _Session}) -> command;
+log_event({value, _From, _Value}) -> value;
+log_event({value, _From, _Value, _Session}) -> value;
 log_event({query, _From, _Fun}) -> query;
 log_event({reconfigure, _From, _New}) -> reconfigure;
 log_event(Event) -> Event.
@@ -82,10 +82,10 @@ init(Config = #{id := Id, members := Members}) ->
             {stop, {invalid_quorum, Reason}}
     end.
 
-handle_call({command, Command}, From, State) ->
-    {noreply, event({command, From, Command}, State)};
-handle_call({command, Command, Session}, From, State) ->
-    {noreply, event({command, From, Command, Session}, State)};
+handle_call({value, Value}, From, State) ->
+    {noreply, event({value, From, Value}, State)};
+handle_call({value, Value, Session}, From, State) ->
+    {noreply, event({value, From, Value, Session}, State)};
 handle_call({reconfigure, New}, From, State) ->
     {noreply, event({reconfigure, From, New}, State)};
 handle_call({consistent_query, Fun}, From, State) ->
@@ -105,8 +105,8 @@ handle_call(overview, _From, State = #state{core = Core}) ->
 handle_call(_Other, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
-handle_cast({command, Command}, State) ->
-    {noreply, event({command, undefined, Command}, State)};
+handle_cast({value, Value}, State) ->
+    {noreply, event({value, undefined, Value}, State)};
 handle_cast(trigger_election, State) ->
     {noreply, event(force_election, State)};
 handle_cast(_Other, State) ->

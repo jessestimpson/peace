@@ -1,7 +1,7 @@
 %% @doc The behaviour a replicated state machine implements.
 %%
 %% The programming model is ra's. You write a deterministic state machine;
-%% peace agrees on the order of commands and applies each one, in that order,
+%% peace agrees on the order of values and applies each one, in that order,
 %% on every server.
 %%
 %% ```
@@ -19,17 +19,17 @@
 %%
 %% `apply/3' runs on every server and must return the same thing on each. It
 %% must depend on nothing but its arguments: no clock, no `rand', no `node()',
-%% no process dictionary, no ETS. Anything of that kind belongs in the command,
+%% no process dictionary, no ETS. Anything of that kind belongs in the value,
 %% decided once by whoever submits it.
 %%
-%% `apply/3' can run more than once for the same command on the same server: a
+%% `apply/3' can run more than once for the same value on the same server: a
 %% server that restarts rebuilds its state by applying its log again. That is
 %% why side effects are not performed in `apply/3' but returned from it as
 %% effects.
 %%
 %% == Effects ==
 %%
-%% Effects are performed only by the leader, only when a command is first
+%% Effects are performed only by the leader, only when a value is first
 %% committed, and never during recovery.
 %%
 %% <ul>
@@ -39,20 +39,20 @@
 %% </ul>
 %%
 %% An effect is at-most-once per leadership and not guaranteed at all: a
-%% leader that crashes between committing a command and performing its effects
+%% leader that crashes between committing a value and performing its effects
 %% takes them with it. `state_enter/2' is where a new leader re-issues
 %% whatever it finds outstanding in the state.
 -module(peace_machine).
 
 -export([init/1, apply/4, state_enter/3]).
 
--export_type([machine/0, state/0, command/0, reply/0, meta/0, effect/0, effects/0]).
+-export_type([machine/0, state/0, value/0, reply/0, meta/0, effect/0, effects/0]).
 
 -type machine() :: {module, module(), Args :: term()}.
 -type state() :: term().
--type command() :: term().
+-type value() :: term().
 -type reply() :: term().
-%% `index' is the command's position in the replicated log.
+%% `index' is the value's position in the replicated log.
 -type meta() :: #{index := peace:index()}.
 -type effect() ::
     {send_msg, Dest :: pid() | atom() | {atom(), node()}, Msg :: term()}
@@ -61,7 +61,7 @@
 
 -callback init(Args :: term()) -> state().
 
--callback apply(meta(), command(), state()) ->
+-callback apply(meta(), value(), state()) ->
     {state(), reply()} | {state(), reply(), effects()}.
 
 %% Called on the server whose role changed, with its current state. The
@@ -76,9 +76,9 @@ init({module, Mod, Args}) ->
     Mod:init(Args).
 
 %% @private
--spec apply(machine(), meta(), command(), state()) -> {state(), reply(), effects()}.
-apply({module, Mod, _Args}, Meta, Command, State) ->
-    case Mod:apply(Meta, Command, State) of
+-spec apply(machine(), meta(), value(), state()) -> {state(), reply(), effects()}.
+apply({module, Mod, _Args}, Meta, Value, State) ->
+    case Mod:apply(Meta, Value, State) of
         {State1, Reply} -> {State1, Reply, []};
         {State1, Reply, Effects} when is_list(Effects) -> {State1, Reply, Effects}
     end.

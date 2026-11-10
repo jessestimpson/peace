@@ -8,20 +8,20 @@
 
 -include("peace_eta.hrl").
 
--export([command/5, query/3, reconfigure/5, restart/1, deliver/3]).
+-export([value/5, query/3, reconfigure/5, restart/1, deliver/3]).
 
 -define(CALL_TIMEOUT_MS, 200).
 -define(RETRY_AFTER_MS, 60).
 -define(ATTEMPTS, 4).
 
-%% Submits one command and records what the client was told. `Op' is unique
-%% to this operation, so the harness can find the command in the log.
+%% Submits one value and records what the client was told. `Op' is unique
+%% to this operation, so the harness can find the value in the log.
 %%
 %% `Retry' is what the client does when it cannot tell what happened:
 %% `session' submits again under the same session, which is what sessions
 %% are for; `bare' submits again without one, which is the mistake they
 %% prevent; `none' gives up.
-command(Tab, N, Servers, Op, Retry) ->
+value(Tab, N, Servers, Op, Retry) ->
     ?ETA_LABEL({client, N}),
     true = ets:insert(Tab, {{op, Op}, invoked}),
     Opts =
@@ -29,13 +29,13 @@ command(Tab, N, Servers, Op, Retry) ->
             session -> #{timeout => ?CALL_TIMEOUT_MS, session => {N, 1}};
             _ -> #{timeout => ?CALL_TIMEOUT_MS}
         end,
-    Result = submit(fun() -> peace:process_command(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
+    Result = submit(fun() -> peace:process_value(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
     _ = ?ETA_LOG({client, N, Op, Result}),
     true = ets:insert(Tab, {{op, Op}, Result}),
     ok.
 
-%% A linearizable read of every command applied so far. Records, with the
-%% answer, which commands had already been acknowledged when it asked: all of
+%% A linearizable read of every value applied so far. Records, with the
+%% answer, which values had already been acknowledged when it asked: all of
 %% them have to be in it.
 query(Tab, N, Servers) ->
     ?ETA_LABEL({client, N}),

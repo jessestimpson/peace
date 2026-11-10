@@ -15,7 +15,7 @@ elect_and_commit_test() ->
     S1 = run(ev(a, force_election, S0)),
     ?assertEqual(leader, role(a, S1)),
     ?assertEqual([follower, follower], [role(I, S1) || I <- [b, c]]),
-    S2 = run(ev(a, {command, c1, {put, k, 1}}, S1)),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, S1)),
     ?assertEqual([{c1, {ok, ok, a}}], replies(S2)),
     %% Followers learn the commit index from the next heartbeat.
     ?assertEqual([1, 0, 0], [commit(I, S2) || I <- [a, b, c]]),
@@ -26,7 +26,7 @@ elect_and_commit_test() ->
 
 not_leader_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
-    S1 = ev(b, {command, c1, {put, k, 1}}, S0),
+    S1 = ev(b, {value, c1, {put, k, 1}}, S0),
     ?assertEqual([{c1, {error, {not_leader, a}}}], replies(S1)).
 
 %% A value accepted by one follower, never decided, has to survive the leader
@@ -35,17 +35,17 @@ not_leader_test() ->
 new_leader_recovers_accepted_value_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
     %% Only b hears the accept, and its answer is lost.
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, block([{a, c}, {b, a}], S0))),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, block([{a, c}, {b, a}], S0))),
     ?assertEqual([], replies(S1)),
     ?assertEqual(0, commit(a, S1)),
     %% a is cut off. b leads with c's promise and re-proposes what it holds.
     S2 = run(ev(b, force_election, block([{a, b}, {a, c}, {b, a}, {c, a}], S1))),
     ?assertEqual(leader, role(b, S2)),
-    ?assertEqual(#{1 => {usr, {put, k, 1}}}, decided(b, S2)),
+    ?assertEqual(#{1 => {usr, {put, k, 1}}}, learned(b, S2)),
     %% a comes back, is fenced by the higher epoch, and learns the outcome.
     S3 = run(ev(b, heartbeat_timeout, run(ev(b, heartbeat_timeout, block([], S2))))),
     ?assertEqual(follower, role(a, S3)),
-    ?assertEqual(#{1 => {usr, {put, k, 1}}}, decided(a, S3)),
+    ?assertEqual(#{1 => {usr, {put, k, 1}}}, learned(a, S3)),
     %% The original caller was told the outcome was unknown, not that it failed.
     ?assertEqual([{c1, {error, leadership_lost}}], replies(S3)).
 
@@ -54,10 +54,10 @@ new_leader_recovers_accepted_value_test() ->
 gaps_are_filled_with_noops_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
     %% Index 1 reaches nobody; index 2 reaches b.
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, block([{a, b}, {a, c}], S0))),
-    S2 = run(ev(a, {command, c2, {put, k, 2}}, block([{a, c}, {b, a}], S1))),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, block([{a, b}, {a, c}], S0))),
+    S2 = run(ev(a, {value, c2, {put, k, 2}}, block([{a, c}, {b, a}], S1))),
     S3 = run(ev(b, force_election, block([{a, b}, {a, c}, {b, a}, {c, a}], S2))),
-    ?assertEqual(#{1 => noop, 2 => {usr, {put, k, 2}}}, decided(b, S3)),
+    ?assertEqual(#{1 => noop, 2 => {usr, {put, k, 2}}}, learned(b, S3)),
     ?assertEqual(#{k => 2}, kv(b, S3)).
 
 %% {counting, 3, 1}: every member to elect, one to commit.
@@ -68,8 +68,8 @@ flexible_quorum_commits_alone_test() ->
     ?assertEqual(candidate, role(a, S1)),
     S2 = run(ev(a, force_election, block([], S1))),
     ?assertEqual(leader, role(a, S2)),
-    %% Nobody else hears the command, and it is decided all the same.
-    S3 = run(ev(a, {command, c1, {put, k, 1}}, block([{a, b}, {a, c}], S2))),
+    %% Nobody else hears the value, and it is decided all the same.
+    S3 = run(ev(a, {value, c1, {put, k, 1}}, block([{a, b}, {a, c}], S2))),
     ?assertEqual([{c1, {ok, ok, a}}], replies(S3)),
     %% Which is safe only because nobody can be elected without a.
     S4 = run(ev(b, force_election, block([{a, b}, {b, a}], S3))),
@@ -86,47 +86,47 @@ deposed_leader_steps_down_on_conflict_test() ->
     Ids = [a, b, c, d, e],
     S0 = run(ev(a, force_election, block([{a, d}, {a, e}], new(Ids, majority)))),
     ?assertEqual(leader, role(a, S0)),
-    S1 = run(ev(a, {command, cx, {put, k, x}}, block([{a, c}, {a, d}, {a, e}, {b, a}], S0))),
+    S1 = run(ev(a, {value, cx, {put, k, x}}, block([{a, c}, {a, d}, {a, e}, {b, a}], S0))),
     Island = [{X, Y} || X <- [a, b], Y <- [c, d, e]] ++ [{Y, X} || X <- [a, b], Y <- [c, d, e]],
     S2 = run(ev(c, force_election, block(Island, S1))),
     ?assertEqual(leader, role(c, S2)),
-    S3 = run(ev(c, {command, cy, {put, k, y}}, S2)),
-    ?assertEqual(#{1 => {usr, {put, k, y}}}, decided(c, S3)),
+    S3 = run(ev(c, {value, cy, {put, k, y}}, S2)),
+    ?assertEqual(#{1 => {usr, {put, k, y}}}, learned(c, S3)),
     ?assertEqual(leader, role(a, S3)),
     %% An answer to a catch-up a asked for before it led, arriving late.
-    {decided, Y} = maps:get(1, maps:get(entries, stored(c, S3))),
+    {learned, Y} = maps:get(1, maps:get(entries, stored(c, S3))),
     S4 = run(ev(a, {msg, c, {learned, [{1, Y}]}}, S3)),
     ?assertEqual(follower, role(a, S4)),
     ?assertEqual({error, leadership_lost}, proplists:get_value(cx, replies(S4))),
     S5 = run(ev(a, heartbeat_timeout, block([{b, a}], S4))),
-    ?assertEqual(#{}, decided(b, S5)),
-    ?assertEqual(#{1 => {usr, {put, k, y}}}, decided(a, S5)).
+    ?assertEqual(#{}, learned(b, S5)),
+    ?assertEqual(#{1 => {usr, {put, k, y}}}, learned(a, S5)).
 
 %% The same hazard with the order reversed, found by the simulation's churn
 %% workload. a learns an index it has not proposed in yet. Were it to go on
-%% leading it would put its next command there, on top of the decided entry,
-%% and b would take a's commit index to cover that command.
+%% leading it would put its next value there, on top of the decided entry,
+%% and b would take a's commit index to cover that value.
 deposed_leader_steps_down_on_unproposed_index_test() ->
     Ids = [a, b, c, d, e],
     S0 = run(ev(a, force_election, block([{a, d}, {a, e}], new(Ids, majority)))),
     Island = [{X, Y} || X <- [a, b], Y <- [c, d, e]] ++ [{Y, X} || X <- [a, b], Y <- [c, d, e]],
     S1 = run(ev(c, force_election, block(Island, S0))),
-    S2 = run(ev(c, {command, cy, {put, k, y}}, S1)),
+    S2 = run(ev(c, {value, cy, {put, k, y}}, S1)),
     ?assertEqual(leader, role(a, S2)),
-    {decided, Y} = maps:get(1, maps:get(entries, stored(c, S2))),
+    {learned, Y} = maps:get(1, maps:get(entries, stored(c, S2))),
     S3 = run(ev(a, {msg, c, {learned, [{1, Y}]}}, S2)),
     ?assertEqual(follower, role(a, S3)),
-    S4 = run(ev(a, {command, cx, {put, k, x}}, S3)),
+    S4 = run(ev(a, {value, cx, {put, k, x}}, S3)),
     ?assertEqual({error, {not_leader, undefined}}, proplists:get_value(cx, replies(S4))),
-    ?assertEqual(#{1 => {usr, {put, k, y}}}, decided(a, S4)),
-    ?assertEqual(#{}, decided(b, S4)).
+    ?assertEqual(#{1 => {usr, {put, k, y}}}, learned(a, S4)),
+    ?assertEqual(#{}, learned(b, S4)).
 
 %% Everything a server has promised or accepted is in its storage by the time
 %% it says so, and a restart from that storage rebuilds the machine.
 restart_recovers_from_storage_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
-    S2 = run(ev(a, heartbeat_timeout, run(ev(a, {command, c2, {put, j, 2}}, S1)))),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
+    S2 = run(ev(a, heartbeat_timeout, run(ev(a, {value, c2, {put, j, 2}}, S1)))),
     S3 = restart(b, S2),
     ?assertEqual(follower, role(b, S3)),
     ?assertEqual(2, commit(b, S3)),
@@ -137,11 +137,11 @@ restart_recovers_from_storage_test() ->
 
 consistent_query_is_ordered_by_the_log_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
     S2 = run(ev(a, {query, q1, fun(#{kv := KV}) -> KV end}, S1)),
     ?assertEqual({ok, #{k => 1}, a}, proplists:get_value(q1, replies(S2))),
     %% It took an index, and changed nothing.
-    ?assertEqual(#{1 => {usr, {put, k, 1}}, 2 => noop}, decided(a, S2)).
+    ?assertEqual(#{1 => {usr, {put, k, 1}}, 2 => noop}, learned(a, S2)).
 
 %% An outbid candidate learns the epoch to beat from the refusal.
 nack_teaches_the_next_epoch_test() ->
@@ -193,7 +193,7 @@ leader_without_a_quorum_steps_down_test() ->
     S2 = run(ev(a, election_timeout, run(ev(a, heartbeat_timeout, block([{a, c}], S1))))),
     ?assertEqual(leader, role(a, S2)),
     Alone = [{a, b}, {a, c}],
-    S3 = run(ev(a, {command, c1, {put, k, 1}}, block(Alone, S2))),
+    S3 = run(ev(a, {value, c1, {put, k, 1}}, block(Alone, S2))),
     S4 = run(ev(a, election_timeout, run(ev(a, heartbeat_timeout, S3)))),
     ?assertEqual(follower, role(a, S4)),
     ?assertEqual([{c1, {error, leadership_lost}}], replies(S4)).
@@ -204,22 +204,22 @@ leader_that_commits_alone_never_steps_down_test() ->
     S1 = run(ev(a, election_timeout, run(ev(a, election_timeout, block([{a, b}, {a, c}], S0))))),
     ?assertEqual(leader, role(a, S1)).
 
-%% A command decided twice under one session is applied once, and the second
+%% A value decided twice under one session is applied once, and the second
 %% copy is answered as the first was.
 session_applies_once_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}, {me, 1}}, S0)),
-    S2 = run(ev(a, {command, c2, {put, k, 2}}, S1)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}, {me, 1}}, S0)),
+    S2 = run(ev(a, {value, c2, {put, k, 2}}, S1)),
     %% The retry: same session, and by now k is 2.
-    S3 = run(ev(a, {command, c3, {put, k, 1}, {me, 1}}, S2)),
+    S3 = run(ev(a, {value, c3, {put, k, 1}, {me, 1}}, S2)),
     ?assertEqual({ok, ok, a}, proplists:get_value(c3, replies(S3))),
     ?assertEqual(#{k => 2}, kv(a, S3)),
     ?assertEqual(3, commit(a, S3)),
-    %% The next command of the session is a new command.
-    S4 = run(ev(a, {command, c4, {put, k, 4}, {me, 2}}, S3)),
+    %% The next value of the session is a new value.
+    S4 = run(ev(a, {value, c4, {put, k, 4}, {me, 2}}, S3)),
     ?assertEqual(#{k => 4}, kv(a, S4)),
     %% And a copy of the old one, turning up late, is refused.
-    S5 = run(ev(a, {command, c5, {put, k, 1}, {me, 1}}, S4)),
+    S5 = run(ev(a, {value, c5, {put, k, 1}, {me, 1}}, S4)),
     ?assertEqual({error, {session_superseded, 2}}, proplists:get_value(c5, replies(S5))),
     ?assertEqual(#{k => 4}, kv(a, S5)),
     %% Followers reach the same state by the same route.
@@ -230,18 +230,18 @@ session_applies_once_test() ->
 sessions_are_bounded_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority, #{max_sessions => 2}))),
     S1 = lists:foldl(
-        fun(N, S) -> run(ev(a, {command, N, {put, N, N}, {N, 1}}, S)) end, S0, [1, 2, 3]
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}, {N, 1}}, S)) end, S0, [1, 2, 3]
     ),
     ?assertMatch(#{sessions := 2}, peace_core:overview(core(a, S1))),
-    %% Client 1 was evicted, so its retry is a new command.
-    S2 = run(ev(a, {command, again, {put, 1, again}, {1, 1}}, S1)),
+    %% Client 1 was evicted, so its retry is a new value.
+    S2 = run(ev(a, {value, again, {put, 1, again}, {1, 1}}, S1)),
     ?assertEqual(again, maps:get(1, kv(a, S2))).
 
 %% The log is dropped up to a snapshot, and a restart starts from it.
 snapshot_truncates_and_recovers_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
     S1 = lists:foldl(
-        fun(N, S) -> run(ev(a, {command, N, {put, N, N}, {me, N}}, S)) end, S0, [1, 2, 3]
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}, {me, N}}, S)) end, S0, [1, 2, 3]
     ),
     ?assertEqual(2, peace_core:snapshot_index(core(a, S1))),
     ?assertEqual([3], maps:keys(peace_core:log(core(a, S1)))),
@@ -252,14 +252,14 @@ snapshot_truncates_and_recovers_test() ->
     ?assertEqual(#{1 => 1, 2 => 2, 3 => 3}, kv(a, S2)),
     %% The session table came back with it.
     S3 = run(ev(a, force_election, S2)),
-    S4 = run(ev(a, {command, retry, {put, 3, retried}, {me, 3}}, S3)),
+    S4 = run(ev(a, {value, retry, {put, 3, retried}, {me, 3}}, S3)),
     ?assertEqual(3, maps:get(3, kv(a, S4))).
 
 %% A follower too far behind for the log is sent the state.
 lagging_follower_is_sent_a_snapshot_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
     S1 = lists:foldl(
-        fun(N, S) -> run(ev(a, {command, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2, 3]
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2, 3]
     ),
     ?assertEqual(0, commit(c, S1)),
     S2 = run(ev(a, heartbeat_timeout, run(ev(a, heartbeat_timeout, block([], S1))))),
@@ -269,14 +269,14 @@ lagging_follower_is_sent_a_snapshot_test() ->
 
 %% The counterexample of formal/FPaxosNoSnapshotGuard.cfg, against the code.
 %%
-%% c missed two commands that a and b have since dropped from their logs. If
+%% c missed two values that a and b have since dropped from their logs. If
 %% it campaigned on b's promise, which says nothing about indexes b no longer
-%% holds, it would take them to be free, put its own commands there and
+%% holds, it would take them to be free, put its own values there and
 %% count b's acknowledgement.
 candidate_behind_a_snapshot_does_not_lead_test() ->
     S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
     S1 = lists:foldl(
-        fun(N, S) -> run(ev(a, {command, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]
     ),
     S2 = run(ev(a, heartbeat_timeout, run(ev(a, heartbeat_timeout, S1)))),
     ?assertEqual([2, 2, 0], [peace_core:snapshot_index(core(I, S2)) || I <- [a, b, c]]),
@@ -293,7 +293,7 @@ without_the_snapshot_guard_a_index_is_decided_twice_test() ->
     Extra = #{snapshot_interval => 2, unsafe_no_snapshot_guard => true},
     S0 = run(ev(a, force_election, new([a, b, c], majority, Extra))),
     S1 = lists:foldl(
-        fun(N, S) -> run(ev(a, {command, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]
     ),
     S2 = run(ev(a, heartbeat_timeout, run(ev(a, heartbeat_timeout, S1)))),
     ?assertEqual(2, peace_core:snapshot_index(core(b, S2))),
@@ -301,7 +301,7 @@ without_the_snapshot_guard_a_index_is_decided_twice_test() ->
     S3 = run(ev(c, force_election, block(NoA, S2))),
     ?assertEqual(leader, role(c, S3)),
     %% Index 1 looks free to c, and b acknowledges whatever is sent for it.
-    S4 = run(ev(c, {command, cz, {put, 1, other}}, S3)),
+    S4 = run(ev(c, {value, cz, {put, 1, other}}, S3)),
     ?assertEqual({ok, ok, c}, proplists:get_value(cz, replies(S4))),
     ?assertEqual(#{1 => 1, 2 => 2}, kv(a, S4)),
     ?assertEqual(#{1 => other}, kv(c, S4)).
@@ -310,7 +310,7 @@ without_the_snapshot_guard_a_index_is_decided_twice_test() ->
 %% else can have been elected.
 lease_read_takes_no_index_test() ->
     S0 = run(ev(a, force_election, at(100, new([a, b, c], majority, #{read_lease_ms => 100})))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
     S2 = run(ev(a, {query, q1, fun(#{kv := KV}) -> KV end}, at(150, S1))),
     ?assertEqual({ok, #{k => 1}, a}, proplists:get_value(q1, replies(S2))),
     ?assertEqual(1, peace_core:last_index(core(a, S2))),
@@ -358,7 +358,7 @@ lease_needs_only_to_block_phase_one_test() ->
 %% Every member replaced, with nobody in common.
 change_members_to_a_disjoint_set_test() ->
     S0 = run(ev(a, force_election, join([d, e, f], new([a, b, c], majority)))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
     S2 = run(ev(a, {reconfigure, r1, {[d, e, f], majority}}, S1)),
     ?assertEqual({ok, ok, a}, proplists:get_value(r1, replies(S2))),
     %% Having seen its own removal through, a no longer leads.
@@ -368,7 +368,7 @@ change_members_to_a_disjoint_set_test() ->
     Old = [{X, Y} || X <- [a, b, c], Y <- [d, e, f]] ++ [{Y, X} || X <- [a, b, c], Y <- [d, e, f]],
     S3 = run(ev(d, force_election, block(Old, S2))),
     ?assertEqual(leader, role(d, S3)),
-    S4 = run(ev(d, {command, c2, {put, j, 2}}, S3)),
+    S4 = run(ev(d, {value, c2, {put, j, 2}}, S3)),
     ?assertEqual({ok, ok, d}, proplists:get_value(c2, replies(S4))),
     ?assertEqual(#{k => 1, j => 2}, kv(d, S4)),
     ?assertEqual([d, e, f], members(e, run(ev(d, heartbeat_timeout, S4)))),
@@ -387,7 +387,7 @@ joint_configuration_needs_both_test() ->
     ?assertEqual({joint, {[a, b, c], majority}, {[a, d, e], majority}}, peace_core:config(core(a, S1))),
     ?assertEqual([a, b, c, d, e], members(a, S1)),
     %% b and c acknowledge, and that is a quorum of the old only.
-    S2 = run(ev(a, {command, c1, {put, k, 1}}, S1)),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, S1)),
     ?assertEqual(undefined, proplists:get_value(c1, replies(S2))),
     S3 = run(ev(a, {reconfigure, r2, {[a, b], majority}}, S2)),
     ?assertEqual({error, reconfiguration_in_progress}, proplists:get_value(r2, replies(S3))),
@@ -442,7 +442,7 @@ change_quorum_system_only_test() ->
     S0 = run(ev(a, force_election, new(Ids, majority))),
     S1 = run(ev(a, {reconfigure, r1, {Ids, {counting, 3, 2}}}, S0)),
     ?assertEqual({ok, ok, a}, proplists:get_value(r1, replies(S1))),
-    S2 = run(ev(a, {command, c1, {put, k, 1}}, block([{a, c}, {a, d}], S1))),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, block([{a, c}, {a, d}], S1))),
     ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S2))),
     S3 = run(ev(a, {reconfigure, r2, {Ids, {counting, 2, 2}}}, S2)),
     ?assertMatch({error, {invalid_quorum, _}}, proplists:get_value(r2, replies(S3))).
@@ -458,17 +458,17 @@ without_a_joint_configuration_two_sides_decide_test() ->
     %% b and c never heard of it and are a majority of the old.
     Apart = [{X, Y} || X <- [b, c], Y <- [a, d]] ++ [{Y, X} || X <- [b, c], Y <- [a, d]],
     S2 = run(ev(b, force_election, block(Apart, S1))),
-    S3 = run(ev(b, {command, c1, {put, k, 1}}, S2)),
+    S3 = run(ev(b, {value, c1, {put, k, 1}}, S2)),
     ?assertEqual({ok, ok, b}, proplists:get_value(c1, replies(S3))),
-    ?assertMatch(#{1 := {cfg, _}}, decided(a, S3)),
-    ?assertEqual(#{1 => {usr, {put, k, 1}}}, decided(b, S3)).
+    ?assertMatch(#{1 := {cfg, _}}, learned(a, S3)),
+    ?assertEqual(#{1 => {usr, {put, k, 1}}}, learned(b, S3)).
 
-%% Two to commit out of five: each command goes to one peer, and the other
+%% Two to commit out of five: each value goes to one peer, and the other
 %% three hear of it on the heartbeat and ask.
 propose_to_quorum_sends_to_a_phase_two_quorum_test() ->
     Ids = [a, b, c, d, e],
     S0 = run(ev(a, force_election, new(Ids, {counting, 4, 2}, #{propose_to => quorum}))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
     ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S1))),
     ?assertEqual([b], sent_index(a, 1, S1)),
     ?assertEqual([1, 0, 0, 0, 0], [commit(I, S1) || I <- Ids]),
@@ -483,7 +483,7 @@ propose_to_quorum_sends_to_a_phase_two_quorum_test() ->
 propose_to_quorum_majority_test() ->
     Ids = [a, b, c, d, e],
     S0 = run(ev(a, force_election, new(Ids, majority, #{propose_to => quorum}))),
-    S1 = run(ev(a, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
     ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S1))),
     ?assertEqual([b, c], sent_index(a, 1, S1)).
 
@@ -492,7 +492,7 @@ propose_to_quorum_majority_test() ->
 propose_to_quorum_grid_test() ->
     Grid = {grid, [[a, b], [c, d]]},
     S0 = run(ev(c, force_election, new([a, b, c, d], Grid, #{propose_to => quorum}))),
-    S1 = run(ev(c, {command, c1, {put, k, 1}}, S0)),
+    S1 = run(ev(c, {value, c1, {put, k, 1}}, S0)),
     ?assertEqual({ok, ok, c}, proplists:get_value(c1, replies(S1))),
     ?assertEqual([d], sent_index(c, 1, S1)).
 
@@ -503,7 +503,7 @@ propose_to_quorum_falls_back_test() ->
     S0 = run(ev(a, force_election, new(Ids, {counting, 4, 2}, #{propose_to => quorum}))),
     S1 = run(ev(a, election_timeout, S0)),
     ?assertEqual([b], preferred(a, S1)),
-    S2 = run(ev(a, {command, c1, {put, k, 1}}, block([{a, b}], S1))),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, block([{a, b}], S1))),
     ?assertEqual(undefined, proplists:get_value(c1, replies(S2))),
     S3 = run(ev(a, heartbeat_timeout, S2)),
     ?assertEqual([b], sent_index(a, 1, S3)),
@@ -514,7 +514,7 @@ propose_to_quorum_falls_back_test() ->
     %% b has not answered since the timer last fired, and the others have.
     S5 = run(ev(a, election_timeout, S4)),
     ?assertEqual([c], preferred(a, S5)),
-    S6 = run(ev(a, {command, c2, {put, k, 2}}, S5)),
+    S6 = run(ev(a, {value, c2, {put, k, 2}}, S5)),
     ?assertEqual({ok, ok, a}, proplists:get_value(c2, replies(S6))),
     ?assertEqual([c], sent_index(a, 2, S6)).
 
@@ -525,7 +525,7 @@ propose_to_quorum_follows_the_configuration_test() ->
     ?assertEqual({ok, ok, a}, proplists:get_value(r1, replies(S1))),
     %% The joint entry went to one of the old and one of the new.
     ?assertEqual([b, d], sent_index(a, 1, S1)),
-    S2 = run(ev(a, {command, c1, {put, k, 1}}, S1)),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, S1)),
     ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S2))),
     ?assertEqual([d], sent_index(a, 3, S2)).
 
@@ -648,7 +648,7 @@ core(Id, #{cores := Cores}) -> maps:get(Id, Cores).
 role(Id, S) -> peace_core:role(core(Id, S)).
 commit(Id, S) -> peace_core:commit_index(core(Id, S)).
 promised(Id, S) -> peace_core:promised(core(Id, S)).
-decided(Id, S) -> peace_core:decided(core(Id, S)).
+learned(Id, S) -> peace_core:learned(core(Id, S)).
 kv(Id, S) -> maps:get(kv, peace_core:machine_state(core(Id, S))).
 stored(Id, #{store := Store}) -> maps:get(Id, Store).
 replies(#{replies := Replies}) -> Replies.

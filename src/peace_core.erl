@@ -13,8 +13,8 @@
 %% Howard's thesis (UCAM-CL-TR-935, in `docs/'): her sections 3.6, 3.7 and
 %% 4.1. Section references below are to it, and so are the words: epoch,
 %% prepare, promise, propose, accept, phase one and phase two, proposer and
-%% acceptor, decided, learn, the sequence and its indexes, the leader. A
-%% machine's command is what the thesis calls a value. Where the thesis has
+%% acceptor, value, decided, learn, the sequence and its indexes, the
+%% leader. Where the thesis has
 %% no word, because the thing is not in it, the section says so:
 %%
 %% <ul>
@@ -50,7 +50,7 @@
 %% liveness only: a campaign is always safe, and `force_election' still
 %% starts one unasked.
 %%
-%% Phase two, once per command. The leader assigns the next index and sends
+%% Phase two, once per value. The leader assigns the next index and sends
 %% `{propose, Epoch, Entries, Commit}'. An acceptor that has promised nothing
 %% higher stores the entries and answers `{accept, Epoch, Indexes}'. The
 %% value at an index is decided once a phase-two quorum has accepted it. The two quorum
@@ -62,7 +62,7 @@
 %% on it. Also liveness only.
 %%
 %% Learning, the thesis's optional phase three (section 3.3, "Termination").
-%% A decided entry is kept under the marker `decided' in place of an epoch,
+%% A decided entry is kept under the marker `learned' in place of an epoch,
 %% and is reported that way in promises, where it outranks every epoch.
 %% Entries become decided by three routes, and they are the three learning
 %% actions of the TLA+ model:
@@ -90,8 +90,8 @@
 %%
 %% Not in the thesis.
 %% A client that is told nothing (a timeout, a lost leader) cannot know
-%% whether its command was decided, and a retry may put it in the log twice.
-%% A command submitted with a session, `{ClientId, Seq}', is applied at most
+%% whether its value was decided, and a retry may put it in the log twice.
+%% A value submitted with a session, `{ClientId, Seq}', is applied at most
 %% once however often it is decided: each server remembers, per client, the
 %% highest sequence number it has applied and the reply, and a later copy of
 %% the same number gets that reply without touching the machine. The table is
@@ -217,11 +217,11 @@
     machine_state/1,
     log/1,
     snapshot_index/1,
-    decided/1,
+    learned/1,
     overview/1
 ]).
 
--export_type([core/0, event/0, effect/0, entry/0, command/0, msg/0, session/0, snapshot/0, config/0, simple/0]).
+-export_type([core/0, event/0, effect/0, entry/0, value/0, msg/0, session/0, snapshot/0, config/0, simple/0]).
 
 %% How many entries one `accept' or `learned' message carries at most.
 -define(MAX_BATCH, 64).
@@ -235,13 +235,13 @@
 -type simple() :: {[peace:server_id()], peace_quorum:spec()}.
 -type config() :: {final, simple()} | {joint, Old :: simple(), New :: simple()}.
 
--type command() ::
-    {'$usr', tag(), peace_machine:command()}
+-type value() ::
+    {'$usr', tag(), peace_machine:value()}
     | {'$cfg', tag(), config()}
-    | {'$ses', tag(), session(), peace_machine:command()}
+    | {'$ses', tag(), session(), peace_machine:value()}
     | {'$noop', tag()}.
 
-%% One client's one command. See "Sessions" above.
+%% One client's one value. See "Sessions" above.
 -type session() :: {ClientId :: term(), Seq :: non_neg_integer()}.
 
 %% Per client: the last sequence number applied, what the machine answered,
@@ -251,31 +251,31 @@
 %% What a snapshot holds: everything that is a function of the decided log.
 -type snapshot() :: {peace_machine:state(), sessions(), config()}.
 
--type entry() :: {peace:epoch() | decided, command()}.
+-type entry() :: {peace:epoch() | learned, value()}.
 
 -type from() :: term().
 
--type kind() :: command | silent | {query, fun((peace_machine:state()) -> term())}.
+-type kind() :: value | silent | {query, fun((peace_machine:state()) -> term())}.
 
 -type msg() ::
     {prepare, peace:epoch(), From :: peace:index()}
-    | {promise, peace:epoch(), [{peace:index(), peace:epoch() | decided, command()}],
+    | {promise, peace:epoch(), [{peace:index(), peace:epoch() | learned, value()}],
         Snapshot :: non_neg_integer()}
-    | {propose, peace:epoch(), [{peace:index(), command()}], Commit :: peace:index(), Stamp :: integer()}
+    | {propose, peace:epoch(), [{peace:index(), value()}], Commit :: peace:index(), Stamp :: integer()}
     | {accept, peace:epoch(), [peace:index()], Stamp :: integer()}
     | {nack, peace:epoch()}
     | {prevote, peace:epoch()}
     | {prevote_ok, peace:epoch()}
     | {catchup, From :: peace:index()}
-    | {learned, [{peace:index(), command()}]}
+    | {learned, [{peace:index(), value()}]}
     | {install, peace:index(), snapshot()}.
 
 -type event() ::
     election_timeout
     | force_election
     | heartbeat_timeout
-    | {command, from(), peace_machine:command()}
-    | {command, from(), peace_machine:command(), session() | undefined}
+    | {value, from(), peace_machine:value()}
+    | {value, from(), peace_machine:value(), session() | undefined}
     | {query, from(), fun((peace_machine:state()) -> term())}
     | {reconfigure, from(), simple()}
     | {msg, peace:server_id(), msg()}.
@@ -459,12 +459,12 @@ event(heartbeat_timeout, C0 = #core{role = leader, acks = Acks, waiting = Waitin
     {C1#core{waiting = Open}, [{timer, heartbeat, reset} | broadcast(C1, Quiet)]};
 event(heartbeat_timeout, C) ->
     {C, []};
-event({command, From, Command}, C) ->
-    propose(From, command, {usr, Command}, C);
-event({command, From, Command, undefined}, C) ->
-    propose(From, command, {usr, Command}, C);
-event({command, From, Command, Session = {_ClientId, Seq}}, C) when is_integer(Seq), Seq >= 0 ->
-    propose(From, command, {ses, Session, Command}, C);
+event({value, From, Value}, C) ->
+    propose(From, value, {usr, Value}, C);
+event({value, From, Value, undefined}, C) ->
+    propose(From, value, {usr, Value}, C);
+event({value, From, Value, Session = {_ClientId, Seq}}, C) when is_integer(Seq), Seq >= 0 ->
+    propose(From, value, {ses, Session, Value}, C);
 event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
     case holds_lease(C) of
         true ->
@@ -524,25 +524,25 @@ last_index(#core{last = Last}) -> Last.
 machine_state(#core{mstate = MState}) -> MState.
 
 %% @doc The log as it should be in storage: every entry held, with the epoch
-%% it was accepted in or `decided'.
+%% it was accepted in or `learned'.
 -spec log(core()) -> #{peace:index() => entry()}.
 log(#core{log = Log}) -> Log.
 
 %% @doc Every entry this server knows to be decided and still holds, applied
-%% or not, as the user command or `noop'.
+%% or not, as the user value or `noop'.
 %% @doc The index of this server's snapshot, below which it has no log. 0 if
 %% it has none.
 -spec snapshot_index(core()) -> non_neg_integer().
 snapshot_index(#core{snap = Snap}) -> Snap.
 
--spec decided(core()) -> #{peace:index() => {usr, peace_machine:command()} | {cfg, config()} | noop}.
-decided(#core{log = Log}) ->
+-spec learned(core()) -> #{peace:index() => {usr, peace_machine:value()} | {cfg, config()} | noop}.
+learned(#core{log = Log}) ->
     maps:filtermap(
         fun
-            (_I, {decided, {'$usr', _Tag, Command}}) -> {true, {usr, Command}};
-            (_I, {decided, {'$ses', _Tag, _Session, Command}}) -> {true, {usr, Command}};
-            (_I, {decided, {'$noop', _Tag}}) -> {true, noop};
-            (_I, {decided, {'$cfg', _Tag, Cfg}}) -> {true, {cfg, Cfg}};
+            (_I, {learned, {'$usr', _Tag, Value}}) -> {true, {usr, Value}};
+            (_I, {learned, {'$ses', _Tag, _Session, Value}}) -> {true, {usr, Value}};
+            (_I, {learned, {'$noop', _Tag}}) -> {true, noop};
+            (_I, {learned, {'$cfg', _Tag, Cfg}}) -> {true, {cfg, Cfg}};
             (_I, _) -> false
         end,
         Log
@@ -799,14 +799,14 @@ lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log =
     {Log, Acks, Changed} = lists:foldl(
         fun(I, {L, A, Ch}) ->
             case maps:get(I, Best, none) of
-                {decided, Command} ->
-                    Entry = {decided, Command},
+                {learned, Value} ->
+                    Entry = {learned, Value},
                     case L of
                         #{I := Entry} -> {L, A, Ch};
                         _ -> {L#{I => Entry}, A, [{I, Entry} | Ch]}
                     end;
-                {_Epoch, Command} ->
-                    Entry = {Epoch, Command},
+                {_Epoch, Value} ->
+                    Entry = {Epoch, Value},
                     {L#{I => Entry}, A#{I => [Id]}, [{I, Entry} | Ch]};
                 none ->
                     Entry = {Epoch, {'$noop', {Epoch, I}}},
@@ -839,23 +839,23 @@ lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log =
             broadcast(C2, []),
     {C2, Effects}.
 
-%% Highest epoch wins; `decided' outranks every epoch.
-best({I, Epoch, Command}, Acc) ->
+%% Highest epoch wins; `learned' outranks every epoch.
+best({I, Epoch, Value}, Acc) ->
     case Acc of
         #{I := {Held, _}} ->
             case rank(Epoch) > rank(Held) of
-                true -> Acc#{I := {Epoch, Command}};
+                true -> Acc#{I := {Epoch, Value}};
                 false -> Acc
             end;
         _ ->
-            Acc#{I => {Epoch, Command}}
+            Acc#{I => {Epoch, Value}}
     end.
 
-rank(decided) -> {1, decided};
+rank(learned) -> {1, learned};
 rank(Epoch) -> {0, Epoch}.
 
 entries_from(From, Log) ->
-    lists:sort([{I, Epoch, Command} || {I, {Epoch, Command}} <- maps:to_list(Log), I >= From]).
+    lists:sort([{I, Epoch, Value} || {I, {Epoch, Value}} <- maps:to_list(Log), I >= From]).
 
 %% ---------------------------------------------------------------------------
 %% Phase two
@@ -877,14 +877,14 @@ propose(
     }
 ) ->
     Tag = {Epoch, I},
-    Command =
+    Value =
         case What of
             {usr, User} -> {'$usr', Tag, User};
             {ses, Session, User} -> {'$ses', Tag, Session, User};
             {cfg, Cfg} -> {'$cfg', Tag, Cfg};
             noop -> {'$noop', Tag}
         end,
-    Entry = {Epoch, Command},
+    Entry = {Epoch, Value},
     C1 = (note([{I, Entry}], C0))#core{
         log = Log#{I => Entry},
         last = I,
@@ -899,7 +899,7 @@ propose(
     Effects =
         [{persist, #{entries => [{I, Entry}]}}] ++
             Settled ++
-            [{send, Peer, {propose, Epoch, [{I, Command}], C3#core.commit, C3#core.now}} || Peer <- Targets],
+            [{send, Peer, {propose, Epoch, [{I, Value}], C3#core.commit, C3#core.now}} || Peer <- Targets],
     {C3, Effects};
 propose(From, _Kind, _What, C = #core{leader = Leader}) ->
     {C, [{reply, From, {error, {not_leader, Leader}}}]}.
@@ -917,7 +917,7 @@ broadcast(C = #core{epoch = Epoch, commit = Commit, acks = Acks, log = Log, now 
                         [];
                     false ->
                         lists:sublist(
-                            [{I, command(I, Log)} || {I, Who} <- Open, not lists:member(Peer, Who)],
+                            [{I, value(I, Log)} || {I, Who} <- Open, not lists:member(Peer, Who)],
                             ?MAX_BATCH
                         )
                 end,
@@ -934,7 +934,7 @@ settle(C = #core{role = leader, acks = Acks, log = Log}) ->
         [] ->
             {C, []};
         _ ->
-            Entries = [{I, {decided, command(I, Log)}} || I <- Decided],
+            Entries = [{I, {learned, value(I, Log)}} || I <- Decided],
             {C1, Applied} = advance(C#core{
                 log = maps:merge(Log, maps:from_list(Entries)),
                 acks = maps:without(Decided, Acks)
@@ -1027,8 +1027,8 @@ msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #cor
     %% Nor is anything stored at an index the snapshot covers: it is decided
     %% too, and only looks empty.
     Stored = [
-        {I, {Epoch, Command}}
-     || {I, Command} <- Entries, I > C1#core.snap, not is_decided(I, Log0)
+        {I, {Epoch, Value}}
+     || {I, Value} <- Entries, I > C1#core.snap, not is_learned(I, Log0)
     ],
     Log1 = maps:merge(Log0, maps:from_list(Stored)),
     {Log2, Marked} = mark(C1#core.commit + 1, LeaderCommit, Epoch, Log1, []),
@@ -1091,7 +1091,7 @@ msg1({catchup, From}, Peer, C = #core{commit = Commit, snap = Snap}) when From >
     {C, [{send, Peer, {install, Commit, {C#core.mstate, C#core.sessions, C#core.acfg}}}]};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, log = Log}) when From >= 1, From =< Commit ->
     To = min(Commit, From + ?MAX_BATCH - 1),
-    {C, [{send, Peer, {learned, [{I, command(I, Log)} || I <- lists:seq(From, To)]}}]};
+    {C, [{send, Peer, {learned, [{I, value(I, Log)} || I <- lists:seq(From, To)]}}]};
 msg1({catchup, _From}, _Peer, C) ->
     {C, []};
 %% TLA+ CatchUp.
@@ -1119,7 +1119,7 @@ msg1({install, Index, {MState, Sessions, ACfg}}, _Peer, C0 = #core{role = Role, 
     {C3, Applied} = advance(C2),
     {C3, [{persist, #{snapshot => {Index, {MState, Sessions, ACfg}}}}] ++ Follow ++ Applied};
 msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine, snap = Snap}) ->
-    New = [{I, {decided, Command}} || {I, Command} <- Entries, I > Snap, not is_decided(I, Log0)],
+    New = [{I, {learned, Value}} || {I, Value} <- Entries, I > Snap, not is_learned(I, Log0)],
     %% TLA+ Conflict. A leader should learn nothing this way that it did not
     %% propose itself: every undecided index it knows of holds its own
     %% proposal, and a lower epoch cannot have decided an index beyond those
@@ -1131,9 +1131,9 @@ msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine
     Conflict =
         C0#core.conflict_step_down andalso Role =:= leader andalso
             lists:any(
-                fun({I, {decided, Command}}) ->
+                fun({I, {learned, Value}}) ->
                     case Log0 of
-                        #{I := {Mine, Command}} -> false;
+                        #{I := {Mine, Value}} -> false;
                         _ -> true
                     end
                 end,
@@ -1158,10 +1158,10 @@ msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine
 %% Stops at the first index it cannot vouch for.
 mark(I, LeaderCommit, Epoch, Log, Marked) when I =< LeaderCommit ->
     case Log of
-        #{I := {decided, _}} ->
+        #{I := {learned, _}} ->
             mark(I + 1, LeaderCommit, Epoch, Log, Marked);
-        #{I := {Epoch, Command}} ->
-            Entry = {decided, Command},
+        #{I := {Epoch, Value}} ->
+            Entry = {learned, Value},
             mark(I + 1, LeaderCommit, Epoch, Log#{I := Entry}, [{I, Entry} | Marked]);
         _ ->
             {Log, lists:reverse(Marked)}
@@ -1174,7 +1174,7 @@ mark(_I, _LeaderCommit, _Epoch, Log, Marked) ->
 %% ---------------------------------------------------------------------------
 
 %% Back to follower. Whoever was waiting on this server as leader is told the
-%% outcome is unknown: their command may yet be decided by a later leader.
+%% outcome is unknown: their value may yet be decided by a later leader.
 follow(C0 = #core{role = Role, pending = Pending}, Leader) ->
     Failed =
         [
@@ -1224,21 +1224,21 @@ advance(C) ->
 advance(C = #core{commit = Commit, log = Log}, Acc) ->
     I = Commit + 1,
     case Log of
-        #{I := {decided, Command}} ->
-            {C1, Effects} = apply_command(I, Command, C#core{commit = I}),
+        #{I := {learned, Value}} ->
+            {C1, Effects} = apply_value(I, Value, C#core{commit = I}),
             advance(C1, [Effects | Acc]);
         _ ->
             {C, lists:append(lists:reverse(Acc))}
     end.
 
-apply_command(I, {'$usr', Tag, Command}, C = #core{machine = Machine, mstate = MState0, role = Role}) ->
-    {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Command, MState0),
+apply_value(I, {'$usr', Tag, Value}, C = #core{machine = Machine, mstate = MState0, role = Role}) ->
+    {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Value, MState0),
     {C1, Replies} = resolve(I, Tag, Reply, C#core{mstate = MState}),
     case Role of
         leader -> {C1, Replies ++ machine_effects(Effects)};
         _ -> {C1, Replies}
     end;
-apply_command(I, {'$ses', Tag, {ClientId, Seq}, Command}, C = #core{sessions = Sessions}) ->
+apply_value(I, {'$ses', Tag, {ClientId, Seq}, Value}, C = #core{sessions = Sessions}) ->
     case Sessions of
         #{ClientId := {Seq, Reply, _At}} ->
             %% Decided twice, applied once: the answer it got the first time.
@@ -1248,7 +1248,7 @@ apply_command(I, {'$ses', Tag, {ClientId, Seq}, Command}, C = #core{sessions = S
             resolve(I, Tag, {'$error', {session_superseded, Later}}, C);
         _ ->
             #core{machine = Machine, mstate = MState0, role = Role} = C,
-            {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Command, MState0),
+            {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Value, MState0),
             C1 = C#core{
                 mstate = MState,
                 sessions = evict(Sessions#{ClientId => {Seq, Reply, I}}, C#core.max_sessions)
@@ -1259,15 +1259,15 @@ apply_command(I, {'$ses', Tag, {ClientId, Seq}, Command}, C = #core{sessions = S
                 _ -> {C2, Replies}
             end
     end;
-apply_command(I, {'$cfg', Tag, Cfg}, C = #core{cfgs = Cfgs}) ->
+apply_value(I, {'$cfg', Tag, Cfg}, C = #core{cfgs = Cfgs}) ->
     %% Applied, so no longer an entry above the commit index.
     resolve(I, Tag, ok, C#core{acfg = Cfg, cfgs = maps:remove(I, Cfgs)});
-apply_command(I, {'$noop', Tag}, C) ->
+apply_value(I, {'$noop', Tag}, C) ->
     resolve(I, Tag, noop, C).
 
 %% By index, which every server agrees on, so every server evicts the same
-%% client. A client evicted while it still has a command in flight loses
-%% its protection for that command.
+%% client. A client evicted while it still has a value in flight loses
+%% its protection for that value.
 evict(Sessions, Max) when map_size(Sessions) =< Max ->
     Sessions;
 evict(Sessions, _Max) ->
@@ -1291,7 +1291,7 @@ reconfigure(From, {Members0, Spec}, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs,
             {C1, Effects} = propose(undefined, silent, {cfg, {joint, Old, New}}, C),
             {C1#core{reconf = From}, Effects};
         {{final, _Old}, 0, ok} ->
-            propose(From, command, {cfg, {final, New}}, C);
+            propose(From, value, {cfg, {final, New}}, C);
         {_, _, {error, Reason}} ->
             {C, [{reply, From, {error, {invalid_quorum, Reason}}}]};
         _ ->
@@ -1307,7 +1307,7 @@ membership(C = #core{role = leader, id = Id, acfg = ACfg, cfgs = Cfgs}) when map
             Kind =
                 case C#core.reconf of
                     undefined -> silent;
-                    _ -> command
+                    _ -> value
                 end,
             {C1, Effects} = propose(C#core.reconf, Kind, {cfg, {final, New}}, C),
             {C1#core{reconf = undefined}, Effects};
@@ -1341,7 +1341,7 @@ maybe_snapshot(C) ->
 %% Answers whoever is waiting on index I, if anybody is.
 resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) ->
     case maps:take(I, Pending) of
-        {{Tag, From, command}, Pending1} ->
+        {{Tag, From, value}, Pending1} ->
             Answer =
                 case Reply of
                     {'$error', Reason} -> {error, Reason};
@@ -1368,12 +1368,12 @@ resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) -
             {C, []}
     end.
 
-is_decided(I, Log) ->
+is_learned(I, Log) ->
     case Log of
-        #{I := {decided, _}} -> true;
+        #{I := {learned, _}} -> true;
         _ -> false
     end.
 
-command(I, Log) ->
-    {_, Command} = maps:get(I, Log),
-    Command.
+value(I, Log) ->
+    {_, Value} = maps:get(I, Log),
+    Value.

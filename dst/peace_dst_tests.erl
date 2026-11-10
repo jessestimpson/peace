@@ -117,7 +117,7 @@ churn_test_() ->
 
 %% Membership changing under the run: three founders out of five servers,
 %% and requests to move to other members and other quorum systems arriving
-%% among the commands and the faults.
+%% among the values and the faults.
 membership_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -196,7 +196,7 @@ long_lease() ->
     #{servers => 3, churn => true, read_lease_ms => 200, election_timeout_ms => 200}.
 
 %% Without the fence a lease is a leader's unfounded belief, and a read sees
-%% a state that is missing acknowledged commands.
+%% a state that is missing acknowledged values.
 lease_fence_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -249,7 +249,7 @@ stale_leader_is_caught_test_() ->
     end}.
 
 %% A candidate that leads on a promise from a server that has dropped indexes
-%% the candidate never saw puts its own commands in them.
+%% the candidate never saw puts its own values in them.
 snapshot_guard_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -260,7 +260,7 @@ snapshot_guard_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, #{}))), {seed, Seed})
     end}.
 
-%% Clients that retry without a session get commands applied twice, which
+%% Clients that retry without a session get values applied twice, which
 %% is what the suite's clients would be doing to every run without them.
 bare_retries_apply_twice_test_() ->
     {timeout, ?TIMEOUT, fun() ->

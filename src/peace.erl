@@ -1,13 +1,13 @@
 %% @doc peace: replicated state machines over Flexible Paxos.
 %%
 %% The programming model follows ra. You implement `peace_machine', start a
-%% cluster of servers that each run it, and submit commands. peace agrees on
-%% one order for the commands and applies them, in that order, everywhere.
+%% cluster of servers that each run it, and submit values. peace agrees on
+%% one order for the values and applies them, in that order, everywhere.
 %%
 %% ```
 %% Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 %% {ok, _Started, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
-%% {ok, 5, Leader} = peace:process_command(Ids, {add, 5}),
+%% {ok, 5, Leader} = peace:process_value(Ids, {add, 5}),
 %% {ok, 5, _} = peace:consistent_query(Leader, fun(Count) -> Count end).
 %% '''
 %%
@@ -16,7 +16,7 @@
 %% differ, as long as they intersect; see `peace_quorum'.
 %%
 %% ```
-%% %% Five members. Two acknowledgements commit a command; four elect a leader.
+%% %% Five members. Two acknowledgements commit a value; four elect a leader.
 %% peace:start_cluster(Ids, Machine, #{quorum => {counting, 4, 2}}).
 %% '''
 %%
@@ -26,7 +26,8 @@
 %% (UCAM-CL-TR-935, in `docs/'): Multi-Paxos (section 3.6) under revision A's
 %% quorums (4.1). `peace_core' says section by section what is from it and
 %% what is not. The programming model, the names in this module among them,
-%% is ra's: a command here is what the thesis calls a value.
+%% is ra's, with one word changed: what ra calls a command is a value
+%% here, as it is in the thesis.
 -module(peace).
 
 -include("peace.hrl").
@@ -36,9 +37,9 @@
     start_cluster/3,
     start_server/1,
     stop_server/1,
-    process_command/2,
-    process_command/3,
-    pipeline_command/2,
+    process_value/2,
+    process_value/3,
+    pipeline_value/2,
     consistent_query/2,
     consistent_query/3,
     local_query/2,
@@ -57,7 +58,7 @@
     index/0,
     role/0,
     server_config/0,
-    command_opts/0,
+    value_opts/0,
     cluster_opts/0
 ]).
 
@@ -115,13 +116,13 @@
     unsafe_no_lease_fence => boolean()
 }.
 
-%% `session' makes the command safe to retry: see `process_command/3'.
--type command_opts() :: #{
+%% `session' makes the value safe to retry: see `process_value/3'.
+-type value_opts() :: #{
     timeout => timeout(),
     session => {ClientId :: term(), Seq :: non_neg_integer()}
 }.
 
--type command_ret() ::
+-type value_ret() ::
     {ok, Reply :: term(), Leader :: server_id()}
     | {error, term()}
     | {timeout, server_id()}.
@@ -192,61 +193,61 @@ stop_server(Id = {_Name, Node}) ->
     end.
 
 %% ---------------------------------------------------------------------------
-%% Commands and queries
+%% Values and queries
 %% ---------------------------------------------------------------------------
 
-%% @equiv process_command(ServerOrServers, Command, 5000)
--spec process_command(server_id() | [server_id()], peace_machine:command()) -> command_ret().
-process_command(ServerOrServers, Command) ->
-    process_command(ServerOrServers, Command, ?DEFAULT_CALL_TIMEOUT_MS).
+%% @equiv process_value(ServerOrServers, Value, 5000)
+-spec process_value(server_id() | [server_id()], peace_machine:value()) -> value_ret().
+process_value(ServerOrServers, Value) ->
+    process_value(ServerOrServers, Value, ?DEFAULT_CALL_TIMEOUT_MS).
 
-%% @doc Submits a command and waits for it to be applied.
+%% @doc Submits a value and waits for it to be applied.
 %%
-%% Given one server, the command goes there and follows redirects to the
+%% Given one server, the value goes there and follows redirects to the
 %% leader. Given a list, each is tried in turn until one knows a leader.
 %%
-%% `{ok, Reply, Leader}' means the command was decided and applied, and
+%% `{ok, Reply, Leader}' means the value was decided and applied, and
 %% `Reply' is what the machine returned.
 %%
 %% `{timeout, Server}', `{error, leadership_lost}' and
-%% `{error, {server_down, Reason}}' mean the outcome is unknown: the command
+%% `{error, {server_down, Reason}}' mean the outcome is unknown: the value
 %% may be applied later, or never.
 %%
 %% `{error, no_leader}', `{error, noproc}' and `{error, too_many_redirects}'
-%% mean the command was not submitted.
+%% mean the value was not submitted.
 %%
 %% The third argument is a timeout, or options. With
-%% `session => {ClientId, Seq}' a command whose outcome is unknown can be
+%% `session => {ClientId, Seq}' a value whose outcome is unknown can be
 %% submitted again with the same session and will be applied at most once;
 %% the retry is answered with the reply the first application got. A client
-%% picks an id nobody else uses, has one command in flight at a time, and
-%% gives each new command a higher `Seq' than the last. A copy of a command
+%% picks an id nobody else uses, has one value in flight at a time, and
+%% gives each new value a higher `Seq' than the last. A copy of a value
 %% the client has since moved on from is answered
 %% `{error, {session_superseded, Seq}}' and not applied. Without a session,
-%% a retried command may be applied twice.
--spec process_command(server_id() | [server_id()], peace_machine:command(), timeout() | command_opts()) ->
-    command_ret().
-process_command(ServerOrServers, Command, Opts) when is_map(Opts) ->
+%% a retried value may be applied twice.
+-spec process_value(server_id() | [server_id()], peace_machine:value(), timeout() | value_opts()) ->
+    value_ret().
+process_value(ServerOrServers, Value, Opts) when is_map(Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_CALL_TIMEOUT_MS),
     Request =
         case Opts of
             #{session := Session = {_ClientId, Seq}} when is_integer(Seq), Seq >= 0 ->
-                {command, Command, Session};
+                {value, Value, Session};
             #{session := Bad} ->
                 error({badarg, {session, Bad}});
             _ ->
-                {command, Command}
+                {value, Value}
         end,
     leader_call(servers(ServerOrServers), Request, Timeout, ?MAX_HOPS, no_leader);
-process_command(ServerOrServers, Command, Timeout) ->
-    leader_call(servers(ServerOrServers), {command, Command}, Timeout, ?MAX_HOPS, no_leader).
+process_value(ServerOrServers, Value, Timeout) ->
+    leader_call(servers(ServerOrServers), {value, Value}, Timeout, ?MAX_HOPS, no_leader).
 
-%% @doc Submits a command without waiting. Nothing is sent back, and nothing
-%% says whether `Server' was the leader. For commands whose effect is observed
+%% @doc Submits a value without waiting. Nothing is sent back, and nothing
+%% says whether `Server' was the leader. For values whose effect is observed
 %% some other way.
--spec pipeline_command(server_id(), peace_machine:command()) -> ok.
-pipeline_command(Server, Command) ->
-    gen_server:cast(Server, {command, Command}).
+-spec pipeline_value(server_id(), peace_machine:value()) -> ok.
+pipeline_value(Server, Value) ->
+    gen_server:cast(Server, {value, Value}).
 
 %% @equiv consistent_query(ServerOrServers, Fun, 5000)
 -spec consistent_query(server_id() | [server_id()], fun((peace_machine:state()) -> Result)) ->
@@ -255,8 +256,8 @@ consistent_query(ServerOrServers, Fun) ->
     consistent_query(ServerOrServers, Fun, ?DEFAULT_CALL_TIMEOUT_MS).
 
 %% @doc Runs `Fun' on the machine state at a point in the log that follows
-%% every command acknowledged before the query was made: a linearizable read.
-%% It is ordered by replicating a no-op, so it costs what a command costs,
+%% every value acknowledged before the query was made: a linearizable read.
+%% It is ordered by replicating a no-op, so it costs what a value costs,
 %% unless the cluster has `read_lease_ms' set and the leader holds a lease,
 %% in which case it is answered at once from the leader's state.
 -spec consistent_query(server_id() | [server_id()], fun((peace_machine:state()) -> Result), timeout()) ->
@@ -291,7 +292,7 @@ members(Server, Timeout) ->
     call(Server, members, Timeout).
 
 %% @equiv change_members(ServerOrServers, Members, Quorum, 5000)
--spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> command_ret().
+-spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> value_ret().
 change_members(ServerOrServers, Members, Quorum) ->
     change_members(ServerOrServers, Members, Quorum, ?DEFAULT_CALL_TIMEOUT_MS).
 
@@ -299,7 +300,7 @@ change_members(ServerOrServers, Members, Quorum) ->
 %%
 %% Any configuration to any other: adding, removing, replacing every member,
 %% or keeping the members and changing the quorum system. The cluster passes
-%% through a joint configuration, in which a command needs a phase-two quorum
+%% through a joint configuration, in which a value needs a phase-two quorum
 %% of the old and of the new, so there is no moment at which the two could
 %% decide separately. `{ok, ok, Leader}' means the new configuration alone
 %% is in force.
@@ -316,7 +317,7 @@ change_members(ServerOrServers, Members, Quorum) ->
 %% configuration needs a phase-two quorum of its own members reachable, or
 %% nothing more is decided until they are.
 -spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec(), timeout()) ->
-    command_ret().
+    value_ret().
 change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) ->
     leader_call(servers(ServerOrServers), {reconfigure, {Members, Quorum}}, Timeout, ?MAX_HOPS, no_leader).
 

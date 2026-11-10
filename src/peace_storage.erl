@@ -6,7 +6,7 @@
 %% <ul>
 %% <li>the highest epoch it has promised, and</li>
 %% <li>every log entry it has accepted, with the epoch it accepted it in (or
-%%   the marker `decided' once it knows the entry was decided).</li>
+%%   the marker `learned' once it knows the entry was decided).</li>
 %% </ul>
 %%
 %% and a third stands in for entries that have been dropped: a snapshot, the

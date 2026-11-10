@@ -124,7 +124,7 @@ proposer learns what the earlier ones were.
 
 `MCReconfig.tla` instantiates it with three acceptors and two configurations
 that share nobody: `a1` and `a2` under `{counting, 1, 2}`, and `a3` alone.
-Two epochs, two indexes, one command. The invariant is `LearnedAgree`.
+Two epochs, two indexes, one value. The invariant is `LearnedAgree`.
 
 | Config | Expect | Result |
 |---|---|---|
@@ -145,7 +145,7 @@ the model now says so.
 
 **Limits.** Two indexes are enough for a whole change, joint then final, and
 for the final entry to be decided by the new configuration alone, but not
-for a command after it; three indexes did not finish. The commit index and
+for a value after it; three indexes did not finish. The commit index and
 snapshots are not in this model, and neither model combines them with
 membership change. The simulation does.
 

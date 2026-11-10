@@ -45,7 +45,7 @@ EXTENDS Integers, FiniteSets
 
 CONSTANTS
     Acceptors,
-    Cmds,           \* ordinary commands
+    Ordinary,           \* values that are not configuration entries
     Configs,        \* configuration names
     InitConfig,     \* the one every acceptor starts in
     Q1(_),          \* Q1(c): the phase-one quorums of configuration c
@@ -74,7 +74,7 @@ Learned == MaxEpoch + 1
 Joint(old, new) == [type |-> "joint", old |-> old, new |-> new]
 Final(new)      == [type |-> "final", old |-> new, new |-> new]
 ConfigEntries   == {Joint(o, n) : o \in Configs, n \in Configs} \cup {Final(n) : n \in Configs}
-Values          == Cmds \cup ConfigEntries
+Values          == Ordinary \cup ConfigEntries
 
 NoVote == [epoch |-> -1, val |-> None]
 
@@ -158,7 +158,7 @@ Elected(b, P) ==
         /\ \A c \in Bar(b, reports) : \E Q \in Q1(c) : Q \subseteq P
 
 \* Whether the leader of b may introduce v, a value of its own, at index s.
-\* Commands always.  A configuration entry only when the last change is
+\* Ordinary values always.  A configuration entry only when the last change is
 \* over: `joint` from a settled configuration, `final` once the leader
 \* knows the joint entry is decided.
 MayIntroduce(b, s, v) ==
@@ -166,7 +166,7 @@ MayIntroduce(b, s, v) ==
         cfgs == {m \in Proposals(b) : m.val \in ConfigEntries /\ m.index < s}
         settled == \A m \in cfgs : IsLearned(a, m.index)
         now  == LeaderConfig(b)
-    IN  \/ v \in Cmds
+    IN  \/ v \in Ordinary
         \/ /\ UseJoint
            /\ v \in ConfigEntries
            /\ v.type = "joint"

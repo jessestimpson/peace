@@ -1,5 +1,5 @@
 %% A machine for tests: a key-value map that also remembers the order
-%% commands were applied in, so two replicas can be compared exactly.
+%% values were applied in, so two replicas can be compared exactly.
 -module(peace_test_machine).
 
 -behaviour(peace_machine).

@@ -4,7 +4,7 @@ Replicated state machines for Erlang over **Flexible Paxos**.
 
 The programming model is [ra](https://github.com/rabbitmq/ra)'s: you write a
 deterministic state machine, start a cluster of servers that each run it, and
-submit commands. peace agrees on one order for the commands and applies them,
+submit values. peace agrees on one order for the values and applies them,
 in that order, on every server.
 
 Where it differs from ra is the quorum. Raft needs a majority both to elect a
@@ -13,7 +13,7 @@ leader and to commit an entry. Flexible Paxos (Heidi Howard's thesis,
 two only have to intersect each other, so a cluster can choose where to spend:
 
 ```erlang
-%% Five members. Two acknowledgements commit a command; four elect a leader.
+%% Five members. Two acknowledgements commit a value; four elect a leader.
 peace:start_cluster(Ids, Machine, #{quorum => {counting, 4, 2}}).
 ```
 
@@ -35,7 +35,7 @@ apply(_Meta, reset, Count) -> {0, Count}.
 Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 {ok, _Started, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
 
-{ok, 5, Leader} = peace:process_command(Ids, {add, 5}),
+{ok, 5, Leader} = peace:process_value(Ids, {add, 5}),
 {ok, 5, _} = peace:consistent_query(Leader, fun(Count) -> Count end),
 {ok, 5, _} = peace:local_query(hd(Ids), fun(Count) -> Count end).   %% may be stale
 ```
@@ -65,14 +65,15 @@ and uses its words. Section numbers in the code and in this file are to it.
 | `{counting, N div 2 + 1, N div 2}` | the even nodes optimisation (§4.3.3) |
 | `{grid, Rows}` | the grid of §4.1.3 |
 | `propose_to => quorum` | proposing to a phase-two quorum (§4.3.3) |
-| command | value |
+| value, what a machine applies | value |
 
 Not in the thesis, and named as Raft and Viewstamped Replication name them:
 the pre-vote, a leader standing down for want of a quorum, the commit index,
 sessions, snapshots, read leases, and membership change by joint
 configurations. Membership change is in the direction of revision B (§4.2)
 but is not that revision. The programming model is
-[ra](https://github.com/rabbitmq/ra)'s.
+[ra](https://github.com/rabbitmq/ra)'s, except that ra's command is a value
+here.
 
 ## Quorum systems
 
@@ -103,13 +104,13 @@ callbacks.
 
 ## Retries, snapshots, reads and elections
 
-**Sessions.** A client that times out cannot know whether its command was
-decided. Submitted with `#{session => {ClientId, Seq}}`, a command is applied
+**Sessions.** A client that times out cannot know whether its value was
+decided. Submitted with `#{session => {ClientId, Seq}}`, a value is applied
 at most once however often it is retried, and the retry gets the reply the
-first application got. One command in flight per client, `Seq` increasing.
+first application got. One value in flight per client, `Seq` increasing.
 
 ```erlang
-{ok, Reply, _} = peace:process_command(Ids, Cmd, #{session => {my_id, 17}, timeout => 2000}).
+{ok, Reply, _} = peace:process_value(Ids, Value, #{session => {my_id, 17}, timeout => 2000}).
 ```
 
 **Snapshots.** Every `snapshot_interval` applied indexes (default 4096) a
@@ -129,7 +130,7 @@ ten per cent of each other.
 **Membership.** `peace:change_members(Servers, Members, Quorum)` moves the
 cluster to any other configuration: other members, more, fewer, none in
 common, or the same members under another quorum system. It passes through
-a joint configuration in which a command needs a phase-two quorum of the old
+a joint configuration in which a value needs a phase-two quorum of the old
 and of the new, so the two can never decide apart, and the change is in the
 log, so it survives the leader that started it. A server to be added is
 started first with `members` set to the cluster as it is, and waits.
@@ -141,7 +142,7 @@ ok = peace:start_server(#{id => D, members => [A, B, C], machine => Machine}),
 
 **Proposing to a phase-two quorum** (§4.3.3). With `propose_to => quorum`
 a leader sends each proposal to the fewest peers that make a phase-two quorum
-with it. Under `{counting, 4, 2}` over five that is one peer per command, not
+with it. Under `{counting, 4, 2}` over five that is one peer per value, not
 four. A proposal those peers do not accept within two heartbeats goes to
 everybody. Off by default. The thesis's standbys hold no copy of the value;
 peace's are a heartbeat behind and learn by asking, so the saving is in
@@ -172,7 +173,7 @@ and a network that drops and delays. The workload includes cutting servers
 off, killing them and restarting them from their disks. Seven invariants are
 checked after every step, among them agreement across the whole run, that
 memory never runs ahead of disk, and that a linearizable read contains every
-command acknowledged before it. A second workload goes after leadership
+value acknowledged before it. A second workload goes after leadership
 instead: forced elections, two-server splits and long-delayed `learned`
 messages. Servers snapshot every five indexes and clients retry under
 sessions, so truncation, recovery and catching up by snapshot are in every

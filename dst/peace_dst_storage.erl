@@ -38,14 +38,14 @@ write(Batch, State = {Tab, Id}) ->
     %% and drop it under a snapshot in the one step.
     lists:foreach(
         fun
-            ({I, {decided, Command}}) ->
-                case ets:insert_new(Tab, {{decided, I}, Command}) of
+            ({I, {learned, Value}}) ->
+                case ets:insert_new(Tab, {{decided, I}, Value}) of
                     true ->
                         ok;
                     false ->
                         case ets:lookup_element(Tab, {decided, I}, 2) of
-                            Command -> ok;
-                            Earlier -> ets:insert(Tab, {{conflict, I, Id}, Command, Earlier})
+                            Value -> ok;
+                            Earlier -> ets:insert(Tab, {{conflict, I, Id}, Value, Earlier})
                         end
                 end;
             (_) ->

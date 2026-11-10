@@ -15,7 +15,7 @@
 %%
 %% == The workload ==
 %%
-%% Commands and linearizable reads from clients, and when `faults' is on:
+%% Values and linearizable reads from clients, and when `faults' is on:
 %% cutting a server off from the others, healing every cut, killing a
 %% server, restarting one. A fault is an operation like any other, so it
 %% lands where the seed put it, is recorded in the trace, and replays.
@@ -31,21 +31,21 @@
 %% <li>`agreement' - no index is ever decided with two values, by anybody, at
 %%   any time in the run. TLA+ `LearnedAgree'.</li>
 %% <li>`applied_matches_decided' - a server's machine has applied exactly the
-%%   decided log up to its commit index, in order, each session's command
+%%   decided log up to its commit index, in order, each session's value
 %%   once. The decided log is the harness's own record, so this holds a
 %%   server that was sent a snapshot to the same account as one that
 %%   applied every entry.</li>
 %% <li>`acknowledged_is_decided' - a client told `{ok, Index}' finds its
-%%   command decided at that index.</li>
-%% <li>`applied_once' - no machine has applied a command twice, however many
+%%   value decided at that index.</li>
+%% <li>`applied_once' - no machine has applied a value twice, however many
 %%   indexes a client's retries put it in.</li>
 %% <li>`linearizable_read' - a consistent query returns a prefix of the
-%%   decided log that contains every command acknowledged before the query
+%%   decided log that contains every value acknowledged before the query
 %%   was issued.</li>
 %% </ul>
 %%
 %% and at the end of a run with `converge' on: every server has applied the
-%% same indexes to the same state and at least one command was acknowledged.
+%% same indexes to the same state and at least one value was acknowledged.
 %%
 %% Servers snapshot every few indexes, so that truncation, recovery from a
 %% snapshot and catching up by one are part of every run. Clients submit
@@ -77,7 +77,7 @@
 %% <li>`no_lease_fence' - with read leases on, servers promise other epochs
 %%   while a leader still counts on them, and a deposed leader answers a
 %%   read from its own stale state.</li>
-%% <li>`bare_retries' - clients retry without a session, and a command is
+%% <li>`bare_retries' - clients retry without a session, and a value is
 %%   applied twice. Not a bug in peace: it shows `applied_once' can fail.</li>
 %% <li>`no_conflict_step_down' - a leader that learns an index was decided
 %%   against its own proposal goes on leading. The same change as
@@ -214,18 +214,18 @@ generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
     {I, Rand2} = rand:uniform_s(N, Rand1),
     Op =
         if
-            Churn, Roll < 0.45 -> {command, I};
+            Churn, Roll < 0.45 -> {value, I};
             Churn, Roll < 0.53 -> {query, I};
             Churn, Roll < 0.68 -> {elect, I};
             Churn, Roll < 0.76 -> {split, I, I rem N + 1};
             Churn, Roll < 0.90 -> {rumour, I};
             Churn, Roll < 0.94 -> {isolate, I};
             Churn -> heal;
-            not Faults, Roll < 0.80 -> {command, I};
+            not Faults, Roll < 0.80 -> {value, I};
             not Faults -> {query, I};
-            %% Faults are kept rare. Too many and no command ever completes,
-            %% and only a completed command can contradict anything.
-            Roll < 0.62 -> {command, I};
+            %% Faults are kept rare. Too many and no value ever completes,
+            %% and only a completed value can contradict anything.
+            Roll < 0.62 -> {value, I};
             Roll < 0.80 -> {query, I};
             Roll < 0.84 -> {isolate, I};
             Roll < 0.91 -> heal;
@@ -237,11 +237,11 @@ generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
 %% Client operations name the server they try first by index, and the
 %% operation's own identity is its position in the run: nothing in an
 %% operation is a pid, a ref or a generated name, so a trace replays.
-execute({command, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
+execute({value, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
     Retry = maps:get(retry, S),
-    spawn_op(clients, fun() -> peace_dst_client:command(Tab, C, Servers, C, Retry) end, S#{clients := C});
+    spawn_op(clients, fun() -> peace_dst_client:value(Tab, C, Servers, C, Retry) end, S#{clients := C});
 execute({query, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
@@ -298,7 +298,7 @@ execute({split, I, J}, S = #{n := N}) ->
     bump(splits),
     S;
 execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
-    Decided = lists:sort([{Index, Command} || [Index, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
+    Decided = lists:sort([{Index, Value} || [Index, Value] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
     case lists:nthtail(max(0, length(Decided) - 4), Decided) of
         [] ->
             S;
@@ -429,16 +429,16 @@ promise_never_regresses(Tab, Disks) ->
 agreement(Tab, Disks) ->
     Conflicts =
         [
-            #{index => I, server => Id, decided => Command, earlier => Earlier}
+            #{index => I, server => Id, decided => Value, earlier => Earlier}
          || {Id, _Promised, Stored} <- Disks,
-            {I, {decided, Command}} <- lists:sort(maps:to_list(Stored)),
-            Earlier <- [remembered(Tab, {decided, I}, Command)],
-            Earlier =/= Command
+            {I, {learned, Value}} <- lists:sort(maps:to_list(Stored)),
+            Earlier <- [remembered(Tab, {decided, I}, Value)],
+            Earlier =/= Value
         ] ++
             %% Noted by the disk at the write: see `peace_dst_storage'.
             [
-                #{index => I, server => Id, decided => Command, earlier => Earlier}
-             || [I, Id, Command, Earlier] <- ets:match(Tab, {{conflict, '$1', '$2'}, '$3', '$4'})
+                #{index => I, server => Id, decided => Value, earlier => Earlier}
+             || [I, Id, Value, Earlier] <- ets:match(Tab, {{conflict, '$1', '$2'}, '$3', '$4'})
             ],
     case Conflicts of
         [] -> ok;
@@ -460,7 +460,7 @@ applied_matches_decided(Views, Record) ->
     end.
 
 %% What a machine holds after the first `Commit' indexes of the decided log:
-%% every command without a session, and each session's command the first
+%% every value without a session, and each session's value the first
 %% time it appears. `missing' if the record does not reach that far, which
 %% no server's commit index may run ahead of.
 expected(Commit, Record) ->
@@ -470,14 +470,14 @@ expected(I, Commit, _Record, _Sessions, Acc) when I > Commit ->
     lists:reverse(Acc);
 expected(I, Commit, Record, Sessions, Acc) ->
     case Record of
-        #{I := {'$usr', _Tag, Command}} ->
-            expected(I + 1, Commit, Record, Sessions, [{I, Command} | Acc]);
-        #{I := {'$ses', _Tag, {Client, Seq}, Command}} ->
+        #{I := {'$usr', _Tag, Value}} ->
+            expected(I + 1, Commit, Record, Sessions, [{I, Value} | Acc]);
+        #{I := {'$ses', _Tag, {Client, Seq}, Value}} ->
             case Sessions of
                 #{Client := Last} when Last >= Seq ->
                     expected(I + 1, Commit, Record, Sessions, Acc);
                 _ ->
-                    expected(I + 1, Commit, Record, Sessions#{Client => Seq}, [{I, Command} | Acc])
+                    expected(I + 1, Commit, Record, Sessions#{Client => Seq}, [{I, Value} | Acc])
             end;
         #{I := {'$noop', _Tag}} ->
             expected(I + 1, Commit, Record, Sessions, Acc);
@@ -488,7 +488,7 @@ expected(I, Commit, Record, Sessions, Acc) ->
     end.
 
 decided_record(Tab) ->
-    maps:from_list([{I, Command} || [I, Command] <- ets:match(Tab, {{decided, '$1'}, '$2'})]).
+    maps:from_list([{I, Value} || [I, Value] <- ets:match(Tab, {{decided, '$1'}, '$2'})]).
 
 %% The live members of the latest configuration anybody has: the one in
 %% force at whoever has applied most. A server that was removed stops being
@@ -531,7 +531,7 @@ acknowledged_is_decided(Tab) ->
     ],
     case Wrong of
         [] -> ok;
-        _ -> violation(acknowledged_is_decided, #{commands => Wrong})
+        _ -> violation(acknowledged_is_decided, #{values => Wrong})
     end.
 
 applied_once(Views) ->
@@ -573,8 +573,8 @@ is_applied_prefix(Record, Ops) ->
 
 decided_at(Tab, Index) ->
     case ets:lookup(Tab, {decided, Index}) of
-        [{_, {'$usr', _Tag, Command}}] -> Command;
-        [{_, {'$ses', _Tag, _Session, Command}}] -> Command;
+        [{_, {'$usr', _Tag, Value}}] -> Value;
+        [{_, {'$ses', _Tag, _Session, Value}}] -> Value;
         [{_, {'$noop', _Tag}}] -> noop;
         [{_, {'$cfg', _Tag, _Cfg}}] -> cfg;
         [] -> undecided
