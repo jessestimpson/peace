@@ -1,0 +1,14 @@
+{application, peace, [
+    {description, "Flexible Paxos: replicated state machines with configurable quorums"},
+    {vsn, "0.1.0"},
+    {registered, [peace_sup]},
+    {mod, {peace_app, []}},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
+ ]}.
