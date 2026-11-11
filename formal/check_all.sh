@@ -9,7 +9,8 @@
 # not run again: TLC's answer depends on the model and the config and nothing
 # else. The inputs are the config, the two modules it instantiates, check.sh
 # and the name of the jar; checked.tsv records a hash of them beside each
-# result. FORCE=1 runs everything regardless.
+# result. FORCE=1 runs everything regardless. Each run's output is left in
+# logs/<Config>.log.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -58,15 +59,16 @@ run() { # config expectation
     fi
   fi
   echo "=== $1 (expect $2)"
-  out="$(mktemp)"
-  if ./check.sh "$1" "$2" >"$out" 2>&1; then
+  # The whole of TLC's output is kept, so the verdict of a run that took
+  # hours does not depend on whoever was watching it.
+  mkdir -p logs
+  out="logs/$1.log"
+  if ./check.sh "$1" "$2" >|"$out" 2>&1; then
     grep -E "Invariant .* is violated|distinct states found|No error has been found|^OK:|Finished in" "$out" || true
     summary="$(grep -Eo "[0-9,]+ distinct states found" "$out" | tail -1 | sed 's/ found//'), $(grep -Eo "Finished in [0-9a-z ]+" "$out" | tail -1 | sed -e 's/Finished in //' -e 's/ at $//')"
-    rm -f "$out"
     record "$1" "$2" "$hash" "$summary"
   else
     tail -40 "$out"
-    rm -f "$out"
     echo "FAILED: $1 did not $2"
     exit 1
   fi

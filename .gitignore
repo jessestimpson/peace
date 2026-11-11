@@ -21,5 +21,6 @@ rebar3.crashdump
 
 # TLC
 formal/states/
+formal/logs/
 formal/*_TTrace_*
 formal/tla2tools.jar

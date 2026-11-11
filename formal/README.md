@@ -71,7 +71,8 @@ on the model and the config and on nothing in `src/`, so `check_all.sh`
 keeps a ledger, [`checked.tsv`](checked.tsv): for each config, a hash of the
 config, the two modules it instantiates, `check.sh` and the jar's name, with
 the date and size of the run that last behaved as expected. A config whose
-hash is in the ledger is reported and skipped. `FORCE=1` runs it anyway. The
+hash is in the ledger is reported and skipped. `FORCE=1` runs it anyway.
+TLC's whole output from each run is left in `logs/<Config>.log`. The
 ledger is committed, so a clone knows what was checked without spending the
 hours again; it is a record, not a proof, and anyone who doubts it can force
 the run. The rows for the four long `FPaxos` configs were written from the
@@ -143,11 +144,13 @@ Two epochs, two indexes, one value. The invariant is `LearnedAgree`.
 |---|---|---|
 | `Reconfig` | holds | 44.3 million states, 25 minutes |
 | `ReconfigNoJoint` | fails: straight to the new configuration | violated in seconds |
-| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after 13.9 million states, 6 minutes |
+| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after about 13 million states, 6 minutes |
 | `ReconfigReachableFinal` | fails: a change completes | seconds |
 | `ReconfigReachableRaised` | fails: a promise raises the bar | seconds |
 
-`ReconfigNoJoint` is in the quick set and the rest in the long one.
+`ReconfigNoJoint` is in the quick set and the rest in the long one. Run again
+on 2026-11-11 after `CoLocated` was added to the module: `Reconfig` has the
+same 44,286,932 states as before.
 
 **Co-located roles.** In the model as first written a proposer is nobody in
 particular: any epoch may be prepared at any time, whatever its owner has
