@@ -178,11 +178,21 @@ left out the rule that a contradicted leader stops, which `FlexiblePaxos.tla`
 has as `ConflictStepDown`. So membership change depends on that rule, and
 the model now says so.
 
-**Limits.** Two indexes are enough for a whole change, joint then final, and
-for the final entry to be decided by the new configuration alone, but not
-for a value after it; three indexes did not finish. The commit index and
-snapshots are not in this model, and neither model combines them with
-membership change. The simulation does.
+**Three indexes.** Two indexes are enough for a whole change, joint then
+final, and for the final entry to be decided by the new configuration alone,
+but not for a value after it. `ReconfigThreeIndexes` adds the third, with
+co-located roles, and `ReconfigReachableAfterFinal` shows that a value
+decided after a completed change is among the states it visits. It holds:
+414,108,959 states, 5.17 billion generated, depth 34, 8 hours 6 minutes on
+2026-11-11. It is in a set of its own, `./check_all.sh soak`. At that size
+TLC's estimate of the chance that a fingerprint collision hid a state is
+0.009 from the fingerprints it saw and 0.11 by its pessimistic formula, so
+this is strong evidence and not certainty.
+
+**Limits.** Three indexes were checked only with co-located roles; with
+separate roles the model is checked to two. One change, two epochs, one
+value. The commit index and snapshots are not in this model, and neither
+model combines them with membership change. The simulation does.
 
 ## Tooling
 

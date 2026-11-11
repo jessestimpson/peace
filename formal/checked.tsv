@@ -27,3 +27,4 @@ ReconfigNoJoint	fail	1b15108b0971449b	2026-11-10	242814 distinct states, 10s
 ReconfigReachableAfterFinal	fail	a25e683d32bdbbb2	2026-11-10	178032 distinct states, 15s
 ReconfigReachableFinal	fail	4bcbf754d85f4c99	2026-11-11	169067 distinct states, 04s
 ReconfigReachableRaised	fail	aca03e338ed1263f	2026-11-11	1161 distinct states, 00s
+ReconfigThreeIndexes	pass	be87e25cd0c3e265	2026-11-11	414108959 distinct states, 08h 06min
