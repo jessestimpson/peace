@@ -194,6 +194,32 @@ separate roles the model is checked to two. One change, two epochs, one
 value. The commit index and snapshots are not in this model, and neither
 model combines them with membership change. The simulation does.
 
+## Trace validation
+
+`TraceFlexiblePaxos.tla` follows one run of the code through
+`FlexiblePaxos.tla`. [`dst/peace_dst_trace.erl`](../dst/peace_dst_trace.erl)
+writes the run as `TraceData.tla`: the quorum system, and a sequence of the
+model's actions with their arguments, derived from what each server's
+durable state did at each step. The spec's only behaviour takes them in
+order, and after the last action of each step of the code requires
+`promised` and `accepted` to be what the server then held. TLC reaches the
+end of the sequence or it does not; `check_trace.sh <dir>` says which, and
+on a rejection prints the action the model refused.
+
+`make trace` validates 50 runs of three workloads (crashes and cuts, forced
+elections and rumours, and five servers under `{counting, 4, 2}`), some
+38 thousand actions, every action of the model among them, and four planted
+bugs that must be rejected. A run is about a second of TLC.
+
+What a pass does not show is listed at the top of `peace_dst_trace.erl`. The
+main one: the model's messages are all messages sent, so an action passes if
+the messages that justify it were sent, whether or not the server had
+received them.
+
+This is why the long runs above need not be repeated when the code changes.
+They are about the model. Whether the code is the model is checked here, in
+minutes.
+
 ## Tooling
 
 TLC from `vendor/tla2tools-v1.8.0.jar`, or `$TLA2TOOLS_JAR`, or a

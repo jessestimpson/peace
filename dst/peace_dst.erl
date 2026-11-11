@@ -143,7 +143,7 @@ init(_Seed, Config) ->
     %% dst/ is not part of the peace application, so `preload => [peace]'
     %% does not reach these, and a module loaded mid-run is a call to the
     %% code server that the schedule does not own.
-    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk]],
+    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_trace]],
     %% Ordered, so that reading one server's disk is a range and not a scan.
     Tab = ets:new(peace_dst, [public, ordered_set]),
     Ids = [id(I) || I <- lists:seq(1, N)],
@@ -645,6 +645,27 @@ stored_promised(Tab, Id) ->
 %% ---------------------------------------------------------------------------
 
 server_config(I, Id, Founders, Mode, Tab, Config) ->
+    Server = server_config1(I, Id, Founders, Mode, Tab, Config),
+    case Config of
+        %% Every step every server takes, in the order they were taken, for
+        %% `peace_dst_trace' to hold against the model. The table is the
+        %% caller's, so it outlives the run.
+        #{trace := Trace} ->
+            Server#{
+                test_tracer => fun({_, Event, Before, After, Effects}) ->
+                    N = ets:update_counter(Trace, seq, 1, {seq, 0}),
+                    ets:insert(
+                        Trace,
+                        {N, Id, peace_dst_trace:event(Event), peace_dst_trace:view(Before),
+                            peace_dst_trace:view(After), peace_dst_trace:sends(Effects)}
+                    )
+                end
+            };
+        _ ->
+            Server
+    end.
+
+server_config1(I, Id, Founders, Mode, Tab, Config) ->
     Storage =
         case {maps:get(disk, Config, model), Mode} of
             {model, _} -> #{tab => Tab};

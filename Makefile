@@ -1,4 +1,4 @@
-.PHONY: all compile test dst tlc tlc-long tlc-soak check
+.PHONY: all compile test dst trace tlc tlc-long tlc-soak check
 
 all: compile
 
@@ -19,6 +19,11 @@ test:
 dst:
 	ERL_FLAGS="+S 1" rebar3 as dst eunit
 
+# Trace validation: simulated runs, each checked by TLC to be a behaviour of
+# formal/FlexiblePaxos.tla. See dst/peace_dst_trace.erl. Needs eta and Java.
+trace:
+	ERL_FLAGS="+S 1" rebar3 as dst eunit --module=peace_dst_trace_tests
+
 # Model checking with TLC. See formal/README.md. A config whose model has not
 # changed since it was last checked is skipped; FORCE=1 runs it anyway.
 tlc:
@@ -30,4 +35,4 @@ tlc-long:
 tlc-soak:
 	formal/check_all.sh soak
 
-check: test dst tlc
+check: test dst trace tlc

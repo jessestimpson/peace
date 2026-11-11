@@ -155,7 +155,7 @@ are told instead of left to time out.
 
 ## How it is checked
 
-Three layers, each covering what the one before cannot.
+Four layers, each covering what the one before cannot.
 
 **TLA+ and TLC** ([formal/](formal/README.md)). The protocol as a model,
 checked exhaustively at small bounds: agreement, and that everything a server
@@ -188,6 +188,22 @@ the deposed leader and the candidate behind a snapshot of the model's
 mutations, a lease nobody honours, clocks ten times apart, a change of
 membership with no joint step, and clients that retry without a session.
 
+**Trace validation** ([dst/peace_dst_trace.erl](dst/peace_dst_trace.erl)).
+The link between the two above: the model is checked exhaustively but is not
+the code, and the simulation runs the code but only against invariants. A
+simulated run is restated as a sequence of the model's actions, derived from
+what each server's promise, log and snapshot did and what it sent, not from
+what the code says it was doing, and TLC checks that the sequence is a
+behaviour of `FlexiblePaxos.tla` that leaves the model holding what the
+servers hold. One run takes TLC about a second, where the model takes
+hours, so a change to the code is checked against the model without
+checking the model again. It refuses runs the invariants pass: with quorums
+that do not intersect, 30 runs in 30 where the invariants catch 6,
+and a contradicted leader that goes on leading at its first proposal over a
+decided index, which the invariants need hundreds of seeds to see harm
+from. It covers what the model has, so not membership change, leases or
+sessions.
+
 The switches that plant those bugs are compiled in only when `TEST` is
 defined, as `rebar3 eunit` defines it. A shipped build does not read them:
 no configuration can turn a safeguard off.
@@ -202,6 +218,7 @@ simulation assumes of a disk, through closes and kills.
 ```
 make test       # rebar3 eunit
 make dst        # rebar3 as dst eunit, on one scheduler thread (about eight minutes)
+make trace      # simulated runs checked against the model by TLC (a few minutes)
 make tlc        # formal/check_all.sh quick  (a few minutes)
 make tlc-long   # the configs with tens of millions of states
 ```
@@ -210,7 +227,7 @@ The TLC targets skip any config whose model and config are as they were when
 it was last checked ([formal/checked.tsv](formal/checked.tsv)), so the long
 runs are paid for when the model changes and not otherwise.
 
-`make dst` needs eta. The `dst` profile names it as a git dependency; for
+`make dst` and `make trace` need eta. The `dst` profile names it as a git dependency; for
 local work, link a checkout at `_checkouts/eta`.
 
 ## Layout
@@ -225,6 +242,7 @@ local work, link a checkout at `_checkouts/eta`.
 | [src/peace_storage.erl](src/peace_storage.erl) | the storage behaviour, and two backends beside it |
 | [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | the model; `peace_core` names the action each clause implements |
 | [formal/Reconfig.tla](formal/Reconfig.tla) | the model of membership change |
+| [formal/TraceFlexiblePaxos.tla](formal/TraceFlexiblePaxos.tla) | the model following one run of the code |
 
 ## Not here yet
 

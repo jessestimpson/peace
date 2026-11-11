@@ -18,6 +18,7 @@
 
 -export([start_link/1, start/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export_type([step/0]).
 
 %% What a simulated run's log says this server did, one line per event.
 -ifdef(DST).
@@ -44,8 +45,19 @@ log_event(Event) -> Event.
     heartbeat_ms :: pos_integer(),
     timers = #{} :: #{election | heartbeat => reference()},
     %% Nodes a connection attempt is in flight to. See `send/3'.
-    connecting = #{} :: #{node() => reference()}
+    connecting = #{} :: #{node() => reference()},
+    %% Told every step the core takes. Only ever set in a test build: see
+    %% `tracer/1'.
+    tracer :: undefined | fun((step()) -> term())
 }).
+
+%% One step of the core, for trace validation against the TLA+ model: the
+%% event (`init' on start), the core before (`undefined' on start) and
+%% after, and the effects, all of which have been performed.
+-type step() ::
+    {peace:server_id(), init | peace_core:event(), undefined | peace_core:core(), peace_core:core(), [
+        peace_core:effect()
+    ]}.
 
 %% ---------------------------------------------------------------------------
 %% API
@@ -75,13 +87,16 @@ init(Config = #{id := Id, members := Members}) ->
             ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
             State = #state{
                 core = Core,
+                tracer = tracer(Config),
                 clock = Clock,
                 storage_mod = StorageMod,
                 storage = Storage,
                 election_ms = ElectionMs,
                 heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
             },
-            {ok, perform(Effects, State)};
+            State1 = perform(Effects, State),
+            ok = trace(State1, {Id, init, undefined, Core, Effects}),
+            {ok, State1};
         {error, Reason} ->
             {stop, {invalid_quorum, Reason}}
     end.
@@ -166,7 +181,25 @@ check_quorum1(Config, Members) ->
 event(Event, State = #state{core = Core0}) ->
     {Core, Effects} = peace_core:handle(Event, now_ms(State#state.clock), Core0),
     _ = ?TRACE(Event, Core),
-    perform(Effects, State#state{core = Core}).
+    State1 = perform(Effects, State#state{core = Core}),
+    ok = trace(State1, {peace_core:id(Core), Event, Core0, Core, Effects}),
+    State1.
+
+%% A test build may ask to be told each step, once it has been performed, so
+%% that a run can be checked against the model: see `dst/peace_dst_trace'.
+-ifdef(TEST).
+tracer(Config) -> maps:get(test_tracer, Config, undefined).
+
+trace(#state{tracer = undefined}, _Step) ->
+    ok;
+trace(#state{tracer = Tracer}, Step) ->
+    _ = Tracer(Step),
+    ok.
+-else.
+tracer(_Config) -> undefined.
+
+trace(_State, _Step) -> ok.
+-endif.
 
 %% Persist first, in one write, then everything else in the order given.
 perform(Effects, State0) ->

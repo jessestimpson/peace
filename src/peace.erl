@@ -117,7 +117,9 @@
     unsafe_no_lease_fence => boolean(),
     unsafe_no_joint => boolean(),
     %% The rate of this server's clock, `{Num, Den}'. Test builds only.
-    test_clock_rate => {pos_integer(), pos_integer()}
+    test_clock_rate => {pos_integer(), pos_integer()},
+    %% Called with every step the server's core takes. Test builds only.
+    test_tracer => fun((peace_server:step()) -> term())
 }.
 
 %% `session' makes the value safe to retry: see `propose/3'.
