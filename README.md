@@ -1,23 +1,29 @@
 # peace
 
-Replicated state machines for Erlang over **Flexible Paxos**.
+peace is an Erlang library for replicated state machines. It implements
+Flexible Paxos.
 
-The programming model is [ra](https://github.com/rabbitmq/ra)'s: you write a
-deterministic state machine, start a cluster of servers that each run it, and
-submit values. peace agrees on one order for the values and applies them,
-in that order, on every server.
+You write a deterministic state machine and start a cluster of servers that
+each run it. Clients submit values. peace puts the values in one order and
+applies them in that order on every server. The API is modelled on
+[ra](https://github.com/rabbitmq/ra).
 
-Where it differs from ra is the quorum. Raft needs a majority both to elect a
-leader and to commit an entry. Flexible Paxos (Heidi Howard's thesis,
-[docs/UCAM-CL-TR-935.pdf](docs/UCAM-CL-TR-935.pdf), chapter 4) shows that the
-two only have to intersect each other, so a cluster can choose where to spend:
+The difference from ra is the quorum rule. Raft requires a majority to elect
+a leader and a majority to commit an entry. Flexible Paxos requires only
+that every election quorum intersects every commit quorum, so the two sizes
+can be set separately:
 
 ```erlang
-%% Five members. Two acknowledgements commit a value; four elect a leader.
+%% Five members. Two acknowledgements commit a value. Four elect a leader.
 peace:start_cluster(Ids, Machine, #{quorum => {counting, 4, 2}}).
 ```
 
-## A state machine
+Flexible Paxos is described in chapter 4 of Heidi Howard's thesis,
+[Distributed consensus revised](docs/UCAM-CL-TR-935.pdf) (UCAM-CL-TR-935).
+
+## Example
+
+A state machine:
 
 ```erlang
 -module(counter).
@@ -30,6 +36,8 @@ apply(_Meta, {add, N}, Count) -> {Count + N, Count + N};
 apply(_Meta, reset, Count) -> {0, Count}.
 ```
 
+A cluster that runs it:
+
 ```erlang
 {ok, _} = application:ensure_all_started(peace),
 Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
@@ -40,229 +48,344 @@ Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
 {ok, 5, _} = peace:local_query(hd(Ids), fun(Count) -> Count end).   %% may be stale
 ```
 
-`apply/3` may also return effects, which only the leader performs
-(`{send_msg, Dest, Msg}`, `{mod_call, M, F, A}`), and a machine may export
-`state_enter/2` to react to becoming leader. See
+`apply/3` can also return effects. Only the leader performs them. The
+effects are `{send_msg, Dest, Msg}` and `{mod_call, M, F, A}`. A machine can
+export `state_enter/2` to be called when its server changes role. See
 [peace_machine](src/peace_machine.erl).
 
-## The thesis
+## Relation to the thesis
 
-peace follows Heidi Howard's thesis,
-[Distributed consensus revised](docs/UCAM-CL-TR-935.pdf) (UCAM-CL-TR-935),
-and uses its words. Section numbers in the code and in this file are to it.
+peace uses the terminology of the thesis. Section numbers in the code and in
+this file refer to it.
 
-| Here | Thesis |
+| peace | Thesis |
 |---|---|
-| epoch, `{Round, ServerId}` | epoch (§2.2); unique by construction, where §3.9 has acceptors vote for one |
-| `prepare`, `promise` | phase one (§2.2) |
-| `propose`, `accept` | phase two (§2.2) |
+| epoch, `{Round, ServerId}` | Epoch (§2.2). peace epochs are unique by construction. In §3.9 acceptors vote for an epoch. |
+| `prepare`, `promise` | Phase one (§2.2) |
+| `propose`, `accept` | Phase two (§2.2) |
 | `nack` | NACKs (§3.1) |
-| decided, learned | decided; learning (§3.3) |
-| leader, one phase one for the whole sequence | Multi-Paxos (§3.6) |
-| every server a proposer and an acceptor | roles (§3.7) |
-| phase-one and phase-two quorums | revision A (§4.1), published as Flexible Paxos |
+| decided, learned | Decided, learning (§3.3) |
+| leader, with one phase one for the whole sequence | Multi-Paxos (§3.6) |
+| every server is a proposer and an acceptor | Co-located roles (§3.7) |
+| phase-one and phase-two quorums | Revision A (§4.1), published as Flexible Paxos |
 | `{counting, N, 1}`, `{counting, 1, N}` | Singleton Paxos, All aboard Paxos (§4.3.2) |
-| `{counting, N div 2 + 1, N div 2}` | the even nodes optimisation (§4.3.3) |
-| `{grid, Rows}` | the grid of §4.1.3 |
-| `propose_to => quorum` | proposing to a phase-two quorum (§4.3.3) |
-| value, what a machine applies | value |
+| `{counting, N div 2 + 1, N div 2}` | Even nodes optimisation (§4.3.3) |
+| `{grid, Rows}` | Grid quorums (§4.1.3) |
+| `propose_to => quorum` | Proposing to a phase-two quorum (§4.3.3) |
+| value | Value |
 
-Not in the thesis, and named as Raft and Viewstamped Replication name them:
-the pre-vote, a leader standing down for want of a quorum, the commit index,
-sessions, snapshots, read leases, and membership change by joint
-configurations. Membership change is in the direction of revision B (§4.2)
-but is not that revision. The programming model is
-[ra](https://github.com/rabbitmq/ra)'s, except that ra's command is a value
-here.
+These features are not in the thesis. peace uses the names from Raft and
+Viewstamped Replication for them:
+
+- pre-vote
+- a leader stepping down when it loses its quorum
+- commit index
+- sessions
+- snapshots
+- read leases
+- membership change through joint configurations
+
+Membership change is related to revision B (§4.2) but does not implement it.
+
+peace calls the thing a client submits a value, as the thesis does. ra calls
+it a command.
 
 ## Quorum systems
 
 | `quorum` | Phase one (elect) | Phase two (commit) |
 |---|---|---|
 | `majority` (default) | more than half | more than half |
-| `{counting, Q1, Q2}` | any `Q1` members | any `Q2` members, `Q1 + Q2 > N` |
+| `{counting, Q1, Q2}` | any `Q1` members | any `Q2` members, with `Q1 + Q2 > N` |
 | `{grid, Rows}` | one member from every row | every member of one row |
-| `{module, Mod, Arg}` | yours | yours |
+| `{module, Mod, Arg}` | defined by `Mod` | defined by `Mod` |
 
-A server refuses to start on a quorum system whose phases do not intersect.
-For up to 16 members that is checked by enumeration, custom modules included.
-See [peace_quorum](src/peace_quorum.erl).
+A server does not start if its quorum system has a phase-one quorum and a
+phase-two quorum that do not intersect. For up to 16 members this is checked
+by enumerating the quorums, including for custom modules. See
+[peace_quorum](src/peace_quorum.erl).
 
 ## Storage
 
-An acceptor must remember what it promised and what it accepted.
-`storage => {Module, Args}` chooses where:
+An acceptor must keep its promise and the proposals it has accepted across
+restarts. The `storage => {Module, Args}` option selects the backend:
 
-- `{peace_storage_dets, #{dir => Dir}}`: one dets file per server, synced on
-  every write. Durable and slow.
-- `{peace_storage_mem, #{}}`: nothing survives the process. **This is the
-  default**, and it is safe only if a server that restarts never rejoins
-  under the same id.
+| Backend | Behaviour |
+|---|---|
+| `{peace_storage_mem, #{}}` | **Default.** Keeps state in memory. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. |
+| `{peace_storage_dets, #{dir => Dir}}` | One dets file per server, synced on every write. Durable and slow. |
 
-Both are a [peace_storage](src/peace_storage.erl) behaviour of three
-callbacks.
+A backend implements the [peace_storage](src/peace_storage.erl) behaviour,
+which has three callbacks.
 
-## Retries, snapshots, reads and elections
+## Features
 
-**Sessions.** A client that times out cannot know whether its value was
-decided. Submitted with `#{session => {ClientId, Seq}}`, a value is applied
-at most once however often it is retried, and the retry gets the reply the
-first application got. One value in flight per client, `Seq` increasing.
+### Sessions
+
+A client whose request times out does not know whether its value was
+decided. If the client submits the value with `#{session => {ClientId, Seq}}`,
+peace applies it at most once regardless of how many times it is retried.
+Each retry returns the reply from the first application. A client can have
+one value in flight at a time, and `Seq` must increase.
 
 ```erlang
 {ok, Reply, _} = peace:propose(Ids, Value, #{session => {my_id, 17}, timeout => 2000}).
 ```
 
-**Snapshots.** Every `snapshot_interval` applied indexes (default 4096) a
-server stores its machine state and drops the log up to there. It restarts
-from the snapshot, and a follower too far behind for the log is sent the
-state. The snapshot is the machine state as an Erlang term, written and sent
-in one piece.
+### Snapshots
 
-**Read leases.** `consistent_query/2` normally puts a no-op through the log.
-With `read_lease_ms` set, a leader answers from its own state while enough
-servers are bound to it that the rest cannot elect anybody. With flexible
-quorums that can be fewer than a majority: under `{counting, 4, 2}` over
-five, the leader and one follower. Off by default, because it is the one
-feature whose safety assumes something about clocks: that they run within
-ten per cent of each other.
+Every `snapshot_interval` applied indexes (default 4096), a server stores
+its machine state and deletes the log up to that index. A restarted server
+starts from its snapshot. A follower that needs log entries the leader has
+deleted is sent the snapshot. The snapshot is the machine state as one
+Erlang term. It is written in one storage write and sent in one message.
 
-**Membership.** `peace:change_members(Servers, Members, Quorum)` moves the
-cluster to any other configuration: other members, more, fewer, none in
-common, or the same members under another quorum system. It passes through
-a joint configuration in which a value needs a phase-two quorum of the old
-and of the new, so the two can never decide apart, and the change is in the
-log, so it survives the leader that started it. A server to be added is
-started first with `members` set to the cluster as it is, and waits.
+### Read leases
+
+By default, `consistent_query/2` puts a no-op through the log. If
+`read_lease_ms` is set, a leader answers from its own state while it holds
+leases from enough servers that the remaining servers cannot form a
+phase-one quorum. With flexible quorums this can be fewer than a majority.
+Under `{counting, 4, 2}` over five servers it is the leader and one
+follower.
+
+Read leases are off by default. Their safety depends on clocks: server
+clocks must run within ten per cent of each other's rate. No other feature
+depends on clocks.
+
+### Membership change
+
+`peace:change_members(Servers, Members, Quorum)` moves the cluster to a new
+configuration. The new configuration can have different members, more
+members, fewer members, no members in common with the old one, or the same
+members under a different quorum system.
+
+The change goes through a joint configuration. While the joint configuration
+is in force, a value needs a phase-two quorum of the old configuration and a
+phase-two quorum of the new one. This prevents the two configurations from
+deciding different values. The change is recorded in the log, so it
+completes even if the leader that started it fails.
+
+Start a new server before adding it, with `members` set to the current
+cluster. It waits until a configuration includes it.
 
 ```erlang
 ok = peace:start_server(#{id => D, members => [A, B, C], machine => Machine}),
 {ok, ok, _} = peace:change_members([A, B, C], [B, C, D], majority).
 ```
 
-**Proposing to a phase-two quorum** (§4.3.3). With `propose_to => quorum`
-a leader sends each proposal to the fewest peers that make a phase-two quorum
-with it. Under `{counting, 4, 2}` over five that is one peer per value, not
-four. A proposal those peers do not accept within two heartbeats goes to
-everybody. Off by default. The thesis's standbys hold no copy of the value;
-peace's are a heartbeat behind and learn by asking, so the saving is in
-messages, not storage.
+### Proposing to a phase-two quorum
 
-**Elections.** A follower asks before it raises its epoch (pre-vote), so a
-server that was cut off does not depose a healthy leader on its return. A
-leader that a phase-two quorum has stopped answering steps down, so clients
-are told instead of left to time out.
+With `propose_to => quorum`, a leader sends each proposal to the smallest
+set of peers that forms a phase-two quorum together with the leader (§4.3.3).
+Under `{counting, 4, 2}` over five servers that is one peer per value
+instead of four. If those peers do not accept within two heartbeats, the
+leader sends the proposal to all peers. This option is off by default.
 
-## How it is checked
+In the thesis, the servers outside the quorum hold no copy of the value. In
+peace they learn each value one heartbeat later by requesting it. The option
+reduces messages. It does not reduce storage.
 
-Four layers, each covering what the one before cannot.
+### Elections
 
-**TLA+ and TLC** ([formal/](formal/README.md)). The protocol as a model,
-checked exhaustively at small bounds: agreement, and that everything a server
-treats as decided really was decided. The model has mutations that TLC must
-find a counterexample for (quorums that do not intersect, an acceptor that
-ignores its promise, a deposed leader that keeps advertising its commit
-index, a candidate that leads from behind a snapshot) and reachability
-checks, so a pass means something. Membership change has a model of its own,
-written and checked before the code, with its own two mutations.
+- **Pre-vote.** A follower asks its peers before it raises its epoch. A
+  server that was disconnected and reconnects does not depose a working
+  leader.
+- **Quorum-loss step-down.** A leader steps down when a phase-two quorum
+  stops answering it. Clients get an error instead of a timeout.
 
-The protocol model also has an inductive invariant, checked symbolically by
-Apalache in seconds at bounds TLC needs hours for, and at bounds TLC cannot
-reach (five acceptors, three epochs and three indexes). Writing it found a
-rule the code had and the model lacked: see
-[formal/README.md](formal/README.md), "A hole in the model".
+## Verification
 
-**Deterministic simulation** ([dst/](dst/peace_dst.erl)), with
-[eta](https://github.com/jessestimpson/eta). The real `peace_server`
-processes, one simulated node each, under a seeded scheduler, a virtual clock
-and a network that drops and delays. The workload includes cutting servers
-off, killing them and restarting them from their disks. Seven invariants are
-checked after every step, among them agreement across the whole run, that
-memory never runs ahead of disk, and that a linearizable read contains every
-value acknowledged before it. A second workload goes after leadership
-instead: forced elections, two-server splits and long-delayed `learned`
-messages. Servers snapshot every five indexes and clients retry under
-sessions, so truncation, recovery and catching up by snapshot are in every
-run. A third workload changes the membership as it goes, between five
-configurations of five servers. A fourth puts the shipped dets backend
-behind the simulation's own disk and compares the two whenever a server
-reopens its file; its dets calls go to eta's stand-in, which keeps the file
-but is not dets. Leases are also run with two servers in three on clocks
-six per cent fast. Nine planted bugs prove the suite can fail: quorums that
-do not intersect, a disk that forgets, a dets backend that loses promises,
-the deposed leader and the candidate behind a snapshot of the model's
-mutations, a lease nobody honours, clocks ten times apart, a change of
-membership with no joint step, and clients that retry without a session.
+peace is verified at four levels.
 
-**Trace validation** ([dst/peace_dst_trace.erl](dst/peace_dst_trace.erl)).
-The link between the two above: the model is checked exhaustively but is not
-the code, and the simulation runs the code but only against invariants. A
-simulated run is restated as a sequence of the model's actions, derived from
-what each server's promise, log and snapshot did and what it sent, not from
-what the code says it was doing, and TLC checks that the sequence is a
-behaviour of `FlexiblePaxos.tla` that leaves the model holding what the
-servers hold. One run takes TLC about a second, where the model takes
-hours, so a change to the code is checked against the model without
-checking the model again. It refuses runs the invariants pass: with quorums
-that do not intersect, 30 runs in 30 where the invariants catch 6,
-and a contradicted leader that goes on leading at its first proposal over a
-decided index, which the invariants need hundreds of seeds to see harm
-from. It covers what the model has, so not membership change, leases or
-sessions.
+| Level | What it checks | Command | Time |
+|---|---|---|---|
+| Unit tests | The protocol core and the supporting modules | `make test` | seconds |
+| Deterministic simulation | The real server processes under faults | `make dst` | about 8 minutes |
+| Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 4 minutes |
+| Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
-The switches that plant those bugs are compiled in only when `TEST` is
-defined, as `rebar3 eunit` defines it. A shipped build does not read them:
-no configuration can turn a safeguard off.
+Details of the models are in [formal/README.md](formal/README.md).
 
-**Ordinary tests** ([test/](test/)). The protocol core as a pure function,
-including TLC's counterexample for the deposed leader replayed against the
-code; a lease with followers' clocks a tenth fast, which holds, and a
-quarter fast, which does not; quorum arithmetic; whole clusters on real
-processes; and the dets backend, on real dets, against the contract the
-simulation assumes of a disk, through closes and kills.
+### Model checking
 
-```
-make test       # rebar3 eunit
-make dst        # rebar3 as dst eunit, on one scheduler thread (about eight minutes)
-make trace      # simulated runs checked against the model by TLC (a few minutes)
-make tlc        # formal/check_all.sh quick  (a few minutes)
-make ind        # the inductive invariant, with Apalache (about ten minutes)
-make tlc-long   # the configs with tens of millions of states
-```
+[formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) is a TLA+ model of the
+protocol. TLC checks it exhaustively for small clusters. The properties are
+agreement, and that every value a server treats as decided was decided.
 
-The TLC targets skip any config whose model and config are as they were when
-it was last checked ([formal/checked.tsv](formal/checked.tsv)), so the long
-runs are paid for when the model changes and not otherwise.
+[formal/Reconfig.tla](formal/Reconfig.tla) is a separate model of membership
+change. It was written and checked before the code.
 
-`make dst` and `make trace` need eta. The `dst` profile names it as a git dependency; for
-local work, link a checkout at `_checkouts/eta`.
+Both models include:
 
-## Layout
+- **Mutations.** Each mutation removes one safeguard. TLC must find a
+  counterexample for each one. The mutations are: quorums that do not
+  intersect, an acceptor that ignores its promise, a deposed leader that
+  keeps sending its commit index, a candidate that leads while behind a
+  snapshot, membership change without a joint configuration, and a candidate
+  that asks only the configuration it has applied.
+- **Reachability checks.** Each one confirms that the model can reach a
+  state the properties depend on, such as a decided value.
 
-| | |
+[formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) states an
+inductive invariant for the protocol model.
+[Apalache](https://apalache-mc.org) checks it symbolically. The check takes
+25 seconds for a configuration that takes TLC 80 minutes, and it completes
+for configurations TLC cannot finish, such as five acceptors with three
+epochs and three indexes. The constants are fixed for each check, so this is
+not a proof for all cluster sizes.
+
+Writing the invariant found an error in the model: a rule that the code
+implemented and the model did not. The code was not affected. See "A hole in
+the model" in [formal/README.md](formal/README.md).
+
+The TLC targets skip a config if its model and config files are unchanged
+since the last successful run. Results are recorded in
+[formal/checked.tsv](formal/checked.tsv). `FORCE=1` runs every config.
+
+### Deterministic simulation
+
+[dst/peace_dst.erl](dst/peace_dst.erl) runs the real `peace_server`
+processes under [eta](https://github.com/jessestimpson/eta). Each server is
+on its own simulated node. The scheduler is seeded, the clock is virtual,
+and the network drops and delays messages. A run is reproducible from its
+seed.
+
+Workloads:
+
+| Workload | What it does |
 |---|---|
-| [src/peace.erl](src/peace.erl) | the client API |
-| [src/peace_core.erl](src/peace_core.erl) | the protocol, as a pure function from event and state to state and effects |
-| [src/peace_server.erl](src/peace_server.erl) | the `gen_server` that performs those effects: storage, timers, sends |
-| [src/peace_quorum.erl](src/peace_quorum.erl) | quorum systems and their validation |
-| [src/peace_machine.erl](src/peace_machine.erl) | the behaviour you implement |
-| [src/peace_storage.erl](src/peace_storage.erl) | the storage behaviour, and two backends beside it |
-| [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | the model; `peace_core` names the action each clause implements |
-| [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | the model again, with its inductive invariant |
-| [formal/Reconfig.tla](formal/Reconfig.tla) | the model of membership change |
-| [formal/TraceFlexiblePaxos.tla](formal/TraceFlexiblePaxos.tla) | the model following one run of the code |
+| Faults | Servers are disconnected, killed, and restarted from their disks |
+| Churn | Forced elections, two-server partitions, and delayed `learned` messages |
+| Membership | The cluster moves between five configurations of five servers |
+| dets | The dets backend runs alongside the simulated disk, and the two are compared each time a server reopens its file |
 
-## Not here yet
+In every workload, servers take a snapshot every five indexes and clients
+retry with sessions. Read leases are also tested with two of three servers
+running clocks six per cent fast.
 
-- **Snapshots in pieces.** A snapshot is one term in one message and one
-  storage write, so the machine state has to be small enough for that.
-- **Sessions that expire by time.** The table is bounded by `max_sessions`,
-  oldest evicted first, not by how long a client has been silent.
-- **The thesis beyond chapter 4.1.** Membership change is in the direction
-  of revision B, quorums that vary by epoch, but is not that revision as
-  written. Early completion of phase one (revision C) and quorum-based value
-  selection (chapter 6) are not implemented. Nor is chapter 7: peace's epochs
-  are pre-allocated to proposers, `{Round, ServerId}`, the first of the five
-  approaches in table 7.2. The others (an allocator, value mapping, recovery,
-  and the hybrids of §7.4 that generalise Fast Paxos) let any proposer decide
-  in one round trip without a leader; peace has a leader for that (§3.6).
+Eight invariants are checked after every step. They include agreement across
+the whole run, that a server's memory never holds state its disk does not,
+and that a linearizable read returns every value acknowledged before it.
+
+Nine planted bugs confirm that the suite can fail:
+
+- quorums that do not intersect
+- a disk that loses its contents on restart
+- a dets backend that does not write promises
+- a deposed leader that does not step down
+- a candidate that leads while behind a snapshot
+- acceptors that ignore read leases
+- clocks that differ in rate by a factor of ten
+- membership change without a joint configuration
+- clients that retry without a session
+
+Limitation: in the dets workload, dets calls go to eta's in-process
+replacement for dets. It keeps the file contents but is not the real dets
+implementation. The unit tests cover real dets.
+
+### Trace validation
+
+[dst/peace_dst_trace.erl](dst/peace_dst_trace.erl) converts a simulated run
+into a sequence of actions of `FlexiblePaxos.tla`. TLC then checks two
+things: that each action is permitted by the model at that point, and that
+after each step the model's state equals the servers' state.
+
+The actions are derived from changes to each server's durable state
+(promise, log, snapshot) and from the messages it sent. They are not derived
+from what the code reports about itself.
+
+TLC takes about one second per run. Model checking does not need to be
+repeated when the code changes, because trace validation checks the code
+against the model directly.
+
+Trace validation rejects some runs that pass the simulation's invariants:
+
+| Planted bug | Rejected by the model | Caught by invariants |
+|---|---|---|
+| Quorums that do not intersect | 30 of 30 runs | 6 |
+| Disk that loses its contents | 24 of 30 | 24 |
+| No snapshot guard | 3 of 60 | 1 |
+| Deposed leader does not step down | 3 of 60 | 0 |
+
+Limitations:
+
+- It covers only what `FlexiblePaxos.tla` models. Membership change, read
+  leases and sessions are not covered.
+- The model's message set contains every message sent. An action passes if
+  the messages that justify it were sent, even if the server had not yet
+  received them.
+
+### Unit tests
+
+The tests in [test/](test/) cover:
+
+- the protocol core as a pure function, including a replay of TLC's
+  counterexample for the deposed leader
+- read leases with follower clocks ten per cent fast (safe) and 25 per cent
+  fast (unsafe)
+- quorum arithmetic
+- whole clusters on real processes
+- the dets backend on real dets, through closes and kills
+
+### Test-only configuration
+
+The configuration keys that plant bugs, and the hook that trace validation
+uses, are compiled only when `TEST` is defined. `rebar3 eunit` defines it. A
+release build ignores these keys, so configuration cannot disable a
+safeguard.
+
+### Commands
+
+```
+make test       # unit tests
+make dst        # deterministic simulation, about 8 minutes
+make trace      # trace validation, about 4 minutes
+make tlc        # quick TLC configs, a few minutes
+make ind        # inductive invariant with Apalache, about 10 minutes
+make tlc-long   # TLC configs with tens of millions of states, about 3 hours
+make tlc-soak   # the three-index membership config, about 8 hours
+```
+
+Requirements:
+
+- `make dst` and `make trace` need eta. The `dst` profile declares it as a
+  git dependency. For local development, link a checkout at
+  `_checkouts/eta`.
+- `make trace` and the TLC targets need Java 11 or later.
+- `make ind` needs Apalache, which is not included in the repository. See
+  [formal/README.md](formal/README.md).
+
+## Source layout
+
+| File | Contents |
+|---|---|
+| [src/peace.erl](src/peace.erl) | Client API |
+| [src/peace_core.erl](src/peace_core.erl) | The protocol, as a pure function from an event and a state to a new state and a list of effects |
+| [src/peace_server.erl](src/peace_server.erl) | The `gen_server` that performs the effects: storage writes, timers and sends |
+| [src/peace_quorum.erl](src/peace_quorum.erl) | Quorum systems and their validation |
+| [src/peace_machine.erl](src/peace_machine.erl) | The state machine behaviour |
+| [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The two backends are in separate modules. |
+| [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | TLA+ model of the protocol. Comments in `peace_core` name the model action each clause implements. |
+| [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | The protocol model restated for Apalache, with the inductive invariant |
+| [formal/Reconfig.tla](formal/Reconfig.tla) | TLA+ model of membership change |
+| [formal/TraceFlexiblePaxos.tla](formal/TraceFlexiblePaxos.tla) | TLA+ spec used for trace validation |
+
+## Limitations
+
+- **Snapshots are not chunked.** A snapshot is one Erlang term, sent in one
+  message and stored in one write. The machine state must be small enough
+  for that.
+- **Sessions do not expire by time.** The session table is bounded by
+  `max_sessions`. When it is full, the session with the oldest index is
+  evicted.
+- **Only §4.1 of the thesis is implemented.** The following are not:
+  - Revision B (§4.2), quorums that vary by epoch. Membership change is
+    related to it but does not implement it.
+  - Revision C (chapter 5), early completion of phase one.
+  - Quorum-based value selection (chapter 6).
+  - The epoch allocation schemes of chapter 7 other than the first. peace
+    pre-allocates epochs to proposers as `{Round, ServerId}`, which is the
+    first of the five approaches in table 7.2. The other four (an allocator,
+    value mapping, recovery, and the hybrids of §7.4) allow any proposer to
+    decide a value in one round trip without a leader. peace uses a leader
+    for this (§3.6).
