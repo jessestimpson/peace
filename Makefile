@@ -1,4 +1,4 @@
-.PHONY: all compile test dst trace tlc tlc-long tlc-soak check
+.PHONY: all compile test dst trace tlc tlc-long tlc-soak ind check
 
 all: compile
 
@@ -34,5 +34,9 @@ tlc-long:
 
 tlc-soak:
 	formal/check_all.sh soak
+
+# The inductive invariant of formal/FlexiblePaxosInd.tla. Needs Apalache.
+ind:
+	formal/check_ind.sh all
 
 check: test dst trace tlc

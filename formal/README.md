@@ -257,6 +257,62 @@ This is why the long runs above need not be repeated when the code changes.
 They are about the model. Whether the code is the model is checked here, in
 minutes.
 
+## An inductive invariant
+
+TLC visits every reachable state, which is why three epochs or two indexes
+take hours. `FlexiblePaxosInd.tla` states an invariant, `IndInv`, that is
+checked a step at a time instead: it holds initially, any state satisfying
+it steps only to states satisfying it, and it implies `Agreement`,
+`LearnedSound` and `LearnedAgree`. So those hold in every reachable state of
+every behaviour, however long, and the cost does not grow with the length of
+behaviours. [Apalache](https://apalache-mc.org) checks the three
+implications symbolically.
+
+`IndInv` is the usual Paxos invariant with three clauses for what peace
+adds: what a promise reported stays the truth about its acceptor below that
+epoch (`PromisesHonest`, where a dropped index is the exception that
+`SnapshotGuard` exists for); a proposal is safe at every earlier epoch
+(`ProposalsSafe`); a learned entry is decided (`LearnedSound`); and a commit
+index is the leader's word that it holds the index decided and proposed
+nothing else there (`CommitsSound`).
+
+The module restates the protocol without a set of messages, which has no
+type Apalache accepts: one variable for each kind, shaped by what can
+exist. That it is the same protocol is checked, not assumed:
+`FPaxosIndRefines.tla` rebuilds the message set, and TLC checks that every
+behaviour of the restatement is a behaviour of `FlexiblePaxos.tla`, 2.1
+million states.
+
+`./check_ind.sh all`, about ten minutes, most of it the refinement:
+
+| Constants | Acceptors, quorums | Epochs × indexes | Step | TLC on the same bounds |
+|---|---|---|---|---|
+| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 s | 116.9 million states, 80 minutes |
+| `C3E3I1` | 3, 2 / 2 | 3 × 1 | 19 s | 13.0 million states, 5 minutes |
+| `C5E2I1` | 5, 4 / 2 | 2 × 1 | 26 s | not run |
+| `C3E3I3` | 3, 2 / 2 | 3 × 3 | 2 minutes | out of reach |
+| `NoGuard3` | 3, 2 / 2, `Propose` without its new conjunct | 2 × 1 | fails, `CommitsSound` | holds: no reachable state shows it |
+| `Unsafe3` | 3, 2 / 1 | 2 × 1 | fails at `IndInv => Safety` | `FPaxosUnsafeQuorums` |
+
+Also run once, by name: `C5E3I3`, five acceptors at 3 × 3, 8 minutes, and
+`C3E4I4`, 4 × 4, 8 minutes. Both hold. Times are with TLC running beside
+them.
+
+`NoGuard3` is the hole described above, and the row to notice. Among three
+acceptors no behaviour reaches it, so TLC passes. The step from `IndInv`
+fails all the same, in seconds, because an inductive invariant has to hold
+from states a behaviour never reaches. Had this check existed, the model's
+missing rule would have been found at three acceptors.
+
+**What it is not.** The constants are fixed for each check, so this is not
+a proof for every number of acceptors, epochs and indexes; that needs a
+proof system (TLAPS). It is TLC's guarantee at bounds TLC cannot reach.
+Quorum intersection is assumed of the constants. The mutations other than
+`NoGuard3` are not in this module. The membership model has no inductive
+invariant. Apalache is not vendored (190 MB): `check_ind.sh` uses
+`$APALACHE`, or `apalache-mc` on the path, or a release unpacked under
+`_build/apalache-dl`. Checked with 0.63.0.
+
 ## Tooling
 
 TLC from `vendor/tla2tools-v1.8.0.jar`, or `$TLA2TOOLS_JAR`, or a

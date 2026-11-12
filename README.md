@@ -166,6 +166,12 @@ index, a candidate that leads from behind a snapshot) and reachability
 checks, so a pass means something. Membership change has a model of its own,
 written and checked before the code, with its own two mutations.
 
+The protocol model also has an inductive invariant, checked symbolically by
+Apalache in seconds at bounds TLC needs hours for, and at bounds TLC cannot
+reach (five acceptors, three epochs and three indexes). Writing it found a
+rule the code had and the model lacked: see
+[formal/README.md](formal/README.md), "A hole in the model".
+
 **Deterministic simulation** ([dst/](dst/peace_dst.erl)), with
 [eta](https://github.com/jessestimpson/eta). The real `peace_server`
 processes, one simulated node each, under a seeded scheduler, a virtual clock
@@ -220,6 +226,7 @@ make test       # rebar3 eunit
 make dst        # rebar3 as dst eunit, on one scheduler thread (about eight minutes)
 make trace      # simulated runs checked against the model by TLC (a few minutes)
 make tlc        # formal/check_all.sh quick  (a few minutes)
+make ind        # the inductive invariant, with Apalache (about ten minutes)
 make tlc-long   # the configs with tens of millions of states
 ```
 
@@ -241,6 +248,7 @@ local work, link a checkout at `_checkouts/eta`.
 | [src/peace_machine.erl](src/peace_machine.erl) | the behaviour you implement |
 | [src/peace_storage.erl](src/peace_storage.erl) | the storage behaviour, and two backends beside it |
 | [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | the model; `peace_core` names the action each clause implements |
+| [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | the model again, with its inductive invariant |
 | [formal/Reconfig.tla](formal/Reconfig.tla) | the model of membership change |
 | [formal/TraceFlexiblePaxos.tla](formal/TraceFlexiblePaxos.tla) | the model following one run of the code |
 
