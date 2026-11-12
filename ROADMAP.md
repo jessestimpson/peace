@@ -11,7 +11,7 @@ peace is at version 0.1.0. It is not ready for production use.
 |---|---|
 | Protocol logic | Implemented. Verified by model checking, an inductive invariant, deterministic simulation and trace validation. See [README.md](README.md), "Verification". |
 | Storage | Prototype. The default backend is in-memory. The durable backend uses dets. |
-| Performance | Not measured. |
+| Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
 | Testing on real nodes | Not done. All fault testing is simulated. |
 | Operations | Minimal. No telemetry, no leader transfer, no upgrade path. |
 | Packaging | No CI and no published package. |
@@ -27,16 +27,21 @@ should not start before they are complete.
 Goal: measure the current implementation, so that later work is based on
 numbers.
 
-- [ ] Write a key-value state machine for benchmarking and testing.
-- [ ] Measure throughput and latency for 3 and 5 servers on real nodes, with
-      each storage backend.
-- [ ] Measure recovery time: leader election after a leader failure, restart
+- [x] Write a key-value state machine for benchmarking and testing.
+- [x] Measure throughput and latency for 3 and 5 servers on separate Erlang
+      nodes, with each storage backend.
+- [x] Measure recovery time: leader election after a leader failure, restart
       from a snapshot, and catch-up of a follower that is behind.
-- [ ] Measure the effect of `propose_to => quorum` and of read leases.
-- [ ] Record the results and the method in the repository.
+- [x] Measure the effect of `propose_to => quorum` and of read leases.
+- [x] Record the results and the method in the repository.
+- [ ] Repeat the benchmark with each node on a separate machine.
 
 Done when: the results are published in the repository and the bottlenecks
 are identified.
+
+Status: done on one machine on 2026-11-12. The results and the bottlenecks
+are in [bench/README.md](bench/README.md). The nodes shared one machine, so
+the results contain no network latency.
 
 ### Milestone 2: Durable storage
 
@@ -95,6 +100,13 @@ Goal: remove the known structural limits on throughput and state size. The
 scope depends on the results of milestone 1.
 
 - [ ] Batch proposals: one message and one storage write for several values.
+- [ ] Remove the scan of every undecided index from `settle/1` in
+      `peace_core`. With the in-memory backend and 3 servers, throughput
+      falls from 67,114 requests/s with 16 clients to 15,499 requests/s with
+      256 clients. Confirm the cause with a profiler first.
+- [ ] Make a follower request the next batch of missing entries when a batch
+      arrives. A follower currently receives 64 entries per heartbeat on an
+      idle cluster.
 - [ ] Allow a client to have more than one value in flight.
 - [ ] Add backpressure. Bound the leader's queue of pending proposals and
       reject or delay proposals when it is full.

@@ -1,0 +1,21 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Configuration | Trials | Min ms | Median ms | Max ms |
+|---|---|---|---|---|
+| 3 servers, election timeout 1000 ms | 10 | 1276.3 | 1682.6 | 1894.4 |
+| 3 servers, election timeout 100 ms | 10 | 107.0 | 169.9 | 187.9 |
+| 5 servers, election timeout 1000 ms | 10 | 1176.8 | 1497.9 | 1838.0 |
+| 5 servers, election timeout 100 ms | 10 | 141.8 | 165.7 | 189.2 |
+
+| Storage | Values missed | Transferred as | Caught up ms |
+|---|---|---|---|
+| dets | 100 | log entries | 523.4 |
+| dets | 1000 | log entries | 3302.7 |
+| dets | 3000 | log entries | 9528.3 |
+| dets | 10000 | snapshot | 413.3 |
+
+| Machine state | Log entries above the snapshot | Server start ms | Caught up ms | dets file MB |
+|---|---|---|---|---|
+| 1 MB | 18 | 8.84 | 9.57 | 2.1 |
+| 10 MB | 34 | 11.0 | 11.7 | 23.9 |
+| 100 MB | 58 | 25.7 | 26.7 | 224.4 |

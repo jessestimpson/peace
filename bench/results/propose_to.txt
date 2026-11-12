@@ -1,0 +1,12 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
+|---|---|---|---|---|---|---|---|
+| 5 servers, mem, majority, propose_to all | 16 | 44578 | 0.33 | 0.59 | 0.68 | 1.39 | 0 |
+| 5 servers, mem, majority, propose_to quorum | 16 | 58134 | 0.21 | 0.51 | 0.63 | 1.15 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to all | 16 | 46395 | 0.31 | 0.58 | 0.67 | 0.91 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to quorum | 16 | 80792 | 0.15 | 0.43 | 0.53 | 0.86 | 0 |
+| 5 servers, dets, majority, propose_to all | 16 | 281 | 46.7 | 119.3 | 149.2 | 283.3 | 0 |
+| 5 servers, dets, majority, propose_to quorum | 16 | 437 | 29.8 | 71.9 | 102.6 | 256.0 | 0 |
+| 5 servers, dets, {counting,4,2}, propose_to all | 16 | 259 | 47.7 | 115.0 | 141.7 | 159.2 | 0 |
+| 5 servers, dets, {counting,4,2}, propose_to quorum | 16 | 584 | 18.5 | 55.7 | 86.1 | 177.5 | 0 |

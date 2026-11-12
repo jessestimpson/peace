@@ -338,6 +338,7 @@ safeguard.
 
 ```
 make test       # unit tests
+make bench      # benchmarks on separate Erlang nodes, about 15 minutes
 make dst        # deterministic simulation, about 8 minutes
 make trace      # trace validation, about 4 minutes
 make tlc        # quick TLC configs, a few minutes
@@ -365,6 +366,7 @@ Requirements:
 | [src/peace_quorum.erl](src/peace_quorum.erl) | Quorum systems and their validation |
 | [src/peace_machine.erl](src/peace_machine.erl) | The state machine behaviour |
 | [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The two backends are in separate modules. |
+| [bench/](bench/README.md) | A key-value state machine, a benchmark harness and the benchmark results |
 | [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | TLA+ model of the protocol. Comments in `peace_core` name the model action each clause implements. |
 | [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | The protocol model restated for Apalache, with the inductive invariant |
 | [formal/Reconfig.tla](formal/Reconfig.tla) | TLA+ model of membership change |

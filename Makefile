@@ -1,4 +1,4 @@
-.PHONY: all compile test dst trace tlc tlc-long tlc-soak ind check
+.PHONY: all compile test dst trace tlc tlc-long tlc-soak ind check bench
 
 all: compile
 
@@ -6,8 +6,10 @@ compile:
 	rebar3 compile
 
 # Unit and integration tests. They run on real processes and the real clock.
+# The second command tests the key-value state machine in bench/.
 test:
 	rebar3 eunit
+	rebar3 as bench eunit
 
 # Deterministic simulation with eta. See dst/peace_dst.erl.
 #
@@ -45,5 +47,10 @@ tlc-soak:
 # needs Apalache.
 ind:
 	formal/check_ind.sh all
+
+# Benchmarks. The servers run on separate Erlang nodes on this machine. See
+# bench/README.md. The target takes about 15 minutes.
+bench:
+	bench/run.sh all
 
 check: test dst trace tlc
