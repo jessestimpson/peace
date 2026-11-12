@@ -12,7 +12,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Protocol logic | Implemented. Verified by model checking, an inductive invariant, deterministic simulation and trace validation. See [README.md](README.md), "Verification". |
 | Storage | The default backend is a write-ahead log with checksums and group commit. It is tested with fault injection and in the simulation. |
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
-| Testing on real nodes | Not done. All fault testing is simulated. |
+| Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test has not been run. |
 | Operations | Minimal. No telemetry, no leader transfer, no upgrade path. |
 | Packaging | No CI and no published package. |
 
@@ -120,15 +120,33 @@ without a violation.
 Goal: remove the known structural limits on throughput and state size. The
 scope depends on the results of milestone 1.
 
-- [ ] Batch proposals: one message and one storage write for several values.
-- [ ] Remove the scan of every undecided index from `settle/1` in
-      `peace_core`. With the in-memory backend and 3 servers, throughput
-      falls from 63,143 requests/s with 16 clients to 11,300 requests/s with
-      256 clients. Group commit made this worse with 64 clients. Confirm the
-      cause with a profiler first.
-- [ ] Make a follower request the next batch of missing entries when a batch
-      arrives. A follower currently receives 64 entries per heartbeat on an
-      idle cluster.
+- [x] Batch proposals: one message and one storage write for several
+      values. Done on 2026-11-12. `peace_server` combines the `propose`
+      messages and the `accept` messages of a group of events.
+- [x] Remove the scan of every undecided index from `settle/1` in
+      `peace_core`. Done on 2026-11-12. The merge of storage batches in
+      `peace_server` was also quadratic and is now linear. With the
+      in-memory backend, 3 servers and 256 clients, throughput rose from
+      11,300 to 121,385 requests/s. The cause was found by reading the code
+      and confirmed by the measurement. No profiler was used.
+- [x] Make a follower request the next batch of missing entries when a batch
+      arrives. Done on 2026-11-12. Catch-up of 3,000 values takes 353 ms
+      instead of 9,489 ms with a heartbeat of 200 ms.
+- [x] Reduce the number of syncs that a client waits for. Done on
+      2026-11-12. A leader sends its proposals before its own write, a
+      write of only `learned` entries is not synced, and a leader answers a
+      client before a write that the answer does not depend on. With the
+      write-ahead log and 1 client, the median latency fell from 0.49 ms to
+      0.35 ms.
+- [ ] Move storage writes to a process that is separate from the server
+      process, so that a leader handles `accept` messages while it syncs.
+      With the write-ahead log, the median latency is 0.35 ms with 1 client
+      and 1.29 ms with 16 clients.
+- [ ] Investigate the tail latency with the write-ahead log. The maximum
+      latency is up to 318 ms. A probable cause is the checkpoint that is
+      written for each snapshot.
+- [ ] Investigate the throughput of 5 servers with the write-ahead log. It
+      is 9,929 requests/s with 64 clients. 3 servers get 25,249.
 - [ ] Allow a client to have more than one value in flight.
 - [ ] Add backpressure. Bound the leader's queue of pending proposals and
       reject or delay proposals when it is full.

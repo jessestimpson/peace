@@ -11,6 +11,13 @@
 %% recovered, and not the state in the ETS table. If the two states differ,
 %% the difference is recorded for `disk_recovers' to report.
 %%
+%% A batch with `sync => false' does not have to be durable until the next
+%% batch without that key. See `peace_storage'. For each index of such a
+%% batch, this module records the entry that the index held before the
+%% batch. When a server opens its storage, the backend may have recovered
+%% that earlier entry instead of the entry of the batch. This module then
+%% changes the ETS table to match, and the two states do not differ.
+%%
 %% The shipped `peace_storage_dets' runs under the simulation in this way.
 %% The dets calls of `peace_storage_dets' go to `eta_dets'. `eta_dets' keeps
 %% the file but is not dets. The simulation therefore tests how the backend
@@ -27,17 +34,6 @@ open(Id, Args = #{tab := Tab}) ->
         true -> true = ets:match_delete(Tab, {{Id, '_'}, '_'});
         false -> ok
     end,
-    Stored0 = #{entries => entries(Tab, Id)},
-    Stored1 =
-        case promised(Tab, Id) of
-            undefined -> Stored0;
-            Epoch -> Stored0#{promised => Epoch}
-        end,
-    Stored =
-        case ets:lookup(Tab, {Id, snapshot}) of
-            [{_, Snapshot}] -> Stored1#{snapshot => Snapshot};
-            [] -> Stored1
-        end,
     case Args of
         #{disk := {Mod, DiskArgs}, node := Node} ->
             %% The backend is opened on the node of the server, and the node
@@ -45,16 +41,32 @@ open(Id, Args = #{tab := Tab}) ->
             %% start of a server happens before the server is placed on a
             %% node.
             {ok, Disk, Recovered} = eta_net:with_node(Node, fun() -> peace_storage:open(Mod, Id, DiskArgs) end),
+            ok = revert_unsynced(Tab, Id, maps:get(entries, Recovered, #{})),
+            Stored = stored(Tab, Id),
             _ = Recovered =:= Stored orelse ets:insert(Tab, {{disk_differs, Id}, Recovered, Stored}),
             {ok, {Tab, Id, {Mod, Disk, Node}}, Recovered};
         _ ->
-            {ok, {Tab, Id, none}, Stored}
+            {ok, {Tab, Id, none}, stored(Tab, Id)}
+    end.
+
+%% The state that the ETS table holds for a server.
+stored(Tab, Id) ->
+    Stored0 = #{entries => entries(Tab, Id)},
+    Stored1 =
+        case promised(Tab, Id) of
+            undefined -> Stored0;
+            Epoch -> Stored0#{promised => Epoch}
+        end,
+    case ets:lookup(Tab, {Id, snapshot}) of
+        [{_, Snapshot}] -> Stored1#{snapshot => Snapshot};
+        [] -> Stored1
     end.
 
 write(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
     %% No code between the two writes yields to the scheduler, so a kill
     %% cannot happen between the two writes.
     {ok, Disk} = eta_net:with_node(Node, fun() -> peace_storage:write(Mod, Batch, Disk0) end),
+    ok = note_unsynced(Batch, Tab, Id),
     {ok, _} = write(Batch, {Tab, Id, none}),
     {ok, {Tab, Id, {Mod, Disk, Node}}};
 write(Batch, State = {Tab, Id, none}) ->
@@ -93,6 +105,47 @@ write(Batch, State = {Tab, Id, none}) ->
             ok
     end,
     {ok, State}.
+
+%% Records, for each index of a batch that is not synced, the entry that the
+%% index held before the batch. A synced batch makes every earlier batch
+%% durable, so it removes these records.
+note_unsynced(#{sync := false, entries := Entries}, Tab, Id) ->
+    lists:foreach(
+        fun({I, _Entry}) ->
+            Before =
+                case ets:lookup(Tab, {Id, I}) of
+                    [{_, Entry0}] -> {entry, Entry0};
+                    [] -> none
+                end,
+            ets:insert_new(Tab, {{unsynced, Id, I}, Before})
+        end,
+        Entries
+    );
+note_unsynced(_Batch, Tab, Id) ->
+    true = ets:match_delete(Tab, {{unsynced, Id, '_'}, '_'}),
+    ok.
+
+%% For each index that was written without a sync: if the backend recovered
+%% the entry that the index held before, the table is changed to hold that
+%% entry.
+revert_unsynced(Tab, Id, Recovered) ->
+    lists:foreach(
+        fun([I, Before]) ->
+            case {Before, maps:find(I, Recovered)} of
+                {{entry, Entry}, {ok, Entry}} ->
+                    true = ets:insert(Tab, {{Id, I}, Entry}),
+                    true = ets:delete(Tab, {unsynced, Id, I}),
+                    peace_dst:bump(unsynced_lost);
+                {none, error} ->
+                    true = ets:delete(Tab, {Id, I}),
+                    true = ets:delete(Tab, {unsynced, Id, I}),
+                    peace_dst:bump(unsynced_lost);
+                _ ->
+                    ok
+            end
+        end,
+        ets:match(Tab, {{unsynced, Id, '$1'}, '$2'})
+    ).
 
 close({_Tab, _Id, {Mod, Disk, Node}}) ->
     eta_net:with_node(Node, fun() -> peace_storage:close(Mod, Disk) end);

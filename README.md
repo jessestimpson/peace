@@ -111,8 +111,8 @@ restarts. The `storage => {Module, Args}` option selects the backend:
 
 | Backend | Behaviour |
 |---|---|
-| `{peace_storage_wal, #{dir => Dir}}` | **Default.** A write-ahead log with a checksum on every record, synced on every write. Durable. The default `Dir` is the application environment variable `data_dir` of `peace`, which defaults to `"peace_data"`. |
-| `{peace_storage_dets, #{dir => Dir}}` | One dets file per server, synced on every write. Durable and slower than the write-ahead log. |
+| `{peace_storage_wal, #{dir => Dir}}` | **Default.** A write-ahead log with a checksum on every record. Durable. The default `Dir` is the application environment variable `data_dir` of `peace`, which defaults to `"peace_data"`. |
+| `{peace_storage_dets, #{dir => Dir}}` | One dets file per server. Durable and slower than the write-ahead log. |
 | `{peace_storage_mem, #{}}` | Stores nothing. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. For tests. |
 
 A backend implements the [peace_storage](src/peace_storage.erl) behaviour,
@@ -121,6 +121,19 @@ which has three callbacks.
 A server handles the events that are waiting in its mailbox as a group and
 performs one storage write for the group. A backend that syncs once per
 write therefore performs group commit.
+
+Both durable backends sync every write that contains a promise, a proposal
+or a snapshot. A write that contains only `learned` entries is not synced.
+A `learned` entry records that an index is decided. The decision is already
+durable, because a phase-two quorum has stored its acceptances.
+
+A server performs the storage write before every effect that depends on the
+write. A leader sends its proposals and answers its clients before the
+write when they do not depend on it. A client that writes to a durable
+cluster therefore waits for one sync on a phase-two quorum. This order is
+the optimisation of section 10.2.1 of the Raft dissertation (Ongaro, 2014).
+It is not in the thesis. See `perform/2` in
+[peace_server](src/peace_server.erl).
 
 If a storage write fails, the server stops before it sends any message that
 depends on the write. The server is not restarted. If the write-ahead log

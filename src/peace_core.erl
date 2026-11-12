@@ -343,8 +343,9 @@
 %% Three things must be durable: `promised', the log and the snapshot. Every
 %% change to any of them is announced as a `persist' effect. The `persist'
 %% effect is in the same effect list as the reply that depends on the
-%% change, and `peace_server' writes before it sends. The role, the commit
-%% index and the machine state are rebuilt on restart.
+%% change, and `peace_server' writes before it sends. The one exception is
+%% the `propose' message of a leader. See `perform/2' in `peace_server'.
+%% The role, the commit index and the machine state are rebuilt on restart.
 -module(peace_core).
 
 -include("peace.hrl").
@@ -1094,7 +1095,14 @@ propose(
         acks = Acks#{I => [Id]},
         pending = Pending#{I => {Tag, From, Kind}}
     },
-    {C2, Settled} = settle(C1),
+    %% A configuration entry changes the configuration in force, and with it
+    %% the phase-two quorums of every open index. Any other entry can make
+    %% only its own index decided.
+    {C2, Settled} =
+        case What of
+            {cfg, _} -> settle(C1);
+            _ -> settle([I], C1)
+        end,
     %% The targets are taken from the configuration that is in force with
     %% this entry in the log. Therefore a joint entry is sent to the servers
     %% that it adds.
@@ -1131,11 +1139,17 @@ broadcast(C = #core{epoch = Epoch, commit = Commit, acks = Acks, log = Log, now 
 
 %% TLA+ LeaderLearn. Every index that a phase-two quorum has accepted is
 %% decided.
-settle(C = #core{role = leader, acks = Acks, log = Log}) ->
+settle(C = #core{role = leader, acks = Acks}) ->
+    settle(maps:keys(Acks), C).
+
+%% The same as `settle/1', for the given indexes only. The caller passes the
+%% indexes whose acknowledgements have changed. The cost of an event then
+%% does not grow with the number of open indexes.
+settle(Indexes, C = #core{role = leader, acks = Acks, log = Log}) ->
     %% The quorum is checked against the configuration in force now. It
     %% does not matter which configuration was in force when the index was
     %% proposed. See formal/Reconfig.tla, `LeaderLearn'.
-    Decided = [I || {I, Who} <- lists:sort(maps:to_list(Acks)), q2(Who, C)],
+    Decided = [I || I <- lists:usort(Indexes), is_map_key(I, Acks), q2(maps:get(I, Acks), C)],
     case Decided of
         [] ->
             {C, []};
@@ -1298,7 +1312,7 @@ msg1({accept, Epoch, Indexes, Stamp}, Peer, C = #core{role = leader, epoch = Epo
         Indexes
     ),
     Echoes = maps:update_with(Peer, fun(Old) -> max(Old, Stamp) end, Stamp, C#core.echoes),
-    settle(C#core{acks = Acks, heard = lists:usort([Peer | C#core.heard]), echoes = Echoes});
+    settle(Indexes, C#core{acks = Acks, heard = lists:usort([Peer | C#core.heard]), echoes = Echoes});
 msg1({accept, _Epoch, _Indexes, _Stamp}, _Peer, C) ->
     {C, []};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, snap = Snap}) when From >= 1, From =< Snap ->
@@ -1335,7 +1349,7 @@ msg1({install, Index, {MState, Sessions, ACfg}}, _Peer, C0 = #core{role = Role, 
     },
     {C3, Applied} = advance(C2),
     {C3, [{persist, #{snapshot => {Index, {MState, Sessions, ACfg}}}}] ++ Follow ++ Applied};
-msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine, snap = Snap}) ->
+msg1({learned, Entries}, Peer, C0 = #core{log = Log0, role = Role, epoch = Mine, snap = Snap}) ->
     New = [{I, {learned, Value}} || {I, Value} <- Entries, I > Snap, not is_learned(I, Log0)],
     %% TLA+ Conflict. A leader should learn no value from this message that
     %% the leader did not propose itself, for two reasons:
@@ -1374,7 +1388,13 @@ msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine
         acks = maps:without(Indexes, C1#core.acks)
     },
     {C3, Applied} = advance(C2),
-    {C3, [{persist, #{entries => New}} || New =/= []] ++ Follow ++ Applied}.
+    %% A full batch means that the peer probably holds more decided entries.
+    %% This server asks for the next batch now and does not wait for the
+    %% next heartbeat. The request is sent only if the batch contained an
+    %% entry that this server did not hold, so that a repeated batch does
+    %% not produce a repeated request.
+    More = [{send, Peer, {catchup, C3#core.commit + 1}} || length(Entries) >= ?MAX_BATCH, New =/= []],
+    {C3, [{persist, #{entries => New}} || New =/= []] ++ Follow ++ Applied ++ More}.
 
 %% TLA+ FollowerCommit. Starting from the first uncommitted index, this
 %% function marks as decided every entry that the commit index of the leader

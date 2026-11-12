@@ -58,10 +58,17 @@
 %% above that index. A backend that cannot replace the snapshot and delete
 %% the entries in one step writes the snapshot first. That order is safe
 %% because `peace_core' ignores entries under the snapshot that it recovers.
+%%
+%% `sync => false' states that the batch does not have to be durable when
+%% `write/2' returns. The batch must become durable no later than the next
+%% batch that is written without `sync => false'. A backend may ignore the
+%% key and make every batch durable. `peace_server' sets the key for a batch
+%% that contains only `learned' entries. See `perform/2' in `peace_server'.
 -type batch() :: #{
     promised => peace:epoch(),
     entries => [{peace:index(), peace_core:entry()}],
-    snapshot => {peace:index(), peace_core:snapshot()}
+    snapshot => {peace:index(), peace_core:snapshot()},
+    sync => boolean()
 }.
 
 %% An `{error, Reason}' result, or an exception, means that the backend

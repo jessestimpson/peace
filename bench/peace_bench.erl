@@ -45,6 +45,21 @@ suite(smoke) ->
         header(load),
         run_load("smoke", C, #{clients => 4, measure_ms => 1000, warmup_ms => 200})
     end);
+%% Writes to 3 servers with the in-memory backend and the write-ahead log.
+%% This suite is a short version of `throughput', for use during
+%% development.
+suite(quick) ->
+    header(load),
+    [
+        with_cluster(#{servers => 3, storage => Storage}, fun(C) ->
+            [
+                run_load(io_lib:format("3 servers, ~s", [Storage]), C, #{clients => Clients})
+             || Clients <- [1, 16, 64, 256, 1024]
+            ]
+        end)
+     || Storage <- [mem, wal]
+    ],
+    ok;
 %% Writes. 3 and 5 servers, each storage backend, 1 to 256 clients.
 suite(throughput) ->
     header(load),

@@ -17,7 +17,9 @@
 %% </ul>
 %%
 %% A write without a snapshot appends one record to the log and syncs the
-%% log. A write with a snapshot starts generation `G + 1':
+%% log. A write with `sync => false' appends the record and does not sync.
+%% The sync of the next record covers it. A write with a snapshot starts
+%% generation `G + 1':
 %%
 %% <ol>
 %% <li>The backend writes the checkpoint to a temporary file and syncs the
@@ -148,7 +150,14 @@ write(Batch, W = #wal{io = Io, fd = Fd, promised = Promised0, entries = Entries0
     Record = record(maps:with([promised, entries], Batch)),
     case io_write(Io, Fd, Record) of
         ok ->
-            case io_sync(Io, Fd) of
+            %% A record that is written without a sync is covered by the
+            %% sync of the next record, because the sync covers the file.
+            Synced =
+                case Batch of
+                    #{sync := false} -> ok;
+                    _ -> io_sync(Io, Fd)
+                end,
+            case Synced of
                 ok ->
                     {Promised, Entries} = apply_batch(Batch, {Promised0, Entries0}),
                     {ok, W#wal{promised = Promised, entries = Entries}};

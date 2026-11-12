@@ -2,9 +2,7 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Trials | Min ms | Median ms | Max ms |
 |---|---|---|---|---|
-| 3 servers, election timeout 1000 ms | 10 | 1423.4 | 1722.4 | 1881.6 |
-| 3 servers, election timeout 100 ms | 10 | 122.5 | 158.2 | 192.3 |
-=WARNING REPORT==== 12-Nov-2026::06:32:05.756977 ===
-'global' at node 'peace_bench_1@MacBook-Air' requested disconnect from node 'peace_bench_2@MacBook-Air' in order to prevent overlapping partitions
-| 5 servers, election timeout 1000 ms | 10 | 1048.6 | 1467.0 | 1739.8 |
-| 5 servers, election timeout 100 ms | 10 | 110.9 | 165.2 | 183.8 |
+| 3 servers, election timeout 1000 ms | 10 | 1184.1 | 1554.1 | 1893.5 |
+| 3 servers, election timeout 100 ms | 10 | 120.7 | 144.6 | 205.6 |
+| 5 servers, election timeout 1000 ms | 10 | 1113.2 | 1424.8 | 1818.8 |
+| 5 servers, election timeout 100 ms | 10 | 114.1 | 142.9 | 167.1 |

@@ -310,6 +310,9 @@ wal_backend_test_() ->
         Stats = #{snapshots := Snapshots} = peace_dst:stats(),
         exercised(Stats),
         ?assert(Snapshots > 0, Stats),
+        %% A kill lost a `learned' entry that was written without a sync,
+        %% and the server recovered the entry that the index held before.
+        ?assert(maps:get(unsynced_lost, Stats, 0) > 0, Stats),
         %% The simulated disk was in use: servers synced, and nodes were
         %% killed.
         Disk = [maps:get(disk, Result) || Result <- Results],

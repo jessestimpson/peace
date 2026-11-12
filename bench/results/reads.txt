@@ -2,11 +2,11 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
 |---|---|---|---|---|---|---|---|
-| 3 servers, mem, get (proposed) | 16 | 81452 | 0.19 | 0.25 | 0.29 | 0.66 | 0 |
-| 3 servers, mem, read (consistent_query, no lease) | 16 | 76085 | 0.21 | 0.27 | 0.31 | 1.01 | 0 |
-| 3 servers, mem, stale_read (local_query) | 16 | 176054 | 0.08 | 0.14 | 0.15 | 1.30 | 0 |
-| 3 servers, mem, read (consistent_query, lease) | 16 | 178011 | 0.08 | 0.13 | 0.15 | 1.16 | 0 |
-| 3 servers, wal, get (proposed) | 16 | 8369 | 1.79 | 2.63 | 4.57 | 25.5 | 0 |
-| 3 servers, wal, read (consistent_query, no lease) | 16 | 8356 | 1.80 | 2.66 | 4.36 | 33.2 | 0 |
-| 3 servers, wal, stale_read (local_query) | 16 | 179383 | 0.08 | 0.13 | 0.16 | 1.38 | 0 |
-| 3 servers, wal, read (consistent_query, lease) | 16 | 175812 | 0.08 | 0.13 | 0.15 | 0.92 | 0 |
+| 3 servers, mem, get (proposed) | 16 | 107978 | 0.14 | 0.20 | 0.23 | 0.84 | 0 |
+| 3 servers, mem, read (consistent_query, no lease) | 16 | 105395 | 0.15 | 0.20 | 0.24 | 0.76 | 0 |
+| 3 servers, mem, stale_read (local_query) | 16 | 167214 | 0.09 | 0.14 | 0.16 | 1.12 | 0 |
+| 3 servers, mem, read (consistent_query, lease) | 16 | 171564 | 0.08 | 0.14 | 0.15 | 1.10 | 0 |
+| 3 servers, wal, get (proposed) | 16 | 11953 | 1.23 | 1.99 | 3.57 | 28.2 | 0 |
+| 3 servers, wal, read (consistent_query, no lease) | 16 | 12188 | 1.21 | 1.98 | 3.15 | 20.4 | 0 |
+| 3 servers, wal, stale_read (local_query) | 16 | 170008 | 0.08 | 0.14 | 0.17 | 1.16 | 0 |
+| 3 servers, wal, read (consistent_query, lease) | 16 | 170638 | 0.08 | 0.14 | 0.15 | 0.95 | 0 |

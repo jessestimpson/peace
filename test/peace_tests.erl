@@ -260,14 +260,16 @@ storage_failure_stops_server(Ids0) ->
         end),
         timer:sleep(300),
         ?assertEqual(undefined, whereis(element(1, Follower))),
-        %% The leader stops when it writes the next value. The leader has
-        %% not sent the value, so the last server never receives it.
-        #{last_index := Last} = peace:overview(Other),
+        %% The leader stops when it writes the next value. The leader sends
+        %% the proposal before the write, so the last server can receive
+        %% the proposal. The leader stops before it handles the answer, so
+        %% the value is not decided.
+        #{commit_index := Commit} = peace:overview(Other),
         ok = peace_failing_storage:fail(Leader, write),
         ?assertMatch({error, {server_down, _}}, peace:propose(Leader, {put, a, 3}, 1000)),
         timer:sleep(300),
         ?assertEqual(undefined, whereis(element(1, Leader))),
-        ?assertMatch(#{last_index := Last}, peace:overview(Other)),
+        ?assertMatch(#{commit_index := Commit}, peace:overview(Other)),
         %% A server whose storage fails to open does not start.
         ok = peace_failing_storage:fail(Leader, open),
         ?assertMatch(

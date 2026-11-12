@@ -1,0 +1,14 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Heartbeat ms | Values missed | Transferred as | Caught up ms |
+|---|---|---|---|
+| 200 | 100 | log entries | 449.8 |
+| 200 | 1000 | log entries | 3301.2 |
+| 200 | 3000 | log entries | 9488.7 |
+| 200 | 10000 | snapshot | 308.9 |
+| 20 | 100 | log entries | 40.5 |
+| 20 | 1000 | log entries | 327.8 |
+=WARNING REPORT==== 12-Nov-2026::06:33:07.274690 ===
+'global' at node 'peace_bench_ctl@MacBook-Air' requested disconnect from node 'peace_bench_1@MacBook-Air' in order to prevent overlapping partitions
+| 20 | 3000 | log entries | 983.9 |
+| 20 | 10000 | snapshot | 25.9 |

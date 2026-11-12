@@ -11,10 +11,15 @@
 %% </ul>
 %%
 %% The important rule in this module is about ordering. This module writes
-%% everything that `peace_core' asked to persist before it sends anything
-%% that `peace_core' asked to send. Paxos does not tolerate the failure in
-%% which a promise or an acceptance reaches a peer and is then lost in a
-%% restart.
+%% everything that `peace_core' asked to persist before it performs any
+%% other effect. Paxos does not tolerate the failure in which a promise or
+%% an acceptance reaches a peer and is then lost in a restart.
+%%
+%% The rule has one exception. When no effect other than an `accept'
+%% message depends on the write, this module performs the other effects
+%% before the write. A leader then sends its `propose' messages while it
+%% writes, and answers a client without waiting for a write that the answer
+%% does not depend on. See `perform/2'.
 %%
 %% This module handles the events that are in the mailbox as a group and
 %% performs one storage write for the group. See `event/2'.
@@ -32,6 +37,10 @@
 -export([start_link/1, start/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export_type([step/0]).
+
+-ifdef(TEST).
+-export([coalesce/1, merge_batches/1]).
+-endif.
 
 %% In a simulated run, this macro writes one line to the run's log for each
 %% event that this server handles.
@@ -294,17 +303,145 @@ tracer(_Config) -> undefined.
 trace(_State, _Step) -> ok.
 -endif.
 
-%% Performs the persist effects first, in one write. Then performs every
-%% other effect in the order given.
+%% Performs the persist effects in one write. Then performs every other
+%% effect in the order given.
+%%
+%% == Proposals are sent before the write ==
+%%
+%% A `propose' message is the message of a proposer. A promise or an
+%% acceptance is the statement of an acceptor, and the acceptor must store
+%% it before the acceptor sends it. A proposal has no such requirement. The
+%% leader is also an acceptor, and the write stores the acceptance of the
+%% leader of its own proposal. The leader sends the proposal first, so that
+%% the write of the leader and the writes of the followers run at the same
+%% time. This is the optimisation of section 10.2.1 of the Raft
+%% dissertation (Ongaro, 2014), "Writing to the leader's disk in parallel".
+%% It is not in the thesis.
+%%
+%% If the leader stops after it has sent a proposal and before the write
+%% returns, the leader restarts without its own acceptance. This is the
+%% same as a leader that never accepted its own proposal. The following
+%% holds:
+%%
+%% <ul>
+%% <li>The leader has not counted its own acceptance in any decision. A
+%%   decision needs an acceptance from a follower, unless the leader alone
+%%   is a phase-two quorum. The acceptance of a follower arrives in a later
+%%   group, after the write of this group has returned.</li>
+%% <li>The leader does not propose a second value in the same epoch. The
+%%   promise of the leader for its epoch was written by an earlier
+%%   group.</li>
+%% </ul>
+%%
+%% `merge_batches/1' reports the two cases in which this argument does not
+%% hold. In those cases this function writes first:
+%%
+%% <ul>
+%% <li>The write contains `promised' or a snapshot.</li>
+%% <li>The write contains an index both as a proposal and as decided. The
+%%   index was then decided on the acceptance of the leader alone, and a
+%%   `propose' message of the group may carry a commit index that covers
+%%   it.</li>
+%% </ul>
+%%
+%% == Other effects are performed before the write ==
+%%
+%% In every other case, the write contains only entries: the proposals of
+%% this server as leader, the proposals that this server accepts as a
+%% follower, and `learned' entries. The only effect that depends on such a
+%% write is the `accept' message, which states that this server has stored
+%% a proposal. Every other effect is performed before the write:
+%%
+%% <ul>
+%% <li>A reply to a client and a machine effect depend on a decision. By
+%%   the argument above, the decisions of this group do not depend on the
+%%   write of this group.</li>
+%% <li>`learned' and `install' messages carry decided values.</li>
+%% <li>`nack', `prevote', `prevote_ok' and `catchup' messages state nothing
+%%   that the sender must store.</li>
+%% <li>`prepare' and `promise' messages occur only in a group whose write
+%%   contains `promised', which is written first.</li>
+%% </ul>
+%%
+%% A leader under load therefore answers the client of a decided value
+%% without waiting for the write of the proposals that arrived later.
 perform(Effects, State0) ->
-    {Batches, Rest} = lists:partition(fun(E) -> element(1, E) =:= persist end, Effects),
-    State1 = persist([Batch || {persist, Batch} <- Batches], State0),
-    lists:foldl(fun effect/2, State1, Rest).
+    {Batches, Rest0} = lists:partition(fun(E) -> element(1, E) =:= persist end, Effects),
+    Rest = coalesce(Rest0),
+    case merge_batches([Batch || {persist, Batch} <- Batches]) of
+        {Batch, true} ->
+            {Accepts, Others} = lists:partition(fun is_accept/1, Rest),
+            State1 = lists:foldl(fun effect/2, State0, Others),
+            lists:foldl(fun effect/2, persist(Batch, State1), Accepts);
+        {Batch, false} ->
+            lists:foldl(fun effect/2, persist(Batch, State0), Rest)
+    end.
 
-persist([], State) ->
+is_accept({send, _Peer, {accept, _Epoch, _Indexes, _Stamp}}) -> true;
+is_accept(_Effect) -> false.
+
+%% Reduces the effects of a group to fewer effects with the same result.
+%%
+%% <ul>
+%% <li>Consecutive `propose' messages of one epoch to one peer become one
+%%   message. The message holds the entries of all of them, the highest
+%%   commit index and the latest clock reading. The latest clock reading is
+%%   correct for the lease, because the message is sent after that
+%%   reading.</li>
+%% <li>Consecutive `accept' messages of one epoch to one peer become one
+%%   message, with the indexes of all of them and the latest clock reading
+%%   that is echoed.</li>
+%% <li>Only the last effect on each timer is kept.</li>
+%% </ul>
+%%
+%% Two messages to one peer are consecutive if no other message to that peer
+%% lies between them. The order of the messages to one peer is kept.
+coalesce(Effects) ->
+    coalesce(Effects, #{}, #{}, []).
+
+%% `Open' maps a peer to the message that is being built for that peer.
+coalesce([{send, Peer, Msg} | Rest], Open, Timers, Out) ->
+    case {Msg, Open} of
+        {{propose, Epoch, Entries, Commit, Stamp}, #{Peer := {propose, Epoch, Entries0, Commit0, _Stamp0}}} ->
+            Merged = {propose, Epoch, [Entries | Entries0], max(Commit, Commit0), Stamp},
+            coalesce(Rest, Open#{Peer := Merged}, Timers, Out);
+        {{accept, Epoch, Indexes, Stamp}, #{Peer := {accept, Epoch, Indexes0, Stamp0}}} ->
+            Merged = {accept, Epoch, [Indexes | Indexes0], max(Stamp, Stamp0)},
+            coalesce(Rest, Open#{Peer := Merged}, Timers, Out);
+        _ ->
+            Out1 = close(Peer, Open, Out),
+            case Msg of
+                {propose, Epoch, Entries, Commit, Stamp} ->
+                    coalesce(Rest, Open#{Peer => {propose, Epoch, [Entries], Commit, Stamp}}, Timers, Out1);
+                {accept, Epoch, Indexes, Stamp} ->
+                    coalesce(Rest, Open#{Peer => {accept, Epoch, [Indexes], Stamp}}, Timers, Out1);
+                _ ->
+                    coalesce(Rest, maps:remove(Peer, Open), Timers, [{send, Peer, Msg} | Out1])
+            end
+    end;
+coalesce([{timer, Timer, Op} | Rest], Open, Timers, Out) ->
+    coalesce(Rest, Open, Timers#{Timer => Op}, Out);
+coalesce([Effect | Rest], Open, Timers, Out) ->
+    coalesce(Rest, Open, Timers, [Effect | Out]);
+coalesce([], Open, Timers, Out0) ->
+    Out = lists:foldl(fun(Peer, Out1) -> close(Peer, Open, Out1) end, Out0, lists:sort(maps:keys(Open))),
+    lists:reverse(Out) ++ [{timer, Timer, Op} || {Timer, Op} <- lists:sort(maps:to_list(Timers))].
+
+%% Adds the message that is being built for `Peer', if any, to `Out'. The
+%% parts of the message were collected in reverse order.
+close(Peer, Open, Out) ->
+    case Open of
+        #{Peer := {propose, Epoch, Parts, Commit, Stamp}} ->
+            [{send, Peer, {propose, Epoch, lists:append(lists:reverse(Parts)), Commit, Stamp}} | Out];
+        #{Peer := {accept, Epoch, Parts, Stamp}} ->
+            [{send, Peer, {accept, Epoch, lists:append(lists:reverse(Parts)), Stamp}} | Out];
+        _ ->
+            Out
+    end.
+
+persist(Batch, State) when map_size(Batch) =:= 0 ->
     State;
-persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
-    Batch = lists:foldl(fun merge_batch/2, #{}, Batches),
+persist(Batch, State = #state{storage_mod = Mod, storage = Storage0}) ->
     %% A failed write stops the server before the server sends anything
     %% that depends on the write. The exit reason is a `shutdown' reason, so
     %% `peace_sup' does not restart the server. After a failed write or a
@@ -317,26 +454,64 @@ persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
         Class:Reason:Stack -> exit({shutdown, {storage_failed, {Class, Reason, Stack}}})
     end.
 
-%% Merges one batch into the write.
+%% Merges the batches of a group into one write.
 %%   - A later batch overrides an earlier batch. For entries, the later
 %%     batch overrides the earlier batch index by index.
 %%   - A snapshot removes from the write every entry that the snapshot
 %%     covers.
-merge_batch(Batch, Acc0) ->
-    Acc1 = maps:merge(Acc0, maps:with([promised, snapshot], Batch)),
-    Entries = maps:merge(
-        maps:from_list(maps:get(entries, Acc1, [])),
-        maps:from_list(maps:get(entries, Batch, []))
+%%
+%% The second element of the result states whether `propose' messages may
+%% be sent before the write. See `perform/2'.
+%%
+%% A write that contains only `learned' entries has `sync => false'. A
+%% `learned' entry records that an index is decided. The decision itself is
+%% already durable, because a phase-two quorum has stored its acceptances.
+%% If the `learned' entry is lost in a restart, the server holds the index
+%% as accepted and learns again that it is decided. A leader therefore
+%% answers a client after one synced write on a phase-two quorum, and does
+%% not wait for a second sync.
+%%
+%% The write is synced if an index was proposed and decided in the same
+%% group. That index was decided on the acceptance of this server alone,
+%% and the `learned' entry is the only stored record of that acceptance.
+-spec merge_batches([peace_storage:batch()]) -> {peace_storage:batch(), boolean()}.
+merge_batches(Batches) ->
+    %% `Early' becomes false when an index that this group wrote as a
+    %% proposal is written as decided.
+    {Fields, Entries, Early} = lists:foldl(
+        fun(Batch, Acc0) ->
+            lists:foldl(
+                fun
+                    ({I, Entry = {learned, _}}, {F, E, Ok}) ->
+                        {F, E#{I => Entry}, Ok andalso not is_map_key(I, E)};
+                    ({I, Entry}, {F, E, Ok}) ->
+                        {F, E#{I => Entry}, Ok}
+                end,
+                setelement(1, Acc0, maps:merge(element(1, Acc0), maps:with([promised, snapshot], Batch))),
+                maps:get(entries, Batch, [])
+            )
+        end,
+        {#{}, #{}, true},
+        Batches
     ),
     Floor =
-        case Acc1 of
+        case Fields of
             #{snapshot := {Index, _}} -> Index;
             _ -> 0
         end,
-    case lists:sort([E || E = {I, _} <- maps:to_list(Entries), I > Floor]) of
-        [] -> maps:remove(entries, Acc1);
-        Kept -> Acc1#{entries => Kept}
-    end.
+    Merged =
+        case lists:sort([E || E = {I, _} <- maps:to_list(Entries), I > Floor]) of
+            [] ->
+                Fields;
+            Kept when map_size(Fields) =:= 0, Early ->
+                case lists:all(fun({_I, Entry}) -> element(1, Entry) =:= learned end, Kept) of
+                    true -> #{entries => Kept, sync => false};
+                    false -> #{entries => Kept}
+                end;
+            Kept ->
+                Fields#{entries => Kept}
+        end,
+    {Merged, Early andalso map_size(Fields) =:= 0}.
 
 effect({send, To, Msg}, State = #state{core = Core}) ->
     send(To, {peace_msg, peace_core:id(Core), Msg}, State);

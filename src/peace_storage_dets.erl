@@ -1,13 +1,13 @@
 %% @doc Durable storage. Each server has one dets file. The file is synced on
-%% every write.
+%% every write, except a write with `sync => false'.
 %%
 %% Args: `#{dir := file:name_all()}'. The file is named after the server.
 %%
 %% This backend is simple and is not fast.
 %%
 %% <ul>
-%% <li>Every write calls `dets:sync', so throughput is bounded by the fsync
-%%   rate of the disk.</li>
+%% <li>Every write that must be durable calls `dets:sync', so throughput is
+%%   bounded by the fsync rate of the disk.</li>
 %% <li>dets limits a file to 2 GB.</li>
 %% <li>A snapshot is one object, so the machine state must also fit in the
 %%   file.</li>
@@ -60,7 +60,11 @@ write(Batch, Tab) ->
                 dets:select_delete(Tab, [{{'$1', '_'}, [{is_integer, '$1'}, {'=<', '$1', Index}], [true]}])
              || {?SNAPSHOT, {Index, _}} <- Snapshot
             ],
-            ok = dets:sync(Tab),
+            %% A batch that is not synced is covered by the next sync.
+            case Batch of
+                #{sync := false} -> ok;
+                _ -> ok = dets:sync(Tab)
+            end,
             {ok, Tab}
     end.
 

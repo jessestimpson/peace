@@ -1,0 +1,10 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Storage | Machine state | Log entries above the snapshot | Server start ms | Caught up ms | Files MB |
+|---|---|---|---|---|---|
+| dets | 1 MB | 18 | 9.16 | 9.96 | 2.1 |
+| dets | 10 MB | 32 | 11.0 | 11.8 | 24.0 |
+| dets | 100 MB | 51 | 24.5 | 25.4 | 224.8 |
+| wal | 1 MB | 18 | 4.79 | 5.56 | 2.0 |
+| wal | 10 MB | 32 | 7.14 | 7.95 | 11.9 |
+| wal | 100 MB | 56 | 25.8 | 26.7 | 103.7 |
