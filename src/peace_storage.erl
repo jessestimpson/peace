@@ -20,9 +20,15 @@
 %% return until the data would survive every failure that the deployment is
 %% meant to survive.
 %%
-%% peace includes two backends:
+%% `peace_server' handles the events that are waiting in its mailbox as a
+%% group and makes one call to `write/2' for the group. A backend that syncs
+%% once per call therefore performs group commit.
+%%
+%% peace includes three backends:
 %%
 %% <ul>
+%% <li>`peace_storage_wal' is durable and is the default. It uses a
+%%   write-ahead log with a checksum on every record.</li>
 %% <li>`peace_storage_dets' is durable. It uses one dets file per
 %%   server.</li>
 %% <li>`peace_storage_mem' stores nothing. `write/2' discards the batch,
@@ -58,15 +64,18 @@
     snapshot => {peace:index(), peace_core:snapshot()}
 }.
 
--callback open(peace:server_id(), Args :: term()) -> {ok, State :: term(), stored()}.
--callback write(batch(), State :: term()) -> {ok, State :: term()}.
+%% An `{error, Reason}' result, or an exception, means that the backend
+%% cannot guarantee the data. `peace_server' then stops and is not
+%% restarted.
+-callback open(peace:server_id(), Args :: term()) -> {ok, State :: term(), stored()} | {error, term()}.
+-callback write(batch(), State :: term()) -> {ok, State :: term()} | {error, term()}.
 -callback close(State :: term()) -> ok.
 
--spec open(module(), peace:server_id(), term()) -> {ok, term(), stored()}.
+-spec open(module(), peace:server_id(), term()) -> {ok, term(), stored()} | {error, term()}.
 open(Mod, ServerId, Args) ->
     Mod:open(ServerId, Args).
 
--spec write(module(), batch(), term()) -> {ok, term()}.
+-spec write(module(), batch(), term()) -> {ok, term()} | {error, term()}.
 write(Mod, Batch, State) ->
     Mod:write(Batch, State).
 

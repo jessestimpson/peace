@@ -118,6 +118,13 @@
 %% `disk => dets' runs the shipped `peace_storage_dets' backend behind the
 %% disk of the simulation. See `peace_dst_storage'.
 %%
+%% `disk => wal' runs the shipped `peace_storage_wal' backend in the same
+%% way. A run with `disk => wal' must also set the eta run option
+%% `disk => true'. That option starts the simulated disk of eta
+%% (`eta_disk'). When the node of a server is killed, the simulated disk
+%% loses the file data and the directory operations that the server did not
+%% sync. The dets backend runs on `eta_dets', which loses nothing.
+%%
 %% `clock_drift => P' makes the clocks of two servers in every three run P
 %% per cent fast. Clock drift affects only read leases. A lease allows for a
 %% drift of one tenth. When the drift is far enough beyond one tenth, a read
@@ -146,6 +153,9 @@
 %% <li>`lossy_disk' - with `disk => dets', the dets backend runs behind a
 %%   layer that does not write promises. This mode shows that
 %%   `disk_recovers' can fail.</li>
+%% <li>`unsynced_wal' - with `disk => wal', the write-ahead log backend
+%%   never syncs. See `peace_dst_nosync_io'. This mode shows that
+%%   `disk_recovers' can fail when a kill loses unsynced data.</li>
 %% <li>`no_snapshot_guard' - a candidate becomes leader on a promise from an
 %%   acceptor that has dropped indexes that the candidate never learned.
 %%   This is the same change as `formal/FPaxosNoSnapshotGuard.cfg'.</li>
@@ -220,7 +230,7 @@ init(_Seed, Config) ->
     %% `preload => [peace]' does not load them. The harness loads them here.
     %% Loading a module during a run would make a call to the code server,
     %% and the scheduler does not control the code server.
-    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_trace]],
+    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_nosync_io, peace_dst_trace]],
     %% The table is an `ordered_set', so that reading the disk of one server
     %% is a range read and not a scan of the whole table.
     Tab = ets:new(peace_dst, [public, ordered_set]),
@@ -371,7 +381,9 @@ execute({crash, I}, S) ->
         _Pid ->
             %% Every process on the node dies at once, between steps, and the
             %% kill waits until the processes are dead. The disk of the
-            %% server belongs to the harness and keeps its contents.
+            %% server belongs to the harness and keeps its contents. With
+            %% `disk => wal', the simulated disk of eta decides which
+            %% unsynced data in the files of the server remains.
             ok = eta_net:kill_node(node_name(I)),
             bump(crashes),
             S
@@ -483,19 +495,35 @@ terminate(S = #{tab := Tab, n := N}) ->
     ok = clear_disk(),
     ok.
 
-%% Returns the directory in which `disk => dets' keeps its files. Every run
+%% Returns the directory in which `disk => dets' and `disk => wal' keep
+%% their files. Every run
 %% uses this one directory, so that the name of the directory is the same in
 %% every run. The harness empties the directory before and after each run.
 disk_dir() ->
     filename:join(filename:basedir(user_cache, "peace_dst"), "disk").
 
 %% This function uses `prim_file' because the file server is a process that
-%% no schedule controls.
+%% no schedule controls. The dets backend keeps files in the directory. The
+%% write-ahead log backend keeps one directory per server.
 clear_disk() ->
-    Dir = disk_dir(),
+    clear_dir(disk_dir()).
+
+clear_dir(Dir) ->
     case prim_file:list_dir(Dir) of
         {ok, Names} ->
-            lists:foreach(fun(Name) -> ok = prim_file:delete(filename:join(Dir, Name)) end, Names);
+            lists:foreach(
+                fun(Name) ->
+                    Path = filename:join(Dir, Name),
+                    case prim_file:delete(Path) of
+                        ok ->
+                            ok;
+                        {error, _} ->
+                            ok = clear_dir(Path),
+                            ok = prim_file:del_dir(Path)
+                    end
+                end,
+                Names
+            );
         {error, enoent} ->
             ok
     end.
@@ -518,13 +546,13 @@ kill(Pids) ->
 %% Invariants
 %% ---------------------------------------------------------------------------
 
-%% This invariant applies with `disk => dets'. A server that opened its dets
-%% file recovered the state that the server had written. The state that the
+%% This invariant applies with `disk => dets' and `disk => wal'. A server
+%% that opened its files recovered the state that the server had written. The state that the
 %% server had written is the state that the disk of the simulation holds.
 disk_recovers(Tab) ->
     case ets:match(Tab, {{disk_differs, '$1'}, '$2', '$3'}) of
         [] -> ok;
-        Differ -> violation(disk_recovers, #{servers => [{Id, #{dets => D, wrote => W}} || [Id, D, W] <- Differ]})
+        Differ -> violation(disk_recovers, #{servers => [{Id, #{recovered => D, wrote => W}} || [Id, D, W] <- Differ]})
     end.
 
 storage_matches_memory(Tab, Views, Disks) ->
@@ -788,7 +816,12 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
             {dets, lossy_disk} ->
                 #{tab => Tab, node => node_name(I), disk => {peace_dst_lossy_disk, #{dir => disk_dir()}}};
             {dets, _} ->
-                #{tab => Tab, node => node_name(I), disk => {peace_storage_dets, #{dir => disk_dir()}}}
+                #{tab => Tab, node => node_name(I), disk => {peace_storage_dets, #{dir => disk_dir()}}};
+            {wal, unsynced_wal} ->
+                Args = #{dir => disk_dir(), io => peace_dst_nosync_io},
+                #{tab => Tab, node => node_name(I), disk => {peace_storage_wal, Args}};
+            {wal, _} ->
+                #{tab => Tab, node => node_name(I), disk => {peace_storage_wal, #{dir => disk_dir()}}}
         end,
     Base = #{
         id => Id,
@@ -837,6 +870,8 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         bare_retries ->
             Base;
         lossy_disk ->
+            Base;
+        unsynced_wal ->
             Base;
         amnesia ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}

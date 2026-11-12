@@ -28,6 +28,11 @@ opts(Seed, Config) ->
 calm(Seed, Config) ->
     (opts(Seed, Config#{faults => false, converge => true}))#{net => true}.
 
+%% The options for a run with the write-ahead log backend on the simulated
+%% disk of eta.
+wal(Seed, Config) ->
+    (opts(Seed, Config#{disk => wal}))#{disk => true}.
+
 run(Opts) ->
     eta_run:run(peace_dst, Opts).
 
@@ -292,6 +297,39 @@ lossy_disk_is_caught_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
+%% This test runs the shipped write-ahead log backend under the same faults,
+%% on the simulated disk of eta. A kill of a node loses the file data and
+%% the directory operations that the server did not sync. Every server that
+%% reopens its files recovers the state that the server wrote.
+wal_backend_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        Results =
+            sweep(lists:seq(1, 60), fun(Seed) -> wal(Seed, #{}) end) ++
+                sweep(lists:seq(1, 30), fun(Seed) -> wal(Seed, #{servers => 5, quorum => {counting, 4, 2}}) end),
+        Stats = #{snapshots := Snapshots} = peace_dst:stats(),
+        exercised(Stats),
+        ?assert(Snapshots > 0, Stats),
+        %% The simulated disk was in use: servers synced, and nodes were
+        %% killed.
+        Disk = [maps:get(disk, Result) || Result <- Results],
+        ?assert(lists:sum([maps:get(syncs, D) || D <- Disk]) > 0),
+        ?assert(lists:sum([maps:get(crashes, D) || D <- Disk]) > 0)
+    end}.
+
+%% This test shows that the check in `wal_backend_test_' can fail. The test
+%% uses a write-ahead log that never syncs. The same seed passes with the
+%% shipped backend.
+unsynced_wal_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        {Seed, Result} = first_violation(lists:seq(1, 100), fun(Seed) ->
+            wal(Seed, #{mode => unsynced_wal})
+        end),
+        ?assertMatch({violation, #{property := disk_recovers}}, maps:get(outcome, Result)),
+        ?assertEqual(ok, maps:get(outcome, run(wal(Seed, #{}))), {seed, Seed})
+    end}.
+
 %% A deposed leader learns that an index was decided with a value other than
 %% the value that the leader proposed, and the leader continues to lead. The
 %% leader then causes a follower to decide the value that was not decided.
@@ -334,12 +372,14 @@ bare_retries_apply_twice_test_() ->
 
 %% ---------------------------------------------------------------------------
 
+%% Returns the summary of each run.
 sweep(Seeds, OptsFun) ->
-    lists:foreach(
+    lists:map(
         fun(Seed) ->
             Result = run(OptsFun(Seed)),
             ?assertEqual(ok, maps:get(outcome, Result), {seed, Seed, eta_run:summary(Result)}),
-            ?assertEqual(ok, eta_run:audit(Result), {seed, Seed, eta_run:summary(Result)})
+            ?assertEqual(ok, eta_run:audit(Result), {seed, Seed, eta_run:summary(Result)}),
+            eta_run:summary(Result)
         end,
         Seeds
     ).

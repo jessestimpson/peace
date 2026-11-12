@@ -55,7 +55,7 @@ suite(throughput) ->
              || Clients <- [1, 4, 16, 64, 256]
             ]
         end)
-     || Storage <- [mem, dets], N <- [3, 5]
+     || Storage <- [mem, dets, wal], N <- [3, 5]
     ],
     ok;
 %% Writes with values of 100 bytes to 100 kB.
@@ -70,7 +70,7 @@ suite(value_size) ->
              || Bytes <- [100, 1000, 10000, 100000]
             ]
         end)
-     || Storage <- [mem, dets]
+     || Storage <- [mem, dets, wal]
     ],
     ok;
 %% Writes to 5 servers, with each quorum system and each `propose_to'.
@@ -80,7 +80,7 @@ suite(propose_to) ->
         with_cluster(#{servers => 5, storage => Storage, opts => #{quorum => Quorum, propose_to => To}}, fun(C) ->
             run_load(io_lib:format("5 servers, ~s, ~p, propose_to ~s", [Storage, Quorum, To]), C, #{clients => 16})
         end)
-     || Storage <- [mem, dets], Quorum <- [majority, {counting, 4, 2}], To <- [all, quorum]
+     || Storage <- [mem, wal], Quorum <- [majority, {counting, 4, 2}], To <- [all, quorum]
     ],
     ok;
 %% The four kinds of read, on 3 servers.
@@ -104,14 +104,14 @@ suite(reads) ->
                 })
             end)
         end
-     || Storage <- [mem, dets]
+     || Storage <- [mem, wal]
     ],
     ok;
 %% The time for which no value is decided after the leader's node is killed.
 suite(failover) ->
     header(failover),
     [
-        with_cluster(#{servers => N, storage => dets, opts => #{election_timeout_ms => T}}, fun(C) ->
+        with_cluster(#{servers => N, storage => wal, opts => #{election_timeout_ms => T}}, fun(C) ->
             Times = failover_trials(C, 10),
             row(failover, [io_lib:format("~b servers, election timeout ~b ms", [N, T]) | summary(Times)])
         end)
@@ -122,10 +122,10 @@ suite(failover) ->
 suite(restart) ->
     header(restart),
     [
-        with_cluster(#{servers => 3, storage => dets, opts => #{snapshot_interval => 64}}, fun(C) ->
-            restart_trial(C, MB)
+        with_cluster(#{servers => 3, storage => Storage, opts => #{snapshot_interval => 64}}, fun(C) ->
+            restart_trial(C, Storage, MB)
         end)
-     || MB <- [1, 10, 100]
+     || Storage <- [dets, wal], MB <- [1, 10, 100]
     ],
     ok;
 %% The time for a follower to catch up after it missed a number of values.
@@ -133,7 +133,7 @@ suite(restart) ->
 suite(catch_up) ->
     header(catch_up),
     [
-        with_cluster(#{servers => 3, storage => dets, opts => #{election_timeout_ms => T}}, fun(C) ->
+        with_cluster(#{servers => 3, storage => wal, opts => #{election_timeout_ms => T}}, fun(C) ->
             catch_up_trial(C, T div 5, Missed)
         end)
      || T <- [1000, 100], Missed <- [100, 1000, 3000, 10000]
@@ -158,7 +158,8 @@ start_cluster(Spec = #{servers := N, storage := StorageKind}) ->
     Storage =
         case StorageKind of
             mem -> {peace_storage_mem, #{}};
-            dets -> {peace_storage_dets, #{dir => filename:absname(Dir)}}
+            dets -> {peace_storage_dets, #{dir => filename:absname(Dir)}};
+            wal -> {peace_storage_wal, #{dir => filename:absname(Dir)}}
         end,
     Names = [list_to_atom("peace_bench_" ++ integer_to_list(I)) || I <- lists:seq(1, N)],
     Peers = maps:from_list([start_node(Name) || Name <- Names]),
@@ -192,7 +193,14 @@ stop_cluster(#{ids := Ids, dir := Dir}) ->
 %% code path of the controller. Returns `{Node, Peer}'.
 start_node(Name) ->
     Paths = lists:append([["-pa", P] || P <- code:get_path(), lists:prefix(filename:absname("_build"), P)]),
-    Args = Paths ++ ["-setcookie", atom_to_list(erlang:get_cookie())] ++ node_flags(),
+    %% `global' disconnects nodes to prevent overlapping partitions. It would
+    %% disconnect nodes of the next cluster when the harness stops the nodes
+    %% of a cluster.
+    Args =
+        Paths ++
+            ["-setcookie", atom_to_list(erlang:get_cookie())] ++
+            ["-kernel", "prevent_overlapping_partitions", "false"] ++
+            node_flags(),
     {ok, Peer, Node} = peer:start(#{name => Name, args => Args, wait_boot => 60000}),
     {ok, _} = erpc:call(Node, application, ensure_all_started, [peace]),
     {Node, Peer}.
@@ -427,7 +435,7 @@ first_put(Ids = [First | Rest]) ->
 
 %% Loads `MB' megabytes of machine state, kills a follower's node and
 %% restarts the follower. No value is proposed while the follower is down.
-restart_trial(C0 = #{ids := Ids}, MB) ->
+restart_trial(C0 = #{ids := Ids}, Storage, MB) ->
     Leader = await_leader(C0),
     ok = puts(Leader, blob, MB * 16, 65536, 4),
     [Follower | _] = Ids -- [Leader],
@@ -440,6 +448,7 @@ restart_trial(C0 = #{ids := Ids}, MB) ->
     T1 = now_us(),
     T2 = await_commit(Follower, Target),
     row(restart, [
+        atom_to_list(Storage),
         io_lib:format("~b MB", [MB]),
         integer_to_list(Target - Snap),
         ms(T1 - T0),
@@ -472,9 +481,12 @@ catch_up_trial(C0 = #{ids := Ids}, HeartbeatMs, Missed) ->
     ]),
     C2.
 
+%% The size of the files of a server. The dets backend has one file. The
+%% write-ahead log backend has one directory.
 file_mb(#{dir := Dir}, {Name, Node}) ->
-    File = filename:join(Dir, lists:concat([Name, "@", Node, ".peace"])),
-    io_lib:format("~.1f", [filelib:file_size(File) / 1048576]).
+    Base = filename:join(Dir, lists:concat([Name, "@", Node])),
+    Files = [Base ++ ".peace" | filelib:wildcard(filename:join(Base, "*"))],
+    io_lib:format("~.1f", [lists:sum([filelib:file_size(F) || F <- Files]) / 1048576]).
 
 %% ---------------------------------------------------------------------------
 %% Output
@@ -487,8 +499,8 @@ header(failover) ->
     io:format("~n| Configuration | Trials | Min ms | Median ms | Max ms |~n|---|---|---|---|---|~n", []);
 header(restart) ->
     io:format(
-        "~n| Machine state | Log entries above the snapshot | Server start ms | Caught up ms | dets file MB |~n"
-        "|---|---|---|---|---|~n",
+        "~n| Storage | Machine state | Log entries above the snapshot | Server start ms | Caught up ms | Files MB |~n"
+        "|---|---|---|---|---|---|~n",
         []
     );
 header(catch_up) ->

@@ -82,8 +82,10 @@
 %% The options that are the same for every member of a cluster.
 -type cluster_opts() :: #{
     quorum => peace_quorum:spec(),
-    %% `{Module, Args}'. The default is `{peace_storage_mem, #{}}'. The
-    %% default backend is not durable. See `peace_storage_mem'.
+    %% `{Module, Args}'. The default is `{peace_storage_wal, #{dir => Dir}}',
+    %% where `Dir' is the application environment variable `data_dir' of
+    %% `peace'. `data_dir' defaults to `"peace_data"', relative to the
+    %% working directory. See `peace_storage_wal'.
     storage => peace_storage:storage(),
     %% T, in milliseconds. A follower that has received nothing from a
     %% leader for a time between T and 2T runs a pre-vote. The follower

@@ -15,6 +15,12 @@
 %% that `peace_core' asked to send. Paxos does not tolerate the failure in
 %% which a promise or an acceptance reaches a peer and is then lost in a
 %% restart.
+%%
+%% This module handles the events that are in the mailbox as a group and
+%% performs one storage write for the group. See `event/2'.
+%%
+%% If the storage backend fails to open or to write, the server stops and
+%% is not restarted. See `persist/2'.
 -module(peace_server).
 
 -behaviour(gen_server).
@@ -42,6 +48,9 @@ log_event(Event) -> Event.
 -else.
 -define(TRACE(Event, Core), ok).
 -endif.
+
+%% The maximum number of events in one group. See `event/2'.
+-define(MAX_GROUP, 256).
 
 -record(state, {
     core :: peace_core:core(),
@@ -93,26 +102,36 @@ init(Config = #{id := Id, members := Members}) ->
     ?ETA_LABEL(Id),
     case check_quorum(Config, Members) of
         ok ->
-            {StorageMod, StorageArgs} = maps:get(storage, Config, {peace_storage_mem, #{}}),
-            {ok, Storage, Stored} = peace_storage:open(StorageMod, Id, StorageArgs),
-            Clock = clock_rate(Config),
-            {Core, Effects} = peace_core:init(Config, Stored, now_ms(Clock)),
-            ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
-            State = #state{
-                core = Core,
-                tracer = tracer(Config),
-                clock = Clock,
-                storage_mod = StorageMod,
-                storage = Storage,
-                election_ms = ElectionMs,
-                heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
-            },
-            State1 = perform(Effects, State),
-            ok = trace(State1, {Id, init, undefined, Core, Effects}),
-            {ok, State1};
+            {StorageMod, StorageArgs} = maps:get(storage, Config, default_storage()),
+            case peace_storage:open(StorageMod, Id, StorageArgs) of
+                {ok, Storage, Stored} -> init(Config, StorageMod, Storage, Stored);
+                {error, Reason} -> {stop, {storage_failed, Reason}}
+            end;
         {error, Reason} ->
             {stop, {invalid_quorum, Reason}}
     end.
+
+%% The default backend is the write-ahead log, in the directory that the
+%% application environment variable `data_dir' names.
+default_storage() ->
+    {peace_storage_wal, #{dir => application:get_env(peace, data_dir, "peace_data")}}.
+
+init(Config = #{id := Id}, StorageMod, Storage, Stored) ->
+    Clock = clock_rate(Config),
+    {Core, Effects} = peace_core:init(Config, Stored, now_ms(Clock)),
+    ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
+    State = #state{
+        core = Core,
+        tracer = tracer(Config),
+        clock = Clock,
+        storage_mod = StorageMod,
+        storage = Storage,
+        election_ms = ElectionMs,
+        heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
+    },
+    State1 = perform(Effects, State),
+    ok = trace(State1, {Id, init, undefined, Core, Effects}),
+    {ok, State1}.
 
 handle_call({value, Value}, From, State) ->
     {noreply, event({value, From, Value}, State)};
@@ -195,12 +214,68 @@ check_quorum1(Config, Members) ->
             peace_quorum:validate(maps:get(quorum, Config, majority), Members)
     end.
 
-event(Event, State = #state{core = Core0}) ->
-    {Core, Effects} = peace_core:handle(Event, now_ms(State#state.clock), Core0),
+%% Handles one event, and then every event that is already in the mailbox,
+%% up to `?MAX_GROUP' events. The effects of all of these events are
+%% performed together: one storage write, and then every other effect in
+%% order. This is group commit. One storage write serves every event that
+%% arrived while the previous write was in progress.
+%%
+%% `peace_core' handles a later event of the group before the effects of an
+%% earlier event are performed. This is safe because `peace_core' is a pure
+%% function, and no effect of the group is visible outside this process
+%% until the write has returned.
+event(Event, State) ->
+    flush(drain(?MAX_GROUP - 1, step(Event, State, []))).
+
+%% Performs the effects of the steps of a group. `Steps' is in reverse
+%% order.
+flush({State0, Steps}) ->
+    Ordered = lists:reverse(Steps),
+    State = perform(lists:append([Effects || {_Id, _Event, _Core0, _Core, Effects} <- Ordered]), State0),
+    lists:foreach(fun(Step) -> ok = trace(State, Step) end, Ordered),
+    State.
+
+%% Handles one event and adds the step to the group.
+%%
+%% A step that writes a snapshot starts a new group. The steps before it
+%% are performed first. `peace_core' guarantees that every index under a
+%% snapshot was written as decided by an earlier event. The separate group
+%% keeps that guarantee for writes: no index is written as decided and
+%% removed by a snapshot in the same write.
+step(Event, State0 = #state{core = Core0}, Steps0) ->
+    {Core, Effects} = peace_core:handle(Event, now_ms(State0#state.clock), Core0),
     _ = ?TRACE(Event, Core),
-    State1 = perform(Effects, State#state{core = Core}),
-    ok = trace(State1, {peace_core:id(Core), Event, Core0, Core, Effects}),
-    State1.
+    {State, Steps} =
+        case Steps0 =/= [] andalso lists:any(fun is_snapshot/1, Effects) of
+            true -> {flush({State0, Steps0}), []};
+            false -> {State0, Steps0}
+        end,
+    {State#state{core = Core}, [{peace_core:id(Core), Event, Core0, Core, Effects} | Steps]}.
+
+is_snapshot({persist, #{snapshot := _}}) -> true;
+is_snapshot(_Effect) -> false.
+
+%% Takes from the mailbox the messages that become `peace_core' events
+%% without any other work in this module. Every other message stays in the
+%% mailbox, and `gen_server' delivers it after the group. The patterns for
+%% calls and casts are the message formats of `gen_server'.
+drain(0, Acc) ->
+    Acc;
+drain(N, {State, Steps}) ->
+    receive
+        {peace_msg, Peer, Msg} ->
+            drain(N - 1, step({msg, Peer, Msg}, State, Steps));
+        {'$gen_call', From, {value, Value}} ->
+            drain(N - 1, step({value, From, Value}, State, Steps));
+        {'$gen_call', From, {value, Value, Session}} ->
+            drain(N - 1, step({value, From, Value, Session}, State, Steps));
+        {'$gen_call', From, {consistent_query, Fun}} ->
+            drain(N - 1, step({query, From, Fun}, State, Steps));
+        {'$gen_cast', {value, Value}} ->
+            drain(N - 1, step({value, undefined, Value}, State, Steps))
+    after 0 ->
+        {State, Steps}
+    end.
 
 %% A test build may supply a function that is called with each step, after
 %% the step has been performed. A test uses the function to check a run
@@ -229,8 +304,18 @@ perform(Effects, State0) ->
 persist([], State) ->
     State;
 persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
-    {ok, Storage} = peace_storage:write(Mod, lists:foldl(fun merge_batch/2, #{}, Batches), Storage0),
-    State#state{storage = Storage}.
+    Batch = lists:foldl(fun merge_batch/2, #{}, Batches),
+    %% A failed write stops the server before the server sends anything
+    %% that depends on the write. The exit reason is a `shutdown' reason, so
+    %% `peace_sup' does not restart the server. After a failed write or a
+    %% failed sync, the contents of the file are not known, and a restart
+    %% could recover data that is not durable.
+    try peace_storage:write(Mod, Batch, Storage0) of
+        {ok, Storage} -> State#state{storage = Storage};
+        {error, Reason} -> exit({shutdown, {storage_failed, Reason}})
+    catch
+        Class:Reason:Stack -> exit({shutdown, {storage_failed, {Class, Reason, Stack}}})
+    end.
 
 %% Merges one batch into the write.
 %%   - A later batch overrides an earlier batch. For entries, the later

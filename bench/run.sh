@@ -11,5 +11,6 @@ cd "$(dirname "$0")/.."
 rebar3 as bench compile >/dev/null
 lib=_build/bench/lib/peace
 exec erl -noshell -sname peace_bench_ctl -setcookie peace_bench \
+    -kernel prevent_overlapping_partitions false \
     -pa "$PWD/$lib/ebin" -pa "$PWD/$lib/bench" \
     -run peace_bench main "$@"

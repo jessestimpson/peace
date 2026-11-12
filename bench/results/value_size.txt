@@ -2,11 +2,17 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
 |---|---|---|---|---|---|---|---|
-| 3 servers, mem, 100-byte values | 16 | 67506 | 0.20 | 0.46 | 0.53 | 0.83 | 0 |
-| 3 servers, mem, 1000-byte values | 16 | 57267 | 0.26 | 0.47 | 0.55 | 0.88 | 0 |
-| 3 servers, mem, 10000-byte values | 16 | 46359 | 0.32 | 0.56 | 0.67 | 1.10 | 0 |
-| 3 servers, mem, 100000-byte values | 16 | 24175 | 0.64 | 0.95 | 1.20 | 1.54 | 0 |
-| 3 servers, dets, 100-byte values | 16 | 499 | 24.5 | 71.7 | 115.5 | 177.0 | 0 |
-| 3 servers, dets, 1000-byte values | 16 | 312 | 36.1 | 115.8 | 312.8 | 335.3 | 0 |
-| 3 servers, dets, 10000-byte values | 16 | 219 | 55.8 | 181.0 | 288.1 | 327.0 | 0 |
-| 3 servers, dets, 100000-byte values | 16 | 171 | 74.1 | 188.6 | 281.2 | 297.2 | 0 |
+| 3 servers, mem, 100-byte values | 16 | 64454 | 0.20 | 0.48 | 0.57 | 1.01 | 0 |
+| 3 servers, mem, 1000-byte values | 16 | 54673 | 0.27 | 0.50 | 0.58 | 0.94 | 0 |
+| 3 servers, mem, 10000-byte values | 16 | 44280 | 0.34 | 0.58 | 0.70 | 1.82 | 0 |
+| 3 servers, mem, 100000-byte values | 16 | 22950 | 0.67 | 1.01 | 1.29 | 1.81 | 0 |
+| 3 servers, dets, 100-byte values | 16 | 1814 | 7.86 | 10.7 | 28.8 | 176.3 | 0 |
+| 3 servers, dets, 1000-byte values | 16 | 1574 | 8.09 | 19.8 | 77.3 | 120.4 | 0 |
+| 3 servers, dets, 10000-byte values | 16 | 1332 | 9.20 | 17.9 | 132.7 | 272.9 | 0 |
+| 3 servers, dets, 100000-byte values | 16 | 632 | 17.1 | 44.3 | 337.7 | 464.0 | 0 |
+| 3 servers, wal, 100-byte values | 16 | 8015 | 1.90 | 2.46 | 6.58 | 25.1 | 0 |
+| 3 servers, wal, 1000-byte values | 16 | 4802 | 2.37 | 10.3 | 16.1 | 265.9 | 0 |
+| 3 servers, wal, 10000-byte values | 16 | 4644 | 2.48 | 9.87 | 19.6 | 216.8 | 0 |
+| 3 servers, wal, 100000-byte values | 16 | 1659 | 7.18 | 12.5 | 105.2 | 268.2 | 0 |
+=WARNING REPORT==== 12-Nov-2026::06:27:47.646756 ===
+'global' at node 'peace_bench_ctl@MacBook-Air' requested disconnect from node 'peace_bench_2@MacBook-Air' in order to prevent overlapping partitions

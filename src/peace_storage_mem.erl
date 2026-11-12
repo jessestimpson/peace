@@ -5,7 +5,7 @@
 %% A server that uses this backend and restarts has lost every promise that
 %% it made. Paxos does not tolerate an acceptor that loses its promises. This
 %% backend is safe only if a restarted server never rejoins under the same
-%% id. Use this backend for tests. Use `peace_storage_dets' for everything
+%% id. Use this backend for tests. Use `peace_storage_wal' for everything
 %% else.
 -module(peace_storage_mem).
 

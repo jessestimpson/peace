@@ -3,6 +3,8 @@
 %% what was written. This holds whether the previous owner closed the store
 %% or was killed while the owner held the store.
 %%
+%% The backends are `peace_storage_dets' and `peace_storage_wal'.
+%%
 %% The simulation also runs the dets backend, but on the replacement for
 %% dets that eta provides. The reason is that a real dets table is served by
 %% processes that the scheduler of the simulation does not control. These
@@ -18,6 +20,16 @@ dets_test_() ->
     {timeout, 120, fun() ->
         lists:foreach(fun(Seed) -> conforms(peace_storage_dets, Seed) end, lists:seq(1, 20))
     end}.
+
+wal_test_() ->
+    {timeout, 120, fun() ->
+        lists:foreach(fun(Seed) -> conforms(peace_storage_wal, Seed) end, lists:seq(1, 20))
+    end}.
+
+wal_empty_test() ->
+    with_dir(fun(Dir) ->
+        ?assertEqual(#{entries => #{}}, in_owner(peace_storage_wal, Dir, fun(_Mod, State) -> {State, close} end))
+    end).
 
 %% An open of a store that was never written to recovers no data. The open
 %% returns that empty result in the shape that `peace_core:init/2' reads.

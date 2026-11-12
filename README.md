@@ -111,11 +111,22 @@ restarts. The `storage => {Module, Args}` option selects the backend:
 
 | Backend | Behaviour |
 |---|---|
-| `{peace_storage_mem, #{}}` | **Default.** Keeps state in memory. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. |
-| `{peace_storage_dets, #{dir => Dir}}` | One dets file per server, synced on every write. Durable and slow. |
+| `{peace_storage_wal, #{dir => Dir}}` | **Default.** A write-ahead log with a checksum on every record, synced on every write. Durable. The default `Dir` is the application environment variable `data_dir` of `peace`, which defaults to `"peace_data"`. |
+| `{peace_storage_dets, #{dir => Dir}}` | One dets file per server, synced on every write. Durable and slower than the write-ahead log. |
+| `{peace_storage_mem, #{}}` | Stores nothing. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. For tests. |
 
 A backend implements the [peace_storage](src/peace_storage.erl) behaviour,
 which has three callbacks.
+
+A server handles the events that are waiting in its mailbox as a group and
+performs one storage write for the group. A backend that syncs once per
+write therefore performs group commit.
+
+If a storage write fails, the server stops before it sends any message that
+depends on the write. The server is not restarted. If the write-ahead log
+finds a damaged record that is not a torn write at the end of the log, the
+server does not start. In both cases an operator must decide what to do
+with the member.
 
 ## Features
 
@@ -258,6 +269,7 @@ Workloads:
 | Churn | Forced elections, two-server partitions, and delayed `learned` messages |
 | Membership | The cluster moves between five configurations of five servers |
 | dets | The dets backend runs alongside the simulated disk, and the two are compared each time a server reopens its file |
+| Write-ahead log | The write-ahead log backend runs in the same way, on eta's simulated disk. A killed node loses the file data and the directory operations that it did not sync. |
 
 In every workload, servers take a snapshot every five indexes and clients
 retry with sessions. Read leases are also tested with two of three servers
@@ -267,11 +279,12 @@ Eight invariants are checked after every step. They include agreement across
 the whole run, that a server's memory never holds state its disk does not,
 and that a linearizable read returns every value acknowledged before it.
 
-Nine planted bugs confirm that the suite can fail:
+Ten planted bugs confirm that the suite can fail:
 
 - quorums that do not intersect
 - a disk that loses its contents on restart
 - a dets backend that does not write promises
+- a write-ahead log that never syncs
 - a deposed leader that does not step down
 - a candidate that leads while behind a snapshot
 - acceptors that ignore read leases
@@ -279,9 +292,15 @@ Nine planted bugs confirm that the suite can fail:
 - membership change without a joint configuration
 - clients that retry without a session
 
-Limitation: in the dets workload, dets calls go to eta's in-process
-replacement for dets. It keeps the file contents but is not the real dets
-implementation. The unit tests cover real dets.
+Limitations:
+
+- In the dets workload, dets calls go to eta's in-process replacement for
+  dets. It keeps the file contents but is not the real dets implementation.
+  The unit tests cover real dets.
+- The simulation does not make storage operations fail. Failed writes,
+  failed syncs and damaged records are covered by unit tests.
+- The write-ahead log workload needs `eta_disk`, which is on the
+  `simulated-disk` branch of eta and is not yet on `main`.
 
 ### Trace validation
 
@@ -325,7 +344,13 @@ The tests in [test/](test/) cover:
   fast (unsafe)
 - quorum arithmetic
 - whole clusters on real processes
-- the dets backend on real dets, through closes and kills
+- the dets backend and the write-ahead log backend on real files, through
+  closes and kills
+- the write-ahead log under injected faults: failed sync, short write, full
+  disk, torn write, damaged record, damaged header, damaged checkpoint and
+  failed checkpoint
+- a server whose storage write fails: the server stops, sends nothing and is
+  not restarted
 
 ### Test-only configuration
 
@@ -338,7 +363,7 @@ safeguard.
 
 ```
 make test       # unit tests
-make bench      # benchmarks on separate Erlang nodes, about 15 minutes
+make bench      # benchmarks on separate Erlang nodes, about 20 minutes
 make dst        # deterministic simulation, about 8 minutes
 make trace      # trace validation, about 4 minutes
 make tlc        # quick TLC configs, a few minutes
@@ -365,7 +390,7 @@ Requirements:
 | [src/peace_server.erl](src/peace_server.erl) | The `gen_server` that performs the effects: storage writes, timers and sends |
 | [src/peace_quorum.erl](src/peace_quorum.erl) | Quorum systems and their validation |
 | [src/peace_machine.erl](src/peace_machine.erl) | The state machine behaviour |
-| [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The two backends are in separate modules. |
+| [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The three backends are in separate modules. |
 | [bench/](bench/README.md) | A key-value state machine, a benchmark harness and the benchmark results |
 | [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | TLA+ model of the protocol. Comments in `peace_core` name the model action each clause implements. |
 | [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | The protocol model restated for Apalache, with the inductive invariant |

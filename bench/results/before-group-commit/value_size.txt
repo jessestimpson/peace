@@ -1,0 +1,12 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
+|---|---|---|---|---|---|---|---|
+| 3 servers, mem, 100-byte values | 16 | 67506 | 0.20 | 0.46 | 0.53 | 0.83 | 0 |
+| 3 servers, mem, 1000-byte values | 16 | 57267 | 0.26 | 0.47 | 0.55 | 0.88 | 0 |
+| 3 servers, mem, 10000-byte values | 16 | 46359 | 0.32 | 0.56 | 0.67 | 1.10 | 0 |
+| 3 servers, mem, 100000-byte values | 16 | 24175 | 0.64 | 0.95 | 1.20 | 1.54 | 0 |
+| 3 servers, dets, 100-byte values | 16 | 499 | 24.5 | 71.7 | 115.5 | 177.0 | 0 |
+| 3 servers, dets, 1000-byte values | 16 | 312 | 36.1 | 115.8 | 312.8 | 335.3 | 0 |
+| 3 servers, dets, 10000-byte values | 16 | 219 | 55.8 | 181.0 | 288.1 | 327.0 | 0 |
+| 3 servers, dets, 100000-byte values | 16 | 171 | 74.1 | 188.6 | 281.2 | 297.2 | 0 |

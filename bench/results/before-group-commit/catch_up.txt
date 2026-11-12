@@ -1,0 +1,12 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Heartbeat ms | Values missed | Transferred as | Caught up ms |
+|---|---|---|---|
+| 200 | 100 | log entries | 451.8 |
+| 200 | 1000 | log entries | 3223.1 |
+| 200 | 3000 | log entries | 9503.3 |
+| 200 | 10000 | snapshot | 265.9 |
+| 20 | 100 | log entries | 35.0 |
+| 20 | 1000 | log entries | 323.1 |
+| 20 | 3000 | log entries | 992.4 |
+| 20 | 10000 | snapshot | 26.0 |

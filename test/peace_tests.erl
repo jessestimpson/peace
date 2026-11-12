@@ -15,7 +15,9 @@ peace_test_() ->
         fun sessions_snapshots_and_leases/1,
         fun change_members/1,
         fun machine_effects/1,
-        fun unsafe_quorum_is_refused/1
+        fun unsafe_quorum_is_refused/1,
+        fun storage_failure_stops_server/1,
+        fun default_storage_is_durable/1
     ]}.
 
 setup() ->
@@ -236,6 +238,71 @@ unsafe_quorum_is_refused(Ids0) ->
 
 %% ---------------------------------------------------------------------------
 
+%% A server whose storage write fails stops before it sends anything that
+%% depends on the write. The server is not restarted.
+storage_failure_stops_server(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        Opts = (?FAST)#{storage => {peace_failing_storage, #{}}},
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
+        Leader = await_leader(Ids),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
+        [Follower, Other] = Ids -- [Leader],
+        %% The follower stops at its next write. The other two servers are
+        %% a majority and decide the value.
+        ok = peace_failing_storage:fail(Follower, write),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 2}),
+        ok = await(fun() ->
+            case whereis(element(1, Follower)) of
+                undefined -> {ok, ok};
+                _ -> retry
+            end
+        end),
+        timer:sleep(300),
+        ?assertEqual(undefined, whereis(element(1, Follower))),
+        %% The leader stops when it writes the next value. The leader has
+        %% not sent the value, so the last server never receives it.
+        #{last_index := Last} = peace:overview(Other),
+        ok = peace_failing_storage:fail(Leader, write),
+        ?assertMatch({error, {server_down, _}}, peace:propose(Leader, {put, a, 3}, 1000)),
+        timer:sleep(300),
+        ?assertEqual(undefined, whereis(element(1, Leader))),
+        ?assertMatch(#{last_index := Last}, peace:overview(Other)),
+        %% A server whose storage fails to open does not start.
+        ok = peace_failing_storage:fail(Leader, open),
+        ?assertMatch(
+            {error, {storage_failed, injected}},
+            peace:start_server(Opts#{id => Leader, members => Ids, machine => ?TEST_MACHINE})
+        )
+    end).
+
+%% A cluster that names no storage backend uses the write-ahead log in the
+%% `data_dir' of the application. A server that is stopped and started
+%% recovers its state.
+default_storage_is_durable(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        Dir = filename:join(
+            filename:basedir(user_cache, "peace_tests"),
+            "default_" ++ integer_to_list(erlang:unique_integer([positive]))
+        ),
+        ok = application:set_env(peace, data_dir, Dir),
+        try
+            Opts = #{election_timeout_ms => 100},
+            {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
+            Leader = await_leader(Ids),
+            {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
+            ?assertEqual(3, length(filelib:wildcard(filename:join([Dir, "*", "*.wal"])))),
+            [ok = peace:stop_server(Id) || Id <- Ids],
+            [ok = peace:start_server(Opts#{id => Id, members => Ids, machine => ?TEST_MACHINE}) || Id <- Ids],
+            NewLeader = await_leader(Ids),
+            ?assertMatch({ok, 1, NewLeader}, peace:propose(NewLeader, {get, a}))
+        after
+            application:unset_env(peace, data_dir),
+            file:del_dir_r(Dir)
+        end
+    end).
+
 await_leader(Ids) ->
     await(fun() ->
         Leaders = [Id || Id <- Ids, is_leader(Id)],
@@ -294,5 +361,7 @@ receive_told() ->
     after 300 -> none
     end.
 
+%% The tests use the backend that stores nothing, unless a test is about
+%% storage.
 fast() ->
-    #{election_timeout_ms => 100}.
+    #{election_timeout_ms => 100, storage => {peace_storage_mem, #{}}}.

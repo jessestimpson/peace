@@ -2,11 +2,15 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
 |---|---|---|---|---|---|---|---|
-| 5 servers, mem, majority, propose_to all | 16 | 44578 | 0.33 | 0.59 | 0.68 | 1.39 | 0 |
-| 5 servers, mem, majority, propose_to quorum | 16 | 58134 | 0.21 | 0.51 | 0.63 | 1.15 | 0 |
-| 5 servers, mem, {counting,4,2}, propose_to all | 16 | 46395 | 0.31 | 0.58 | 0.67 | 0.91 | 0 |
-| 5 servers, mem, {counting,4,2}, propose_to quorum | 16 | 80792 | 0.15 | 0.43 | 0.53 | 0.86 | 0 |
-| 5 servers, dets, majority, propose_to all | 16 | 281 | 46.7 | 119.3 | 149.2 | 283.3 | 0 |
-| 5 servers, dets, majority, propose_to quorum | 16 | 437 | 29.8 | 71.9 | 102.6 | 256.0 | 0 |
-| 5 servers, dets, {counting,4,2}, propose_to all | 16 | 259 | 47.7 | 115.0 | 141.7 | 159.2 | 0 |
-| 5 servers, dets, {counting,4,2}, propose_to quorum | 16 | 584 | 18.5 | 55.7 | 86.1 | 177.5 | 0 |
+| 5 servers, mem, majority, propose_to all | 16 | 39917 | 0.36 | 0.67 | 0.77 | 1.14 | 0 |
+| 5 servers, mem, majority, propose_to quorum | 16 | 53469 | 0.24 | 0.54 | 0.70 | 1.12 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to all | 16 | 41545 | 0.34 | 0.66 | 0.76 | 1.23 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to quorum | 16 | 74928 | 0.16 | 0.46 | 0.58 | 1.00 | 0 |
+| 5 servers, wal, majority, propose_to all | 16 | 5755 | 2.61 | 3.57 | 11.3 | 55.0 | 0 |
+=WARNING REPORT==== 12-Nov-2026::06:28:52.179219 ===
+'global' at node 'peace_bench_ctl@MacBook-Air' requested disconnect from node 'peace_bench_3@MacBook-Air' in order to prevent overlapping partitions
+| 5 servers, wal, majority, propose_to quorum | 16 | 7473 | 2.03 | 2.83 | 5.86 | 27.8 | 0 |
+| 5 servers, wal, {counting,4,2}, propose_to all | 16 | 6125 | 2.46 | 3.44 | 9.35 | 27.3 | 0 |
+=WARNING REPORT==== 12-Nov-2026::06:29:18.544866 ===
+'global' at node 'peace_bench_ctl@MacBook-Air' requested disconnect from node 'peace_bench_2@MacBook-Air' in order to prevent overlapping partitions
+| 5 servers, wal, {counting,4,2}, propose_to quorum | 16 | 10484 | 1.41 | 2.10 | 3.92 | 37.9 | 0 |

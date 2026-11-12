@@ -10,7 +10,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Area | Status |
 |---|---|
 | Protocol logic | Implemented. Verified by model checking, an inductive invariant, deterministic simulation and trace validation. See [README.md](README.md), "Verification". |
-| Storage | Prototype. The default backend is in-memory. The durable backend uses dets. |
+| Storage | The default backend is a write-ahead log with checksums and group commit. It is tested with fault injection and in the simulation. |
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
 | Testing on real nodes | Not done. All fault testing is simulated. |
 | Operations | Minimal. No telemetry, no leader transfer, no upgrade path. |
@@ -47,31 +47,35 @@ the results contain no network latency.
 
 Goal: a storage backend that is safe and fast enough to be the default.
 
-Current limitations:
-
-- The default backend, `peace_storage_mem`, loses all state when the process
-  stops.
-- `peace_storage_dets` syncs on every write, has a 2 GB file size limit and
-  has no checksums.
-- No test covers a failed sync, a full disk or a corrupted file.
-- The simulation runs the dets backend against a replacement for dets, not
-  against dets.
-
-Work:
-
-- [ ] Implement a write-ahead log backend with group commit.
-- [ ] Add a checksum to every record. Detect torn and corrupt records on
+- [x] Implement a write-ahead log backend with group commit.
+      `peace_storage_wal` is the backend. `peace_server` performs one
+      storage write for each group of waiting events.
+- [x] Add a checksum to every record. Detect torn and corrupt records on
       open.
-- [ ] Define the behaviour for a failed write or sync. The server must stop
-      before it sends a message that depends on the write.
-- [ ] Add fault injection for the storage backend: failed sync, short write,
+- [x] Define the behaviour for a failed write or sync. The server stops
+      before it sends a message that depends on the write, and is not
+      restarted.
+- [x] Add fault injection for the storage backend: failed sync, short write,
       corrupted record, full disk.
-- [ ] Run the new backend in the deterministic simulation.
-- [ ] Make a durable backend the default.
+- [x] Run the new backend in the deterministic simulation, on a simulated
+      disk that loses unsynced data when a node is killed.
+- [x] Make a durable backend the default.
+- [x] Repeat the benchmark from milestone 1.
 
-Done when: the new backend passes the storage contract tests, the fault
-injection tests and the simulation, and the benchmark from milestone 1 has
-been repeated with it.
+Status: done on 2026-11-12. The results are in
+[bench/README.md](bench/README.md).
+
+Remaining limitations:
+
+- The simulated disk is `eta_disk`, on the `simulated-disk` branch of eta.
+  `make dst` needs that branch until it is merged.
+- The simulation does not make storage operations fail. Those faults are
+  covered by unit tests.
+- A checkpoint rewrites the whole machine state. See milestone 4.
+- The log is shortened only by a snapshot. With
+  `snapshot_interval => infinity` the log grows without limit.
+- There is no procedure for a member whose storage failed. See the recovery
+  item in milestone 5.
 
 ### Milestone 3: Validation on real nodes
 
@@ -102,8 +106,9 @@ scope depends on the results of milestone 1.
 - [ ] Batch proposals: one message and one storage write for several values.
 - [ ] Remove the scan of every undecided index from `settle/1` in
       `peace_core`. With the in-memory backend and 3 servers, throughput
-      falls from 67,114 requests/s with 16 clients to 15,499 requests/s with
-      256 clients. Confirm the cause with a profiler first.
+      falls from 63,143 requests/s with 16 clients to 11,300 requests/s with
+      256 clients. Group commit made this worse with 64 clients. Confirm the
+      cause with a profiler first.
 - [ ] Make a follower request the next batch of missing entries when a batch
       arrives. A follower currently receives 64 entries per heartbeat on an
       idle cluster.

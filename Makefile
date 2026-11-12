@@ -49,7 +49,7 @@ ind:
 	formal/check_ind.sh all
 
 # Benchmarks. The servers run on separate Erlang nodes on this machine. See
-# bench/README.md. The target takes about 15 minutes.
+# bench/README.md. The target takes about 20 minutes.
 bench:
 	bench/run.sh all
 

@@ -26,7 +26,7 @@ cluster_test_() ->
 cluster() ->
     Tag = erlang:unique_integer([positive]),
     Ids = [{list_to_atom(lists:concat([peace_kv_t, Tag, "_", N])), node()} || N <- lists:seq(1, 3)],
-    Opts = #{election_timeout_ms => 100, read_lease_ms => 100},
+    Opts = #{election_timeout_ms => 100, read_lease_ms => 100, storage => {peace_storage_mem, #{}}},
     {ok, Ids, []} = peace:start_cluster(Ids, peace_kv:machine(), Opts),
     ok = peace:trigger_election(hd(Ids)),
     {ok, ok, Leader} = retry(fun() -> peace_kv:put(Ids, a, 1, 1000) end),

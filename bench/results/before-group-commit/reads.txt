@@ -1,0 +1,12 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
+|---|---|---|---|---|---|---|---|
+| 3 servers, mem, get (proposed) | 16 | 88078 | 0.18 | 0.23 | 0.27 | 1.30 | 0 |
+| 3 servers, mem, read (consistent_query, no lease) | 16 | 82128 | 0.19 | 0.25 | 0.28 | 0.57 | 0 |
+| 3 servers, mem, stale_read (local_query) | 16 | 183501 | 0.08 | 0.13 | 0.15 | 1.19 | 0 |
+| 3 servers, mem, read (consistent_query, lease) | 16 | 184534 | 0.08 | 0.13 | 0.14 | 0.88 | 0 |
+| 3 servers, dets, get (proposed) | 16 | 545 | 23.0 | 57.2 | 100.6 | 170.2 | 0 |
+| 3 servers, dets, read (consistent_query, no lease) | 16 | 635 | 22.4 | 39.2 | 51.4 | 119.8 | 0 |
+| 3 servers, dets, stale_read (local_query) | 16 | 189645 | 0.08 | 0.13 | 0.14 | 1.08 | 0 |
+| 3 servers, dets, read (consistent_query, lease) | 16 | 188841 | 0.08 | 0.13 | 0.14 | 0.94 | 0 |
