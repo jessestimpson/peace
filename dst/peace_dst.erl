@@ -130,6 +130,13 @@
 %% drift of one tenth. When the drift is far enough beyond one tenth, a read
 %% returns stale state.
 %%
+%% == Client history ==
+%%
+%% `history => Table' copies the client history of the run into the ETS
+%% table `Table' when the run ends. The caller creates the table and owns
+%% it. `peace_dst_history' describes the history. `make porcupine' checks
+%% the histories with Porcupine.
+%%
 %% == Trace validation ==
 %%
 %% `trace => Table' records every step of every server's core in the ETS
@@ -230,7 +237,7 @@ init(_Seed, Config) ->
     %% `preload => [peace]' does not load them. The harness loads them here.
     %% Loading a module during a run would make a call to the code server,
     %% and the scheduler does not control the code server.
-    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_nosync_io, peace_dst_trace]],
+    [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_nosync_io, peace_dst_trace, peace_dst_history]],
     %% The table is an `ordered_set', so that reading the disk of one server
     %% is a range read and not a scan of the whole table.
     Tab = ets:new(peace_dst, [public, ordered_set]),
@@ -283,6 +290,9 @@ init(_Seed, Config) ->
                 _ -> maps:get(retry, Config, session)
             end,
         converge => maps:get(converge, Config, false),
+        %% A table that receives the client history when the run ends, or
+        %% `undefined'. See `peace_dst_history'.
+        history => maps:get(history, Config, undefined),
         %% `ops' lists every process that the run has started through
         %% `spawn_op/3', oldest first. These are the processes of the value,
         %% query, reconfigure, elect and rumour operations.
@@ -485,6 +495,7 @@ settle_done(#{ops := Ops, converge := Converge, ids := Ids}) ->
 
 terminate(S = #{tab := Tab, n := N}) ->
     ok = record_stats(Tab),
+    ok = peace_dst_history:copy(Tab, maps:get(history, S)),
     %% The restarters are killed first. A server that a restarter has started
     %% but that has not yet registered its name can only be reached through
     %% the link to the restarter.

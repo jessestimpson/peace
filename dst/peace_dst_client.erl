@@ -30,6 +30,7 @@
 value(Tab, N, Servers, Op, Retry) ->
     ?ETA_LABEL({client, N}),
     true = ets:insert(Tab, {{op, Op}, invoked}),
+    ok = history(Tab, {invoke, N, {append, Op}}),
     Opts =
         case Retry of
             session -> #{timeout => ?CALL_TIMEOUT_MS, session => {N, 1}};
@@ -38,6 +39,7 @@ value(Tab, N, Servers, Op, Retry) ->
     Result = submit(fun() -> peace:propose(Servers, {put, Op}, Opts) end, ?ATTEMPTS, Retry =/= none),
     _ = ?ETA_LOG({client, N, Op, Result}),
     true = ets:insert(Tab, {{op, Op}, Result}),
+    ok = history(Tab, {return, N, Result}),
     ok.
 
 %% Performs a linearizable read of every value applied so far. Records the
@@ -46,6 +48,7 @@ value(Tab, N, Servers, Op, Retry) ->
 query(Tab, N, Servers) ->
     ?ETA_LABEL({client, N}),
     Before = [Op || [Op] <- ets:match(Tab, {{op, '$1'}, {ok, '_'}})],
+    ok = history(Tab, {invoke, N, read}),
     Result = submit(
         fun() ->
             peace:consistent_query(
@@ -57,6 +60,17 @@ query(Tab, N, Servers) ->
     ),
     _ = ?ETA_LOG({client, N, query, element(1, Result)}),
     true = ets:insert(Tab, {{query, N}, lists:sort(Before), Result}),
+    ok = history(Tab, {return, N, Result}),
+    ok.
+
+%% Records one event of the client history: the invocation of an operation,
+%% or the result that the client received. The events are numbered in the
+%% order in which they happened. One process runs at a time in a simulated
+%% run, so this order is the real-time order of the events. See
+%% `peace_dst_history'.
+history(Tab, Event) ->
+    Seq = ets:update_counter(Tab, history_seq, 1, {history_seq, 0}),
+    true = ets:insert(Tab, {{history, Seq}, Event}),
     ok.
 
 %% Requests a membership change. `submit/3' is called with `Again' false:

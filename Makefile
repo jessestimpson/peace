@@ -1,4 +1,4 @@
-.PHONY: all compile test dst trace tlc tlc-long tlc-soak ind check bench
+.PHONY: all compile test dst trace porcupine tlc tlc-long tlc-soak ind check bench
 
 all: compile
 
@@ -30,6 +30,12 @@ dst:
 # This target needs eta and Java.
 trace:
 	ERL_FLAGS="+S 1" rebar3 as dst eunit --module=peace_dst_trace_tests
+
+# Linearizability checking with Porcupine. This target performs simulated
+# runs and checks the client history of each run with Porcupine. See
+# dst/peace_dst_porcupine_tests.erl. This target needs eta and Go.
+porcupine:
+	ERL_FLAGS="+S 1" rebar3 as dst eunit --module=peace_dst_porcupine_tests
 
 # Model checking with TLC. See formal/README.md. A config is skipped if its
 # model has not changed since the config was last checked. FORCE=1 runs the

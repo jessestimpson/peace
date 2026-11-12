@@ -80,9 +80,11 @@ Remaining limitations:
 Goal: check linearizability with tools that are independent of peace, on
 separate Erlang nodes with real faults.
 
-- [ ] Export client histories from the deterministic simulation and check
+- [x] Export client histories from the deterministic simulation and check
       them with [Porcupine](https://github.com/anishathalye/porcupine). This
-      checks the simulation's own linearizability check.
+      checks the simulation's own linearizability check. Done on
+      2026-11-12: `make porcupine` checks 160 runs and 8,042 operations, and
+      rejects three planted bugs.
 - [ ] Write a [Jepsen](https://github.com/jepsen-io/jepsen) test for the
       key-value state machine. Use the Jepsen test in
       [ra-kv-store](https://github.com/rabbitmq/ra-kv-store) as the starting

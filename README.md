@@ -206,13 +206,14 @@ reduces messages. It does not reduce storage.
 
 ## Verification
 
-peace is verified at four levels.
+peace is verified at five levels.
 
 | Level | What it checks | Command | Time |
 |---|---|---|---|
 | Unit tests | The protocol core and the supporting modules | `make test` | seconds |
 | Deterministic simulation | The real server processes under faults | `make dst` | about 8 minutes |
 | Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 4 minutes |
+| Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 2 minutes |
 | Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
 Details of the models are in [formal/README.md](formal/README.md).
@@ -332,6 +333,54 @@ Limitations:
   the messages that justify it were sent, even if the server had not yet
   received them.
 
+### Linearizability checking
+
+The simulation checks linearizability with invariants that are part of
+peace. [dst/peace_dst_porcupine_tests.erl](dst/peace_dst_porcupine_tests.erl)
+checks the same runs with
+[Porcupine](https://github.com/anishathalye/porcupine), a linearizability
+checker that shares no code with peace.
+
+1. [dst/peace_dst_history.erl](dst/peace_dst_history.erl) exports the
+   client history of a run: the invocation and the result of each append
+   and each read, in the order in which they happened.
+2. [dst/porcupine/main.go](dst/porcupine/main.go) checks the history
+   against a model of the simulated machine, which is a log of values.
+
+Porcupine uses only what the clients observed. The invariants of the
+simulation also read the state of the servers.
+
+Results:
+
+| Workload | Runs | Operations checked | Result |
+|---|---|---|---|
+| Faults, 3 servers | 40 | 2,594 | linearizable |
+| Churn, 5 servers | 30 | 1,111 | linearizable |
+| `{counting, 4, 2}`, 5 servers | 30 | 1,452 | linearizable |
+| Read leases, clocks 6% fast | 30 | 1,354 | linearizable |
+| Membership change | 30 | 1,531 | linearizable |
+
+Three planted bugs confirm that Porcupine can reject a history:
+
+| Planted bug | Result |
+|---|---|
+| Clients retry without a session | rejected at seed 3 |
+| Acceptors ignore read leases | rejected at seed 18 |
+| Quorums that do not intersect | rejected at seed 6 |
+
+Limitations:
+
+- The model of the machine is part of this repository. Porcupine is
+  independent of peace. The model is not.
+- The model fixes the order of the values from the reads and the indexes
+  before Porcupine searches. The comment at the top of
+  [dst/porcupine/main.go](dst/porcupine/main.go) gives the argument that
+  this accepts the same histories. Without it, Porcupine did not finish
+  within 60 seconds on some histories.
+- An append with an unknown outcome is checked only if a read returned its
+  value.
+- The histories come from the simulation, not from real nodes.
+
 ### Unit tests
 
 The tests in [test/](test/) cover:
@@ -364,6 +413,7 @@ make test       # unit tests
 make bench      # benchmarks on separate Erlang nodes, about 20 minutes
 make dst        # deterministic simulation, about 8 minutes
 make trace      # trace validation, about 4 minutes
+make porcupine  # linearizability checking with Porcupine, about 2 minutes
 make tlc        # quick TLC configs, a few minutes
 make ind        # inductive invariant with Apalache, about 3 minutes
 make tlc-long   # TLC configs with tens of millions of states, about 2 hours
@@ -376,6 +426,8 @@ Requirements:
   git dependency. For local development, link a checkout at
   `_checkouts/eta`.
 - `make trace` and the TLC targets need Java 11 or later.
+- `make porcupine` needs eta and Go 1.19 or later. The first run downloads
+  Porcupine as a Go module.
 - `make ind` needs Apalache, which is not included in the repository. See
   [formal/README.md](formal/README.md).
 
