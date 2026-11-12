@@ -205,3 +205,73 @@ None is required for production use.
   milestone 1 is for benchmarking and testing.
 - Byzantine fault tolerance. peace tolerates crash faults and message
   faults.
+
+## Memory nodes
+
+This work is not scheduled. It does not block the milestones above.
+
+Goal: support a state machine whose state is valid only while the nodes
+run. The example is a process registry, where the state contains Erlang
+pids. Such state must not be read back from disk after a node restarts.
+
+Design: a memory node keeps its acceptor state, its log and its snapshot in
+an ETS table and writes nothing to disk. The peace supervisor owns the
+table.
+
+| Event | Table | Server id |
+|---|---|---|
+| The server process restarts | The table is kept. | The server keeps its id and recovers its promise and its accepted proposals. |
+| The node restarts, or the peace application restarts | The table is lost. | The server gets a new incarnation and joins through a membership change. |
+
+A server that loses its acceptor state must not answer under its old id. A
+new incarnation is a new acceptor that has promised nothing.
+
+- [ ] Check what the thesis
+      ([docs/UCAM-CL-TR-935.pdf](docs/UCAM-CL-TR-935.pdf)) assumes about
+      stable storage, and state in the documentation where memory nodes
+      depart from it.
+- [ ] Add an ETS storage backend. The supervisor creates one public
+      `ordered_set` table in `init/1`. The key is `{ServerName, Key}`. A
+      group of events is written with one `ets:insert/2` call, which is
+      atomic.
+- [ ] Add an incarnation to the server id. The incarnation is created with
+      the table and stored in the table. Every message carries the
+      incarnation of the sender and of the destination. A server drops a
+      message for another incarnation.
+- [ ] Define how a new incarnation replaces the old incarnation in a grid
+      quorum system, where the rows list server ids.
+- [ ] Replace on start: a new incarnation starts as a non-member, asks the
+      leader to replace the old incarnation of the same node, and catches
+      up from a snapshot. Several nodes can restart at the same time, and
+      only one membership change runs at a time.
+- [ ] Refuse to start a memory server that has no state in the table under
+      an id that is a member.
+- [ ] Add monitor effects for the machine, as in ra:
+      `{monitor, process, Pid}` and `{monitor, node, Node}`. The leader
+      performs them and issues them again from `state_enter/2`. The down
+      signal is proposed as a value, so that every replica removes the pid.
+- [ ] Define a bootstrap rule for a cluster that can no longer form a
+      quorum of live incarnations. A proposed rule: a fixed node list, a
+      cluster incarnation, and a new cluster forms only when a majority of
+      the listed nodes are new incarnations that know of no live cluster.
+      Add the rule to the TLA+ model before the implementation.
+- [ ] Add an event that tells the application that the state was reset. A
+      server that survives from the old cluster discards its state and
+      joins the new cluster.
+- [ ] Add a simulation workload with memory nodes, kills and replace on
+      start. Add a planted bug in which a node rejoins under its old
+      incarnation.
+- [ ] Add a process registry as an example machine.
+
+Limitations of the design:
+
+- A node restart is a permanent failure of one acceptor. If the stopped
+  nodes include a member of every phase-one quorum or of every phase-two
+  quorum, the cluster cannot decide again and the state is lost.
+- The log and the snapshot are copies outside the server process, so the
+  machine state is held in memory twice.
+- A value that makes `apply/3` crash on every server also crashes every new
+  incarnation.
+
+Done when: the process registry passes the simulation workload and a Jepsen
+run with kills, and the bootstrap rule is model checked.
