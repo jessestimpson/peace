@@ -14,7 +14,9 @@
 %% <li>`GET /status' returns the role, the leader and the members that this
 %%   node knows.</li>
 %% <li>`POST /members?nodes=N1,N2,N3' changes the members of the cluster to
-%%   the listed nodes, with majority quorums.</li>
+%%   the listed nodes. The optional parameter `quorum' sets the quorum
+%%   system, in the syntax of the `quorum' argument of `peace_kv_node'. The
+%%   default is `majority'.</li>
 %% </ul>
 %%
 %% Every request is sent to the peace server of this node. The request
@@ -122,9 +124,10 @@ request('GET', #{path := <<"/status">>}) ->
             failure(Other)
     end;
 request('POST', #{path := <<"/members">>, query := Query}) ->
-    #{<<"nodes">> := Nodes} = maps:from_list(uri_string:dissect_query(Query)),
+    Params = #{<<"nodes">> := Nodes} = maps:from_list(uri_string:dissect_query(Query)),
     Members = peace_kv_node:members(binary_to_list(Nodes)),
-    case peace:change_members(peace_kv_node:server(), Members, majority, ?TIMEOUT_MS) of
+    Quorum = peace_kv_node:quorum(binary_to_list(maps:get(<<"quorum">>, Params, <<"majority">>))),
+    case peace:change_members(peace_kv_node:server(), Members, Quorum, ?TIMEOUT_MS) of
         {ok, ok, _Leader} -> {204, <<>>};
         Other -> failure(Other)
     end;

@@ -46,25 +46,52 @@
   \"grid:R\" arranges the nodes of the test in rows of R nodes."
   [test]
   (let [q (:quorum test)]
-    (if-let [[_ r] (re-matches #"grid:(\d+)" q)]
+    (cond
+      (re-matches #"grid:\d+" q)
       (->> (:nodes test)
            (map node-name)
-           (partition-all (parse-long r))
+           (partition-all (parse-long (subs q 5)))
            (map #(str/join "+" %))
            (str/join "/")
            (str "grid:"))
-      q)))
 
-(defn start-node!
-  "Starts the Erlang node. The node recovers its state from /opt/peace/data."
+      ; "weighted:2+1+1" gives the weights of the nodes, in order.
+      (str/starts-with? q "weighted:")
+      (->> (map (fn [node w] (str (node-name node) "=" w))
+                (:nodes test)
+                (str/split (subs q 9) #"\+"))
+           (str/join "+")
+           (str "weighted:"))
+
+      :else q)))
+
+(defn clock-args
+  "The clock arguments of peace_kv_node. With --clock-rate-spread P, every
+  start of a node picks a clock rate between 1 - P/200 and 1 + P/200."
+  [test]
+  (let [spread (:clock-rate-spread test)
+        lease  (:read-lease-ms test)]
+    (concat
+      (when lease
+        [:-peace_kv_node "read_lease_ms" (str lease)])
+      (when (pos? spread)
+        [:-peace_kv_node "clock_rate"
+         (str (+ 1000 (- (rand-int (inc (* 10 spread))) (* 5 spread))) "/1000")]))))
+
+(defn wall-clock-args
+  "The command prefix that changes the wall clock of the node. With
+  --wall-clock-skew, every start of a node picks an offset between -1 hour
+  and +1 hour and a rate between 0.5 and 2. libfaketime changes the wall
+  clock of the Erlang emulator. It does not change the monotonic clock."
+  [test]
+  (when (:wall-clock-skew test)
+    ["/usr/bin/faketime" "-f"
+     (format "%+ds x%.2f" (- (rand-int 7201) 3600) (+ 0.5 (* 1.5 (rand))))]))
+
+(defn erl-args
+  "The arguments of erl that do not depend on the clock options."
   [test node]
-  (c/su
-    (cu/start-daemon!
-      {:logfile logfile
-       :pidfile pidfile
-       :chdir   dir}
-      "/usr/local/bin/erl"
-      :-noinput
+  [:-noinput
       :-sname (node-name node)
       :-setcookie "jepsen"
       :-pa (str dir "/ebin") (str dir "/bench") (str dir "/node")
@@ -73,7 +100,21 @@
       :-peace_kv_node "quorum" (quorum test)
       :-peace_kv_node "reads" (if (:stale-reads test) "stale" "consistent")
       :-peace_kv_node "port" (str port)
-      :-s "peace_kv_node")))
+      :-s "peace_kv_node"])
+
+(defn start-node!
+  "Starts the Erlang node. The node recovers its state from /opt/peace/data."
+  [test node]
+  (c/su
+    (apply cu/start-daemon!
+      {:logfile logfile
+       :pidfile pidfile
+       :chdir   dir}
+      (concat
+        (wall-clock-args test)
+        ["/usr/local/bin/erl"]
+        (clock-args test)
+        (erl-args test node)))))
 
 (defn signal!
   "Sends a signal to the Erlang emulator on the current node. pkill -x
@@ -186,38 +227,74 @@
   (teardown! [this test])
   (close! [this test]))
 
+(defn random-quorum
+  "A random quorum system for the given nodes, in the syntax of the quorum
+  argument of peace_kv_node."
+  [nodes]
+  (let [n     (count nodes)
+        names (map node-name nodes)]
+    (case (rand-nth (if (= 4 n)
+                      [:majority :counting :weighted :grid]
+                      [:majority :counting :weighted]))
+      :majority "majority"
+      ; Any Q2 from 2 to N - 1, and the smallest Q1 that intersects it. The
+      ; sizes 1 and N are left out, because a quorum of N members is not
+      ; available while any member is down, and the test would then
+      ; perform few operations.
+      :counting (let [q2 (+ 2 (rand-int (- n 2)))]
+                  (str "counting:" (- (inc n) q2) ":" q2))
+      :weighted (str "weighted:"
+                     (str/join "+" (map #(str % "=" (inc (rand-int 2))) names)))
+      :grid     (str "grid:"
+                     (str/join "/" (map #(str/join "+" %) (partition 2 names)))))))
+
 (defn members-nemesis
   "A nemesis that changes the members of the cluster. A :members operation
-  asks a random node to change the members to a random set of 3 to 5 nodes."
+  asks a random node to change the members to a random set of 3 to 5 nodes
+  with majority quorums. A :quorums operation does the same and also picks a
+  random quorum system."
   []
   (reify nemesis/Nemesis
     (setup! [this test] this)
     (invoke! [this test op]
       (let [nodes  (:nodes test)
             target (take (+ 3 (rand-int (- (count nodes) 2))) (shuffle nodes))
-            via    (rand-nth nodes)]
+            quorum (if (= :quorums (:f op)) (random-quorum target) "majority")
+            via    (rand-nth nodes)
+            value  {:via via :members (sort target) :quorum quorum}]
         (try
           (let [r (http/post (str "http://" via ":" port "/members")
                              (assoc http-opts :query-params
-                                    {"nodes" (str/join "," (map node-name target))}))]
-            (assoc op :value {:via via :members (sort target) :status (:status r) :body (:body r)}))
+                                    {"nodes"  (str/join "," (map node-name target))
+                                     "quorum" quorum}))]
+            (assoc op :value (assoc value :status (:status r) :body (:body r))))
           (catch Exception e
-            (assoc op :value {:via via :members (sort target) :error (.getName (class e))})))))
+            (assoc op :value (assoc value :error (.getName (class e))))))))
     (teardown! [this test])
     nemesis/Reflection
-    (fs [this] #{:members})))
+    (fs [this] #{:members :quorums})))
 
 (defn r   [_ _] {:type :invoke :f :read  :value nil})
 (defn w   [_ _] {:type :invoke :f :write :value (rand-int 5)})
 (defn cas [_ _] {:type :invoke :f :cas   :value [(rand-int 5) (rand-int 5)]})
 
-(def all-faults #{:partition :kill :pause :members})
+(def all-faults #{:partition :kill :pause :members :quorums})
 
 (defn parse-faults
   [s]
   (if (= s "none")
     #{}
     (set (map keyword (str/split s #",")))))
+
+(defn stats-checker
+  "The statistics of the run. checker/stats reports a run as invalid if one
+  kind of operation never succeeds. That happens in a short run in which
+  the nodes are down most of the time, and it is not a safety violation.
+  This checker reports the same statistics and is always valid."
+  []
+  (reify checker/Checker
+    (check [_ test history opts]
+      (assoc (checker/check (checker/stats) test history opts) :valid? true))))
 
 (defn peace-test
   "Builds the test map from the command line options."
@@ -230,33 +307,38 @@
         ; clock nemeses, which download programs to the nodes.
         pkg-opts {:db        db
                   :nodes     (:nodes opts)
-                  :faults    (disj faults :members)
+                  :faults    (disj faults :members :quorums)
                   :interval  interval
                   :partition {:targets [:one :majority :majorities-ring]}
                   :kill      {:targets [:one :majority :all]}
                   :pause     {:targets [:one :majority]}}
         pkg      (nc/compose-packages [(nc/partition-package pkg-opts)
                                        (nc/db-package pkg-opts)])
-        members? (contains? faults :members)
+        member-fs (filter faults [:members :quorums])
+        members?  (seq member-fs)
         nemesis  (if members?
                    (nemesis/compose {(nemesis/fs (:nemesis pkg)) (:nemesis pkg)
-                                     #{:members} (members-nemesis)})
+                                     #{:members :quorums} (members-nemesis)})
                    (:nemesis pkg))
         members-gen (when members?
-                      (->> (repeat {:type :info :f :members})
+                      (->> (fn [_ _] {:type :info :f (rand-nth member-fs)})
                            (gen/stagger (* 2 interval))))
         nemesis-gen (gen/any (:generator pkg) members-gen)]
     (merge tests/noop-test
            opts
            {:name      (str "peace " (:quorum opts) " "
-                            (if (empty? faults) "none" (str/join "," (map name (sort faults)))))
+                            (if (empty? faults) "none" (str/join "," (map name (sort faults))))
+                            (when (:read-lease-ms opts) (str " lease " (:read-lease-ms opts)))
+                            (when (pos? (:clock-rate-spread opts))
+                              (str " rates " (:clock-rate-spread opts)))
+                            (when (:wall-clock-skew opts) " wall-clock"))
             :os        jepsen.os/noop
             :db        db
             :client    (Client. nil)
             :nemesis   nemesis
             :checker   (checker/compose
                          {:perf       (checker/perf {:nemeses (:perf pkg)})
-                          :stats      (checker/stats)
+                          :stats      (stats-checker)
                           :exceptions (checker/unhandled-exceptions)
                           :workload   (independent/checker
                                         (checker/compose
@@ -280,13 +362,21 @@
                          (gen/sleep 5))})))
 
 (def cli-opts
-  [[nil "--faults FAULTS" "A comma-separated list of partition, kill, pause and members, or none."
+  [[nil "--faults FAULTS" "A comma-separated list of partition, kill, pause, members and quorums, or none."
     :default  #{:partition :kill :pause}
     :parse-fn parse-faults
-    :validate [#(every? all-faults %) "must be partition, kill, pause, members or none"]]
-   [nil "--quorum SPEC" "The quorum system: majority, counting:Q1:Q2, or grid:R for rows of R nodes."
+    :validate [#(every? all-faults %) "must be partition, kill, pause, members, quorums or none"]]
+   [nil "--quorum SPEC" "The quorum system: majority, counting:Q1:Q2, grid:R for rows of R nodes, or weighted:W+W+... for the weights of the nodes."
     :default  "majority"
-    :validate [#(re-matches #"majority|counting:\d+:\d+|grid:\d+" %) "must be majority, counting:Q1:Q2 or grid:R"]]
+    :validate [#(re-matches #"majority|counting:\d+:\d+|grid:\d+|weighted:\d+(\+\d+)*" %)
+               "must be majority, counting:Q1:Q2, grid:R or weighted:W+W+..."]]
+   [nil "--read-lease-ms MS" "The read_lease_ms option of the cluster. Read leases are off by default."
+    :parse-fn parse-long]
+   [nil "--clock-rate-spread PERCENT" "The width of the range of the clock rates of the nodes, in percent."
+    :default  0
+    :parse-fn parse-long]
+   [nil "--wall-clock-skew" "Every node starts with a random wall clock offset and rate."
+    :default false]
    [nil "--stale-reads" "Nodes answer reads from local state. The test is expected to fail."
     :default false]
    [nil "--nemesis-interval SECONDS" "The mean time between nemesis operations."

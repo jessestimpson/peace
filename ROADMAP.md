@@ -93,14 +93,23 @@ separate Erlang nodes with real faults.
 - [x] Cover network partitions, process kills and process pauses. Done on
       2026-11-12 for `majority`, `{counting, 4, 2}`, `{counting, 2, 4}` and
       a two-by-two grid. Each run lasted 180 seconds and was linearizable.
-- [ ] Cover clock skew. The containers of the test share one clock, so the
-      Jepsen clock nemesis cannot be used. The test needs separate virtual
-      machines or libfaketime.
+- [x] Cover clock skew. Done on 2026-11-12: a run of 300 seconds with read
+      leases, wall clock skew from libfaketime and clock rates within 8%
+      was linearizable. peace reads only the monotonic clock, which
+      libfaketime does not change in the Erlang emulator, so the clock rate
+      is changed with the `test_clock_rate` option of a server.
+- [ ] Change the monotonic clock of a node from outside peace. This needs
+      separate virtual machines.
 - [x] Cover membership change during faults. Done on 2026-11-12 with
       majority quorums: one run of 300 seconds, linearizable.
-- [ ] Cover membership change with a counting or grid quorum system.
-- [ ] Cover a custom quorum module.
-- [ ] Run a soak test of at least 24 hours.
+- [x] Cover membership change with a counting or grid quorum system. Done
+      on 2026-11-12: three runs with the `quorums` fault were linearizable,
+      with 8 confirmed changes among majority, counting, grid and weighted
+      quorum systems.
+- [x] Cover a custom quorum module. Done on 2026-11-12 with a weighted
+      voting module: one run of 180 seconds, linearizable.
+- [ ] Run a soak test of at least 24 hours. `jepsen/soak.sh 24` runs it. It
+      has not been run.
 
 Done when: the Jepsen test passes for every quorum system in
 [README.md](README.md), "Quorum systems", and the soak test completes

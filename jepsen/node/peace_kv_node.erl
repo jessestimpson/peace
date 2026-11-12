@@ -31,7 +31,16 @@
 %% <li>`grid:Row/Row/...', for `{grid, Rows}'. A row is a list of node names
 %%   that are separated by `+'. Example:
 %%   `grid:peace@n1+peace@n2/peace@n3+peace@n4'.</li>
+%% <li>`weighted:Node=Weight+Node=Weight+...', for
+%%   `{module, peace_kv_quorum, Weights}'. A node that is not listed has the
+%%   weight 1. Example: `weighted:peace@n1=2+peace@n2=1'.</li>
 %% </ul>
+%%
+%% The optional argument `-peace_kv_node clock_rate N/D' makes the clock of
+%% the peace server run at `N/D' times the rate of the monotonic clock of
+%% the node. It sets the `test_clock_rate' option, which exists only in a
+%% build with the `TEST' macro. The Jepsen test uses this argument to test
+%% the assumption of read leases about clock rates.
 %%
 %% The optional argument `-peace_kv_node reads stale' makes the node answer a
 %% read from the state of its own server, with `peace:local_query/3'. The
@@ -48,6 +57,7 @@ start() ->
     {ok, _} = application:ensure_all_started(peace),
     Members = members(arg(members)),
     Lease = [{read_lease_ms, list_to_integer(L)} || L <- args(read_lease_ms)],
+    Rate = [{test_clock_rate, clock_rate(R)} || R <- args(clock_rate)],
     Config = maps:merge(
         #{
             id => server(),
@@ -55,7 +65,7 @@ start() ->
             machine => peace_kv:machine(),
             quorum => quorum(arg(quorum, "majority"))
         },
-        maps:from_list(Lease)
+        maps:from_list(Lease ++ Rate)
     ),
     ok = peace:start_server(Config),
     {ok, _} = peace_kv_http:start(list_to_integer(arg(port, "8080"))),
@@ -83,7 +93,21 @@ quorum("counting:" ++ Sizes) ->
     [Q1, Q2] = string:lexemes(Sizes, ":"),
     {counting, list_to_integer(Q1), list_to_integer(Q2)};
 quorum("grid:" ++ Rows) ->
-    {grid, [members(lists:join(",", string:lexemes(Row, "+"))) || Row <- string:lexemes(Rows, "/")]}.
+    {grid, [members(lists:join(",", string:lexemes(Row, "+"))) || Row <- string:lexemes(Rows, "/")]};
+quorum("weighted:" ++ Weights) ->
+    {module, peace_kv_quorum,
+        maps:from_list([
+            begin
+                [Node, Weight] = string:lexemes(Pair, "="),
+                {{?NAME, list_to_atom(Node)}, list_to_integer(Weight)}
+            end
+         || Pair <- string:lexemes(Weights, "+")
+        ])}.
+
+%% Converts `N/D' to a clock rate.
+clock_rate(Rate) ->
+    [Num, Den] = string:lexemes(Rate, "/"),
+    {list_to_integer(Num), list_to_integer(Den)}.
 
 arg(Key) ->
     case args(Key) of
