@@ -22,7 +22,7 @@ Section numbers refer to Heidi Howard's thesis,
 | `./check_all.sh soak` | The three-index membership config | about 8 hours |
 | `./check.sh <Config> pass` | One config that must hold | |
 | `./check.sh <Config> fail` | One config that must violate an invariant | |
-| `./check_ind.sh all` | The inductive invariant | about 10 minutes |
+| `./check_ind.sh all` | The inductive invariant | about 3 minutes |
 | `./check_trace.sh <dir>` | One trace written by the simulation | about 1 second |
 
 Requirements:
@@ -45,12 +45,19 @@ changed.
 - Each row holds the config name, the expected outcome, a hash of the
   inputs, the date, the number of distinct states, and the duration.
 - The inputs are the config file, the two modules it uses, `check.sh`, and
-  the name of the TLC jar.
+  the name of the TLC jar. Comments and blank lines in the config and the
+  modules are removed before hashing, so a change to a comment does not
+  cause a run.
 - `FORCE=1 ./check_all.sh <set>` runs every config in the set.
 - The full TLC output of each run is kept in `logs/<Config>.log`. The `logs`
   directory is not committed.
 - `checked.tsv` is committed. It is a record of past runs, not a proof. Use
   `FORCE=1` to reproduce a result.
+
+`check_ind.sh` does the same with [`checked_ind.tsv`](checked_ind.tsv). Its
+inputs are `FlexiblePaxosInd.tla`, `MCFlexiblePaxosInd.tla` and the script.
+Comments are not removed from these modules, because Apalache reads its
+type annotations from comments.
 
 ## The protocol model
 
@@ -243,7 +250,7 @@ message has its own variable.
 TLC checks that the restatement is the same protocol.
 `FPaxosIndRefines.tla` rebuilds `msgs` from the new variables, and TLC
 checks that every behaviour of `FlexiblePaxosInd.tla` is a behaviour of
-`FlexiblePaxos.tla` (2.1 million states, about 5 minutes).
+`FlexiblePaxos.tla` (2.1 million states, 85 seconds).
 
 ### The invariant
 
@@ -267,16 +274,17 @@ checks that every behaviour of `FlexiblePaxosInd.tla` is a behaviour of
 
 | Constants | Acceptors, quorums | Epochs × indexes | `step` time | TLC on the same bounds |
 |---|---|---|---|---|
-| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 seconds | `FPaxosMajorityTwoIndexes`: 59 minutes |
-| `C3E3I1` | 3, 2 / 2 | 3 × 1 | 19 seconds | `FPaxosThreeEpochs`: 2 minutes |
-| `C5E2I1` | 5, 4 / 2 | 2 × 1 | 26 seconds | not run |
-| `C3E3I3` | 3, 2 / 2 | 3 × 3 | 2 minutes | too large to finish |
+| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 8 seconds | `FPaxosMajorityTwoIndexes`: 59 minutes |
+| `C3E3I1` | 3, 2 / 2 | 3 × 1 | 6 seconds | `FPaxosThreeEpochs`: 2 minutes |
+| `C5E2I1` | 5, 4 / 2 | 2 × 1 | 7 seconds | not run |
+| `C3E3I3` | 3, 2 / 2 | 3 × 3 | 28 seconds | too large to finish |
 | `NoGuard3` | 3, 2 / 2, without the new `Propose` conjunct | 2 × 1 | fails on `CommitsSound`, as required | holds |
 | `Unsafe3` | 3, 2 / 1 | 2 × 1 | `safe` fails, as required | `FPaxosUnsafeQuorums` fails |
 | `C5E3I3` | 5, 4 / 2 | 3 × 3 | 8 minutes | too large to finish |
 | `C3E4I4` | 3, 2 / 2 | 4 × 4 | 8 minutes | too large to finish |
 
-The times were measured while TLC was also running on the same machine.
+The times for `C5E3I3` and `C3E4I4` were measured while TLC was also running
+on the same machine. The other times are from an idle machine.
 
 `NoGuard3` shows a difference between the two methods. With three acceptors,
 no behaviour reaches the error described above, so TLC reports no violation.

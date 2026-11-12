@@ -12,13 +12,51 @@
 # FlexiblePaxos.tla (FPaxosIndRefines.tla).
 # Apalache: $APALACHE, else apalache-mc on the path, else the copy unpacked
 # under _build/apalache-dl by hand (it is not vendored: 190 MB).
+#
+# A check whose inputs have not changed since it last gave the expected
+# result is skipped, as in check_all.sh. The results are in checked_ind.tsv.
+# The inputs are the modules and this script (and the TLC jar, for `refines`). Comments
+# are not stripped, because Apalache reads its type annotations from them.
+# FORCE=1 runs every check.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+LEDGER="checked_ind.tsv"
+TAB="$(printf '\t')"
+
+inputs_hash() { # tool, files...
+  local tool="$1"
+  shift
+  { cat "$@" check_ind.sh; echo "$tool"; } | shasum -a 256 | cut -c1-16
+}
+
+# Succeeds, and says so, if the ledger has this key with this hash.
+recorded() { # key hash
+  local line
+  [ -z "${FORCE:-}" ] && [ -f "$LEDGER" ] || return 1
+  line="$(grep "^$1$TAB$2$TAB" "$LEDGER" || true)"
+  [ -n "$line" ] || return 1
+  echo "$1: unchanged since $(echo "$line" | cut -f3), $(echo "$line" | cut -f4)"
+}
+
+record() { # key hash result
+  local tmp
+  tmp="$(mktemp)"
+  if [ -f "$LEDGER" ]; then grep -v "^$1$TAB" "$LEDGER" >"$tmp" || true; fi
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date +%Y-%m-%d)" "$3" >>"$tmp"
+  LC_ALL=C sort "$tmp" >|"$LEDGER"
+  rm -f "$tmp"
+}
+
+IND_FILES="FlexiblePaxosInd.tla MCFlexiblePaxosInd.tla"
 if [ "${1:-}" = all ]; then
   for C in C3E2I2 C3E3I1 C5E2I1 C3E3I3; do "$0" "$C"; done
   # Each must fail, and at the named implication.
   for PAIR in NoGuard3:step Unsafe3:safe; do
-    if "$0" "${PAIR%%:*}" "${PAIR##*:}" >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    HASH="$(inputs_hash apalache $IND_FILES)"
+    if recorded "$PAIR:fails" "$HASH"; then continue; fi
+    if FORCE=1 "$0" "${PAIR%%:*}" "${PAIR##*:}" >/dev/null 2>&1; then
       echo "ERROR: ${PAIR%%:*} ${PAIR##*:} held, and was meant to fail"
       exit 1
     fi
@@ -26,6 +64,7 @@ if [ "${1:-}" = all ]; then
       echo "ERROR: ${PAIR%%:*} ${PAIR##*:} failed without a violation; see its log"
       exit 1
     }
+    record "$PAIR:fails" "$HASH" "fails, as it should"
     echo "${PAIR%%:*} ${PAIR##*:}: fails, as it should"
   done
   "$0" refines
@@ -35,13 +74,17 @@ fi
 # TLC: FlexiblePaxosInd is FlexiblePaxos, and IndInv holds wherever it goes.
 if [ "${1:-}" = refines ]; then
   if [ -n "${TLA2TOOLS_JAR:-}" ]; then JAR="$TLA2TOOLS_JAR"; elif [ -f tla2tools.jar ]; then JAR="tla2tools.jar"; else JAR="vendor/tla2tools-v1.8.0.jar"; fi
+  HASH="$(inputs_hash "$JAR" FlexiblePaxosInd.tla FlexiblePaxos.tla FPaxosIndRefines.tla FPaxosIndRefines.cfg)"
+  if recorded refines "$HASH"; then exit 0; fi
   META="$(mktemp -d)"
   trap 'rm -rf "$META"' EXIT
   mkdir -p logs
   START=$SECONDS
   if java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -deadlock -noGenerateSpecTE -metadir "$META" \
     -config FPaxosIndRefines.cfg FPaxosIndRefines.tla >|logs/ind-refines.log 2>&1; then
-    echo "refines FlexiblePaxos: holds, $(grep -Eo "[0-9]+ distinct states" logs/ind-refines.log | tail -1) ($((SECONDS - START))s)"
+    RESULT="holds, $(grep -Eo "[0-9]+ distinct states" logs/ind-refines.log | tail -1), $((SECONDS - START))s"
+    record refines "$HASH" "$RESULT"
+    echo "refines FlexiblePaxos: $RESULT"
     exit 0
   fi
   echo "refines FlexiblePaxos: FAILED; see formal/logs/ind-refines.log"
@@ -66,11 +109,15 @@ for PART in "$@"; do
     safe) ARGS="--init=IndInv --inv=Safety --length=0" ;;
     *) echo "unknown part: $PART"; exit 2 ;;
   esac
+  # shellcheck disable=SC2086
+  HASH="$(inputs_hash apalache $IND_FILES)"
+  if recorded "$CINIT:$PART" "$HASH"; then continue; fi
   LOG="logs/ind-$CINIT-$PART.log"
   START=$SECONDS
   # shellcheck disable=SC2086
   if "$AP" check --out-dir=../_build/apalache-out --cinit="$CINIT" $ARGS MCFlexiblePaxosInd.tla >|"$LOG" 2>&1 \
     && grep -q "EXITCODE: OK" "$LOG"; then
+    record "$CINIT:$PART" "$HASH" "holds, $((SECONDS - START))s"
     echo "$CINIT $PART: holds ($((SECONDS - START))s)"
   else
     echo "$CINIT $PART: FAILED ($((SECONDS - START))s); see formal/$LOG"

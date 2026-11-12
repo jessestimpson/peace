@@ -7,9 +7,9 @@
 #
 # A config whose inputs have not changed since it last behaved as expected is
 # not run again: TLC's answer depends on the model and the config and nothing
-# else. The inputs are the config, the two modules it instantiates, check.sh
-# and the name of the jar; checked.tsv records a hash of them beside each
-# result. FORCE=1 runs everything regardless. Each run's output is left in
+# else. The inputs are the config and the two modules it instantiates, without
+# their comments, check.sh and the name of the jar; checked.tsv records a
+# hash of them beside each result. FORCE=1 runs everything regardless. Each run's output is left in
 # logs/<Config>.log.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -45,7 +45,18 @@ inputs_hash() { # config
     *) modules="MCFlexiblePaxos.tla FlexiblePaxos.tla" ;;
   esac
   # shellcheck disable=SC2086
-  { cat "$1.cfg" $modules check.sh; jar_name; } | shasum -a 256 | cut -c1-16
+  { uncommented "$1.cfg" $modules; cat check.sh; jar_name; } | shasum -a 256 | cut -c1-16
+}
+
+# TLA+ and config files without their comments and blank lines, so that a
+# change to a comment does not cost a run. Block comments nest.
+uncommented() { # files
+  perl -0pe '
+    1 while s/\(\*(?:(?!\(\*|\*\)).)*\*\)//s;
+    s/\\\*[^\n]*//g;
+    s/[ \t]+$//mg;
+    s/\n{2,}/\n/g;
+  ' "$@"
 }
 
 run() { # config expectation

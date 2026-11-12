@@ -229,7 +229,7 @@ Both models include:
 [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) states an
 inductive invariant for the protocol model.
 [Apalache](https://apalache-mc.org) checks it symbolically. The check takes
-25 seconds for a configuration that takes TLC 59 minutes, and it completes
+8 seconds for a configuration that takes TLC 59 minutes, and it completes
 for configurations TLC cannot finish, such as five acceptors with three
 epochs and three indexes. The constants are fixed for each check, so this is
 not a proof for all cluster sizes.
@@ -341,7 +341,7 @@ make test       # unit tests
 make dst        # deterministic simulation, about 8 minutes
 make trace      # trace validation, about 4 minutes
 make tlc        # quick TLC configs, a few minutes
-make ind        # inductive invariant with Apalache, about 10 minutes
+make ind        # inductive invariant with Apalache, about 3 minutes
 make tlc-long   # TLC configs with tens of millions of states, about 2 hours
 make tlc-soak   # the three-index membership config, about 8 hours
 ```

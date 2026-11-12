@@ -67,6 +67,16 @@
 %% servers in three a clock P per cent fast, which matters only to read
 %% leases; far enough beyond the tenth a lease allows for, a read is stale.
 %%
+%% == Trace validation ==
+%%
+%% `trace => Table' records every step of every server's core in the ETS
+%% table `Table'. The caller creates the table and owns it, so the table
+%% still exists after the run. Each server is given a `test_tracer' function
+%% that appends one row per step: the step number, the server id, the event,
+%% the durable state before and after, and the messages sent.
+%% `peace_dst_trace' converts the rows into actions of
+%% `formal/FlexiblePaxos.tla', and `peace_dst_trace_tests' runs TLC on them.
+%%
 %% == Planted bugs ==
 %%
 %% `mode' selects one, so that the suite can show each check is able to fail:
