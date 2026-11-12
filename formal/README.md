@@ -1,319 +1,432 @@
-# peace formal model
+# peace formal models
 
-A TLA+ model of the protocol in [`src/peace_core.erl`](../src/peace_core.erl),
-checked with TLC. TLC explores every interleaving of a small bounded cluster;
-tests can only sample them. The [simulation harness](../dst/peace_dst.erl)
-covers the other side: that the code implements this protocol.
+This directory contains the TLA+ models of peace and the scripts that check
+them.
+
+| Model | Subject | Checked with |
+|---|---|---|
+| `FlexiblePaxos.tla` | The protocol in [`src/peace_core.erl`](../src/peace_core.erl) | TLC |
+| `FlexiblePaxosInd.tla` | The same protocol, with an inductive invariant | Apalache, and TLC for refinement |
+| `Reconfig.tla` | Membership change | TLC |
+| `TraceFlexiblePaxos.tla` | One run of the code, checked against `FlexiblePaxos.tla` | TLC |
 
 Section numbers refer to Heidi Howard's thesis,
 [`docs/UCAM-CL-TR-935.pdf`](../docs/UCAM-CL-TR-935.pdf).
 
-## What it models
+## Commands
 
-Two modules. `FlexiblePaxos.tla` is the protocol, with the quorum systems left
-as constants. `MCFlexiblePaxos.tla` defines the quorum systems `peace_quorum`
-implements, for a config to substitute.
+| Command | What it runs | Time |
+|---|---|---|
+| `./check_all.sh quick` | Small configs, mutations and reachability checks | a few minutes |
+| `./check_all.sh long` | Configs with millions of states | about 3 hours |
+| `./check_all.sh soak` | The three-index membership config | about 8 hours |
+| `./check.sh <Config> pass` | One config that must hold | |
+| `./check.sh <Config> fail` | One config that must violate an invariant | |
+| `./check_ind.sh all` | The inductive invariant | about 10 minutes |
+| `./check_trace.sh <dir>` | One trace written by the simulation | about 1 second |
 
-- **Flexible quorums** (revision A, §4.1). `Quorum1` for promises, `Quorum2`
-  for acceptances. Their intersection is *not* assumed: it is a property of
-  the constants, so a config can break it.
-- **Multi-Paxos** (§3.6). One phase one covers the whole sequence; a
-  promise carries every proposal the acceptor has accepted. Phase two is per
+Requirements:
+
+- Java 11 or later.
+- TLC. The scripts use `$TLA2TOOLS_JAR` if it is set, then `tla2tools.jar`
+  in this directory, then `vendor/tla2tools-v1.8.0.jar`.
+- Apalache, for `check_ind.sh` only. It is not included in the repository
+  because the release is 190 MB. The script uses `$APALACHE` if it is set,
+  then `apalache-mc` on the path, then a release unpacked under
+  `_build/apalache-dl`. The checks were run with Apalache 0.63.0.
+
+### Skipping unchanged configs
+
+A TLC result depends only on the model and the config. It does not depend on
+anything in `src/`. `check_all.sh` therefore records each result in
+[`checked.tsv`](checked.tsv) and skips a config whose inputs have not
+changed.
+
+- Each row holds the config name, the expected outcome, a hash of the
+  inputs, the date, the number of distinct states, and the duration.
+- The inputs are the config file, the two modules it uses, `check.sh`, and
+  the name of the TLC jar.
+- `FORCE=1 ./check_all.sh <set>` runs every config in the set.
+- The full TLC output of each run is kept in `logs/<Config>.log`. The `logs`
+  directory is not committed.
+- `checked.tsv` is committed. It is a record of past runs, not a proof. Use
+  `FORCE=1` to reproduce a result.
+
+## The protocol model
+
+`FlexiblePaxos.tla` is the protocol. The quorum systems are constants.
+`MCFlexiblePaxos.tla` defines the quorum systems that `peace_quorum`
+implements, so that a config can select one.
+
+### What it models
+
+- **Flexible quorums** (revision A, §4.1). `Quorum1` is the set of phase-one
+  quorums and `Quorum2` is the set of phase-two quorums. The model does not
+  assume that they intersect. Intersection is a property of the constants,
+  so a config can violate it.
+- **Multi-Paxos** (§3.6). One phase one covers the whole sequence. A promise
+  carries every proposal the acceptor has accepted. Phase two runs per
   index.
-- **Learning** (§3.3). An index an acceptor knows is decided is held under a
-  marker epoch above every real one. Three routes, as in the code: the
-  leader counts a phase-two quorum (`LeaderLearn`); a follower trusts its
-  leader's commit index for entries from that leader's epoch (`SendCommit`,
-  `FollowerCommit`); anybody copies a decided index from somebody who has it
-  (`CatchUp`).
-- **The stale-leader hazard.** A deposed leader that has not heard it was
-  deposed can catch up an index that a later epoch decided differently from
-  its own proposal. If it went on advertising a commit index over that index,
-  a follower holding the old proposal would take it as decided.
-  `ConflictStepDown` is the guard; peace steps down at that moment.
-  The same leader may also learn an index it has proposed nothing in. It
-  must not then propose there: it could advertise a commit index over the
-  index first and put its own value under it afterwards. The model's
-  `Propose` refuses an index its leader already holds decided, under the
-  same switch. Until 2026-11-11 it did not, and see "A hole in the model"
-  below.
-- **Snapshots.** An acceptor may drop a decided index, after which its
-  promise says only that the index is dropped, not what it held. A proposer
-  that read that as "free" could get a second value decided, so it does not
-  propose in an index any promise reported dropped (`SnapshotGuard`); peace
-  abandons the campaign and catches up. Off (`Snapshots = FALSE`) in the
-  configs that are about something else, so their state spaces are as they
-  were.
-- **Faults.** Message loss, duplication and reordering: `msgs` only grows and
-  nothing has to be received.
+- **Learning** (§3.3). An acceptor that knows an index is decided stores the
+  value under a marker epoch, `Learned`, which is higher than every real
+  epoch. An acceptor learns in three ways, as in the code:
+  - The leader counts acceptances from a phase-two quorum (`LeaderLearn`).
+  - A follower receives its leader's commit index and marks its entries from
+    that leader's epoch as decided (`SendCommit`, `FollowerCommit`).
+  - An acceptor copies a decided index from an acceptor that has it
+    (`CatchUp`).
+- **Stale leaders.** A leader can be deposed without receiving any message
+  that tells it so. The model has two rules for this case, both controlled
+  by the constant `ConflictStepDown`:
+  - If the leader learns that an index was decided with a value different
+    from its own proposal, it stops sending commit indexes. Otherwise a
+    follower that holds the leader's proposal would treat it as decided.
+  - The leader does not propose at an index it already holds as decided.
+    Otherwise it could send a commit index that covers the index and then
+    propose a different value there.
 
-**Deliberately out of scope**: crash and restart (`promised` and `accepted`
-are durable in peace, so a restarted acceptor is a slow one; the simulation
-checks the code really does persist before it replies); election timing,
-heartbeats, pre-vote and a leader stepping down for want of a quorum, all of
-which only restrict when an epoch starts or stops and the model lets that
-happen at any time; read leases, which rest on clocks the model does not
-have; client replies, sessions and the state machine; membership change; and
-the thesis beyond revision A.
+  In the code, the leader steps down in both cases.
+- **Snapshots.** An acceptor can drop an index it knows is decided. Its
+  later promises report that the index is dropped and do not report the
+  value. A proposer does not propose at an index that any promise reported
+  as dropped (`SnapshotGuard`). In the code, the candidate abandons its
+  campaign and catches up. Snapshots are disabled (`Snapshots = FALSE`) in
+  configs that test other things, to keep their state spaces small.
+- **Message faults.** Messages can be lost, duplicated and reordered. The
+  set `msgs` only grows, and no action is required to receive a message.
 
-## Checked properties
+### What it does not model
+
+| Not modelled | Reason |
+|---|---|
+| Crash and restart | `promised` and `accepted` are durable in peace, so a restarted acceptor behaves like a slow one. The simulation checks that the code persists state before it replies. |
+| Election timing, heartbeats, pre-vote, quorum-loss step-down | These only restrict when an epoch starts or stops. The model allows an epoch to start at any time. |
+| Read leases | They depend on clocks, and the model has no clocks. |
+| Client replies, sessions, the state machine | Outside the consensus protocol. |
+| Membership change | Modelled separately in `Reconfig.tla`. |
+| Revisions B and C, and chapters 6 and 7 of the thesis | Not implemented in peace. |
+
+### Properties
 
 | Invariant | Meaning |
 |---|---|
-| `TypeOK` | state stays within declared shapes |
-| `Agreement` | at most one value is ever decided per index |
-| `LearnedSound` | the thesis's safe learning: what an acceptor has learned is the decided value |
-| `LearnedAgree` | decided entries agree across acceptors; what the simulation checks on the code |
-| `OneValuePerEpoch` | an epoch proposes one value per index |
-| `QuorumIntersection` | every phase-one quorum meets every phase-two quorum (equation 4.4) |
+| `TypeOK` | Every variable has a value of the declared shape. |
+| `Agreement` | At most one value is decided per index. |
+| `LearnedSound` | A value that an acceptor has learned is the decided value. This is safe learning as defined in the thesis. |
+| `LearnedAgree` | Learned entries are equal across acceptors. The simulation checks the same property on the code. |
+| `OneValuePerEpoch` | An epoch proposes at most one value per index. |
+| `QuorumIntersection` | Every phase-one quorum intersects every phase-two quorum (equation 4.4). |
 
-## Configs
+### Configs
 
-`./check_all.sh quick` runs the first three groups; `./check_all.sh long` the
-last, and the membership model below. `./check.sh <Config> pass|fail` runs one. States are distinct states.
+State counts are distinct states.
 
-**A config is run again only when its inputs change.** TLC's answer depends
-on the model and the config and on nothing in `src/`, so `check_all.sh`
-keeps a ledger, [`checked.tsv`](checked.tsv): for each config, a hash of the
-config, the two modules it instantiates, `check.sh` and the jar's name, with
-the date and size of the run that last behaved as expected. A config whose
-hash is in the ledger is reported and skipped. `FORCE=1` runs it anyway.
-TLC's whole output from each run is left in `logs/<Config>.log`. The
-ledger is committed, so a clone knows what was checked without spending the
-hours again; it is a record, not a proof, and anyone who doubts it can force
-the run. The rows for the four long `FPaxos` configs were written from the
-run of 2026-11-10 described below, the files being unchanged since.
+**Configs that must hold, quick set:**
 
-**Hold** (quick):
-
-| Config | Acceptors | Quorums | Epochs × indexes | States |
+| Config | Acceptors | Quorums (phase one / phase two) | Epochs × indexes | States |
 |---|---|---|---|---|
-| `FPaxosMajority` | 3 | 2 / 2 | 2 × 1 | small |
-| `FPaxosSingleton` | 3 | 3 / 1, Singleton Paxos (§4.3.2) | 2 × 1 | 6 thousand |
-| `FPaxosAllAboard` | 3 | 1 / 3, All aboard Paxos (§4.3.2) | 2 × 1 | 32 thousand |
-| `FPaxosEvenNodes` | 4 | 3 / 2, even nodes (§4.3.3) | 2 × 1 | 366 thousand |
-| `FPaxosSnapshots` | 3 | 2 / 2, with snapshots | 2 × 1 | 254 thousand |
+| `FPaxosMajority` | 3 | 2 / 2 | 2 × 1 | 29 thousand |
+| `FPaxosSingleton` | 3 | 3 / 1, Singleton Paxos (§4.3.2) | 2 × 1 | 5 thousand |
+| `FPaxosAllAboard` | 3 | 1 / 3, All aboard Paxos (§4.3.2) | 2 × 1 | 30 thousand |
+| `FPaxosEvenNodes` | 4 | 3 / 2, even nodes (§4.3.3) | 2 × 1 | 259 thousand |
+| `FPaxosSnapshots` | 3 | 2 / 2, with snapshots | 2 × 1 | 180 thousand |
 
-**Mutations** (quick): each must fail, and `check.sh ... fail` demands a real
-invariant violation, not a parse error.
+**Mutations, quick set.** Each mutation removes one safeguard and must
+violate an invariant. `check.sh <Config> fail` requires an invariant
+violation. A parse error or a crash does not count.
 
 | Config | Change | Violates |
 |---|---|---|
-| `FPaxosUnsafeQuorums` | quorums 2 / 1 over 3: they need not intersect | `Agreement` |
-| `FPaxosNoFence` | an acceptor accepts below its promise | `Agreement` |
-| `FPaxosNoConflictStepDown` | a contradicted leader keeps sending commits (5 acceptors) | `LearnedSound` |
-| `FPaxosNoSnapshotGuard` | a proposer proposes in an index a promise reported dropped | `Agreement` |
+| `FPaxosUnsafeQuorums` | Quorums 2 / 1 over 3 acceptors, which do not always intersect | `Agreement` |
+| `FPaxosNoFence` | An acceptor accepts a proposal below its promise | `Agreement` |
+| `FPaxosNoConflictStepDown` | Both stale-leader rules are off (5 acceptors) | `LearnedSound` |
+| `FPaxosNoSnapshotGuard` | A proposer proposes at an index that a promise reported as dropped | `Agreement` |
 
-**Reachability** (quick): each invariant denies a state the model has to be
-able to reach for the properties above to mean anything, so each must fail.
+**Reachability checks, quick set.** Each config states an invariant that
+says a certain state is never reached. TLC must violate it, which shows the
+model can reach that state. Without these checks, the properties above could
+hold only because the model does very little.
 
-| Config | Shows reachable |
+| Config | State that must be reachable |
 |---|---|
-| `FPaxosReachableDecided` | a value is decided |
-| `FPaxosReachableAllLearned` | every acceptor learns every index |
-| `FPaxosReachableRecovery` | a later epoch re-proposes a decided value |
-| `FPaxosReachableConflict` | a leader finds itself contradicted, so the guard guards something |
-| `FPaxosReachableSnapshot` | an acceptor promises after dropping an index, so that guard does too |
+| `FPaxosReachableDecided` | A value is decided |
+| `FPaxosReachableAllLearned` | Every acceptor has learned every index |
+| `FPaxosReachableRecovery` | A later epoch proposes a value that an earlier epoch decided |
+| `FPaxosReachableConflict` | A leader learns a value different from its own proposal |
+| `FPaxosReachableSnapshot` | An acceptor makes a promise after dropping an index |
 
-**Hold** (long):
+**Configs that must hold, long set:**
 
-| Config | Acceptors | Quorums | Epochs × indexes | States |
+| Config | Acceptors | Quorums | Epochs × indexes | States | Time |
+|---|---|---|---|---|---|
+| `FPaxosThreeEpochs` | 3 | 2 / 2 | 3 × 1 | 7.0 million | 2 minutes |
+| `FPaxosGrid` | 4 | 2 × 2 grid (§4.1.3) | 2 × 1 | 13.0 million | 4 minutes |
+| `FPaxosFiveAcceptors` | 5 | 3 / 3 | 2 × 1 | 6.4 million | 27 minutes |
+| `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 8.2 million | 6 minutes |
+| `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | run in progress | |
+
+These results are from 2026-11-11, after the model correction described in
+the next section. The correction removes behaviours, so the counts are lower
+than before it. For these runs TLC estimates the probability that a
+fingerprint collision hid a state at less than 0.00001.
+
+`FPaxosMajorityTwoIndexes` has not finished on the corrected model. Before
+the correction it had 116.9 million states and took 80 minutes.
+
+### Model correction of 2026-11-11
+
+Until 2026-11-11 the model had the first stale-leader rule and not the
+second. With every safeguard enabled, it violated `LearnedSound`.
+
+The violation needs five acceptors. TLC finds it in 19 states:
+
+1. Epoch 1 collects promises from a phase-one quorum.
+2. Epoch 2 decides a value at index 1. The leader of epoch 1 receives none
+   of these messages.
+3. The leader of epoch 1 learns index 1 through `CatchUp`.
+4. It sends a commit index that covers index 1. It has proposed nothing at
+   index 1, so the first rule does not apply.
+5. It proposes a different value at index 1. Phase one permits this because
+   its promises reported index 1 as empty.
+6. A fifth acceptor accepts that proposal, receives the commit index, and
+   marks the proposal as decided. It now holds a value that was not decided.
+
+Why the checks did not find it earlier:
+
+- Every config that was required to hold had three or four acceptors. With
+  fewer than five, no acceptor can be in the position of the fifth one.
+- Five acceptors had been run only with `ConflictStepDown` off.
+
+The code did not have this error. The simulation's churn workload had found
+the same sequence in the code earlier. `peace_core` was changed at that time
+to step down when it learns an index it has not proposed at, and
+`deposed_leader_steps_down_on_unproposed_index_test` tests it. The rule was
+not added to the model then.
+
+Trace validation could not have found the error. It checks that the code
+does only what the model permits, and here the model permitted too much.
+
+The error was found while writing the inductive invariant. The clause about
+commit messages, `CommitsSound`, was not inductive without the second rule.
+
+Changes made:
+
+- `Propose` has a new conjunct: the leader does not hold the index as
+  decided.
+- `FPaxosFiveAcceptors` was added to the long set. It fails without the
+  conjunct and holds with it.
+
+## The inductive invariant
+
+TLC visits every reachable state. Its running time grows quickly with the
+number of epochs and indexes. An inductive invariant avoids this. It is
+checked with three implications, each over a single state or a single step:
+
+| Check | Implication |
+|---|---|
+| `init` | `Init => IndInv` |
+| `step` | `IndInv /\ Next => IndInv'` |
+| `safe` | `IndInv => Agreement /\ LearnedSound /\ LearnedAgree` |
+
+If all three hold, the safety properties hold in every reachable state of
+every behaviour, of any length. [Apalache](https://apalache-mc.org) checks
+the implications symbolically.
+
+### The module
+
+`FlexiblePaxosInd.tla` restates the protocol without the `msgs` set.
+Apalache cannot type a set of records with different fields, so each kind of
+message has its own variable.
+
+TLC checks that the restatement is the same protocol.
+`FPaxosIndRefines.tla` rebuilds `msgs` from the new variables, and TLC
+checks that every behaviour of `FlexiblePaxosInd.tla` is a behaviour of
+`FlexiblePaxos.tla` (2.1 million states, about 5 minutes).
+
+### The invariant
+
+`IndInv` is the conjunction of these clauses:
+
+| Clause | Meaning |
+|---|---|
+| `TypeOK` | Every variable has a value of the declared shape. |
+| `PromisesSent` | An acceptor that sent a promise for an epoch has promised at least that epoch. |
+| `AcceptsSent` | An acceptance refers to an existing proposal, and the acceptor's entry is from that epoch or a later one. |
+| `EntriesAccepted` | An undecided entry equals the proposal of its epoch and was acknowledged. |
+| `DroppedLearned` | An acceptor drops only indexes it has learned. |
+| `PromisesHonest` | For an index that a promise did not report as dropped, the promise's report is still accurate for all epochs below the promised one. |
+| `ProposalsSafe` | For every proposal and every earlier epoch, a phase-one quorum exists whose members either accepted the same value in that epoch or can no longer accept in it. This is the standard Paxos safety argument. |
+| `CommitsSound` | If a commit was sent for an index, its leader holds that index as decided, and any proposal the leader made there equals the decided value. |
+| `LearnedSound` | A learned value is the decided value. |
+
+### Results
+
+`./check_ind.sh all` runs the first six rows and the refinement check.
+
+| Constants | Acceptors, quorums | Epochs × indexes | `step` time | TLC on the same bounds |
 |---|---|---|---|---|
-| `FPaxosThreeEpochs` | 3 | 2 / 2 | 3 × 1 | 13.0 million |
-| `FPaxosGrid` | 4 | 2 × 2 grid (§4.1.3) | 2 × 1 | 16.0 million |
-| `FPaxosFiveAcceptors` | 5 | 3 / 3 | 2 × 1 | 6.4 million |
-| `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 21.9 million |
-| `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | 116.9 million |
+| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 seconds | `FPaxosMajorityTwoIndexes`: 80 minutes before the correction |
+| `C3E3I1` | 3, 2 / 2 | 3 × 1 | 19 seconds | `FPaxosThreeEpochs`: 2 minutes |
+| `C5E2I1` | 5, 4 / 2 | 2 × 1 | 26 seconds | not run |
+| `C3E3I3` | 3, 2 / 2 | 3 × 3 | 2 minutes | too large to finish |
+| `NoGuard3` | 3, 2 / 2, without the new `Propose` conjunct | 2 × 1 | fails on `CommitsSound`, as required | holds |
+| `Unsafe3` | 3, 2 / 1 | 2 × 1 | `safe` fails, as required | `FPaxosUnsafeQuorums` fails |
+| `C5E3I3` | 5, 4 / 2 | 3 × 3 | 8 minutes | too large to finish |
+| `C3E4I4` | 3, 2 / 2 | 4 × 4 | 8 minutes | too large to finish |
 
-`FPaxosFiveAcceptors` was run on 2026-11-11 with the fix described below.
-The other four counts are from before that fix and are being run again.
+The times were measured while TLC was also running on the same machine.
 
-Last run in full on 2026-11-10, after the models took the thesis's terms; the
-counts are the same as before the renaming, as they should be. The first
-three took 24 minutes together, `FPaxosThreeEpochs` and `FPaxosGrid` under
-five each. `FPaxosMajorityTwoIndexes` took 1 hour 20 minutes: 1.27 billion
-states generated, depth 35. At that size
-TLC's own estimate of the chance that a fingerprint collision hid a state is
-between 0.002 and 0.007, where for the others it is negligible.
+`NoGuard3` shows a difference between the two methods. With three acceptors,
+no behaviour reaches the error described above, so TLC reports no violation.
+The `step` check still fails, because it starts from every state that
+satisfies `IndInv`, including states that no behaviour reaches. This check
+would have found the missing rule with three acceptors.
 
-## A hole in the model
+### Limitations
 
-Until 2026-11-11 `FlexiblePaxos.tla` had the first half of the stale-leader
-guard and not the second, and with every safeguard on it violated
-`LearnedSound`. Five acceptors are the fewest that can show it, and TLC does
-in nineteen states: epoch 1 collects its promises; epoch 2 decides a value
-at index 1 without it; epoch 1's leader, not knowing it is deposed, learns
-the index by catching up, sends a commit index covering it, and only then
-proposes there, which its phase one allows because its promises saw the
-index empty; a fifth acceptor accepts that proposal, sees the commit index,
-and holds as decided a value that was not.
+- The constants are fixed for each check. This is not a proof for every
+  number of acceptors, epochs and indexes. That would require a proof
+  system such as TLAPS.
+- Quorum intersection is assumed of the constants.
+- The module has only the `NoGuard3` and `Unsafe3` mutations. The other
+  mutations are checked on `FlexiblePaxos.tla` with TLC.
+- `Reconfig.tla` has no inductive invariant.
 
-Every config that was meant to hold had three or four acceptors, where the
-deposed leader has no such follower. Five had only been run with the guard
-off. `FPaxosFiveAcceptors` is the config that would have caught it, and is
-now in the long set.
+## The membership model
 
-The code was never wrong in this way. The simulation's churn workload found
-the same sequence in the code well before, `peace_core` was changed to step
-down on learning an index it had not proposed in, and
-`deposed_leader_steps_down_on_unproposed_index_test` has held it since. The
-fix did not go back into the model, and nothing checked that it had. Trace
-validation would not have caught it either: it checks that the code does
-only what the model allows, and the model allowed too much. It was found
-while writing an inductive invariant, whose clause for commit messages could
-not be made true.
+`Reconfig.tla` models `peace:change_members/3`. It was written and checked
+before the code.
 
-## Membership change
+In the model, the members and the quorum system are decided in the log. A
+change goes through a joint configuration. A candidate needs a phase-one
+quorum of every configuration that its promises report. The module header
+gives the safety argument.
 
-`Reconfig.tla` is a second model, for `peace:change_members/3`, written and
-checked before the code. Members and quorum systems are decided in the log
-and move through a joint configuration; a candidate needs a phase-one quorum
-of every configuration its promises give it reason to respect. The header of
-the module gives the argument. It is in the direction of the thesis's
-revision B (§4.2), which lets quorums vary by epoch and leaves open how a
-proposer learns what the earlier ones were.
+The design is related to revision B of the thesis (§4.2). Revision B allows
+quorums to differ between epochs. It does not specify how a proposer learns
+the quorums of earlier epochs.
 
-`MCReconfig.tla` instantiates it with three acceptors and two configurations
-that share nobody: `a1` and `a2` under `{counting, 1, 2}`, and `a3` alone.
-Two epochs, two indexes, one value. The invariant is `LearnedAgree`.
+`MCReconfig.tla` sets the constants:
 
-| Config | Expect | Result |
-|---|---|---|
-| `Reconfig` | holds | 44.3 million states, 25 minutes |
-| `ReconfigNoJoint` | fails: straight to the new configuration | violated in seconds |
-| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after about 13 million states, 6 minutes |
-| `ReconfigReachableFinal` | fails: a change completes | seconds |
-| `ReconfigReachableRaised` | fails: a promise raises the bar | seconds |
+- Three acceptors.
+- Two configurations with no members in common: `a1` and `a2` under
+  `{counting, 1, 2}`, and `a3` alone.
+- Two epochs, one value, and two or three indexes.
+- The invariant is `LearnedAgree`.
 
-`ReconfigNoJoint` is in the quick set and the rest in the long one. Run again
-on 2026-11-11 after `CoLocated` was added to the module: `Reconfig` has the
-same 44,286,932 states as before.
+### Separate roles
 
-**Co-located roles.** In the model as first written a proposer is nobody in
-particular: any epoch may be prepared at any time, whatever its owner has
-promised. peace's servers are proposer and acceptor at once (§3.7), and a
-candidate promises its own epoch as it sends the prepare, and accepts its own
-proposals as it sends them. `CoLocated = TRUE` says that. It is a restriction
-to what peace can do, so it proves less about the protocol in general and the
-same about peace, and it is twenty times smaller:
+In these configs, any epoch can be prepared at any time, independent of what
+its owner has promised. This is more general than peace.
 
-| Config | Expect | Result |
-|---|---|---|
-| `ReconfigCoLocated` | holds | 2.2 million states, about a minute |
-| `ReconfigCoLocatedNoJoint` | fails | seconds |
-| `ReconfigCoLocatedNoClosure` | fails | violated after 644 thousand states, seconds |
-| `ReconfigCoLocatedReachableFinal` | fails: a change completes | seconds |
-| `ReconfigCoLocatedReachableRaised` | fails: a promise raises the bar | seconds |
-| `ReconfigReachableAfterFinal` | fails: at three indexes, a value is decided after a completed change | seconds |
+| Config | Expected | Result | Set |
+|---|---|---|---|
+| `Reconfig` | holds | 44.3 million states, 25 minutes | long |
+| `ReconfigNoJoint` | fails: the change skips the joint configuration | violated in seconds | quick |
+| `ReconfigNoClosure` | fails: a candidate asks only the configuration it has applied | violated after about 13 million states, 6 minutes | long |
+| `ReconfigReachableFinal` | fails: a change completes | seconds | long |
+| `ReconfigReachableRaised` | fails: a promise adds a configuration the candidate must ask | seconds | long |
 
-All of these are in the quick set.
+### Co-located roles
 
-The first version of this model failed, with both safeguards on, in nineteen
-steps: a deposed leader whose joint entry had lost took the index being
-decided for its entry being decided, and went on to `final`. The model had
-left out the rule that a contradicted leader stops, which `FlexiblePaxos.tla`
-has as `ConflictStepDown`. So membership change depends on that rule, and
-the model now says so.
+A peace server is a proposer and an acceptor at the same time (§3.7). A
+candidate promises its own epoch when it sends the prepare, and accepts its
+own proposals when it sends them. `CoLocated = TRUE` adds these two
+constraints to the model.
 
-**Three indexes.** Two indexes are enough for a whole change, joint then
-final, and for the final entry to be decided by the new configuration alone,
-but not for a value after it. `ReconfigThreeIndexes` adds the third, with
-co-located roles, and `ReconfigReachableAfterFinal` shows that a value
-decided after a completed change is among the states it visits. It holds:
-414,108,959 states, 5.17 billion generated, depth 34, 8 hours 6 minutes on
-2026-11-11. It is in a set of its own, `./check_all.sh soak`. At that size
-TLC's estimate of the chance that a fingerprint collision hid a state is
-0.009 from the fingerprints it saw and 0.11 by its pessimistic formula, so
-this is strong evidence and not certainty.
+The constraint restricts the model to what peace can do. The result is
+weaker for the protocol in general and the same for peace. The state space
+is about 20 times smaller.
 
-**Limits.** Three indexes were checked only with co-located roles; with
-separate roles the model is checked to two. One change, two epochs, one
-value. The commit index and snapshots are not in this model, and neither
-model combines them with membership change. The simulation does.
+| Config | Expected | Result | Set |
+|---|---|---|---|
+| `ReconfigCoLocated` | holds | 2.2 million states, about 1 minute | quick |
+| `ReconfigCoLocatedNoJoint` | fails | seconds | quick |
+| `ReconfigCoLocatedNoClosure` | fails | violated after 644 thousand states, seconds | quick |
+| `ReconfigCoLocatedReachableFinal` | fails: a change completes | seconds | quick |
+| `ReconfigCoLocatedReachableRaised` | fails: a promise adds a configuration the candidate must ask | seconds | quick |
+| `ReconfigReachableAfterFinal` | fails: with three indexes, a value is decided after a completed change | seconds | quick |
+| `ReconfigThreeIndexes` | holds | 414 million states, 8 hours 6 minutes | soak |
+
+### Three indexes
+
+Two indexes are enough for a complete change: the joint entry and the final
+entry. They are not enough to decide a value after the change.
+`ReconfigThreeIndexes` adds a third index, with co-located roles.
+`ReconfigReachableAfterFinal` confirms that the model reaches a state where
+a value is decided after a completed change.
+
+Result of `ReconfigThreeIndexes` on 2026-11-11:
+
+- No violation.
+- 414,108,959 distinct states, 5.17 billion states generated, depth 34.
+- 8 hours 6 minutes.
+- TLC estimates the probability that a fingerprint collision hid a state at
+  0.009 from the observed fingerprints and 0.11 from its conservative
+  formula. This is a higher probability than for the other runs.
+
+### An error in the first version
+
+The first version of this model violated `LearnedAgree` in 19 steps with
+both safeguards enabled. A deposed leader's joint entry lost its index to
+another value. The leader then saw that index decided, treated its own joint
+entry as decided, and proposed the final entry.
+
+The model was missing the rule that a leader stops when it learns a value
+different from its proposal. `FlexiblePaxos.tla` has this rule as
+`ConflictStepDown`. The rule was added to `Reconfig.tla`. Membership change
+depends on it.
+
+### Limitations
+
+- Three indexes are checked only with co-located roles. With separate roles
+  the model is checked with two indexes.
+- The model has one change, two epochs and one value.
+- The commit index and snapshots are not in this model. Neither model
+  combines them with membership change. The simulation tests the
+  combination.
 
 ## Trace validation
 
-`TraceFlexiblePaxos.tla` follows one run of the code through
-`FlexiblePaxos.tla`. [`dst/peace_dst_trace.erl`](../dst/peace_dst_trace.erl)
-writes the run as `TraceData.tla`: the quorum system, and a sequence of the
-model's actions with their arguments, derived from what each server's
-durable state did at each step. The spec's only behaviour takes them in
-order, and after the last action of each step of the code requires
-`promised` and `accepted` to be what the server then held. TLC reaches the
-end of the sequence or it does not; `check_trace.sh <dir>` says which, and
-on a rejection prints the action the model refused.
+Trace validation checks that a run of the code is a behaviour of
+`FlexiblePaxos.tla`.
 
-`make trace` validates 50 runs of three workloads (crashes and cuts, forced
-elections and rumours, and five servers under `{counting, 4, 2}`), some
-38 thousand actions, every action of the model among them, and four planted
-bugs that must be rejected. A run is about a second of TLC.
+How it works:
 
-What a pass does not show is listed at the top of `peace_dst_trace.erl`. The
-main one: the model's messages are all messages sent, so an action passes if
-the messages that justify it were sent, whether or not the server had
-received them.
+1. The simulation records each step that each server takes.
+2. [`dst/peace_dst_trace.erl`](../dst/peace_dst_trace.erl) converts the run
+   into a sequence of model actions with their arguments. It derives them
+   from the changes in each server's durable state and from the messages the
+   server sent. It writes the sequence and the quorum system to
+   `TraceData.tla`.
+3. `TraceFlexiblePaxos.tla` has one behaviour, which takes the actions in
+   order. After the last action of each step of the code, the model's
+   `promised` and `accepted` must equal the server's.
+4. `check_trace.sh <dir>` runs TLC. If TLC cannot take every action, the
+   script prints the first action the model did not permit.
 
-This is why the long runs above need not be repeated when the code changes.
-They are about the model. Whether the code is the model is checked here, in
-minutes.
+`make trace` validates 50 runs from three workloads:
 
-## An inductive invariant
+- crashes, restarts and disconnections
+- forced elections, partitions and delayed `learned` messages
+- five servers under `{counting, 4, 2}`
 
-TLC visits every reachable state, which is why three epochs or two indexes
-take hours. `FlexiblePaxosInd.tla` states an invariant, `IndInv`, that is
-checked a step at a time instead: it holds initially, any state satisfying
-it steps only to states satisfying it, and it implies `Agreement`,
-`LearnedSound` and `LearnedAgree`. So those hold in every reachable state of
-every behaviour, however long, and the cost does not grow with the length of
-behaviours. [Apalache](https://apalache-mc.org) checks the three
-implications symbolically.
+The 50 runs contain about 38 thousand actions and include every action of
+the model. `make trace` also runs four planted bugs, which must be rejected.
+TLC takes about one second per run.
 
-`IndInv` is the usual Paxos invariant with three clauses for what peace
-adds: what a promise reported stays the truth about its acceptor below that
-epoch (`PromisesHonest`, where a dropped index is the exception that
-`SnapshotGuard` exists for); a proposal is safe at every earlier epoch
-(`ProposalsSafe`); a learned entry is decided (`LearnedSound`); and a commit
-index is the leader's word that it holds the index decided and proposed
-nothing else there (`CommitsSound`).
+Because trace validation checks the code against the model, the long TLC
+runs do not need to be repeated when only the code changes.
 
-The module restates the protocol without a set of messages, which has no
-type Apalache accepts: one variable for each kind, shaped by what can
-exist. That it is the same protocol is checked, not assumed:
-`FPaxosIndRefines.tla` rebuilds the message set, and TLC checks that every
-behaviour of the restatement is a behaviour of `FlexiblePaxos.tla`, 2.1
-million states.
+Limitations:
 
-`./check_ind.sh all`, about ten minutes, most of it the refinement:
+- The model's `msgs` contains every message sent. An action passes if the
+  messages that justify it were sent, even if the server had not received
+  them.
+- When a heartbeat raises a server's promise, the trace uses the model's
+  `Promise` action. In the model that action sends a promise message, which
+  the code did not send.
+- Only `FlexiblePaxos.tla` is covered. `Reconfig.tla` has no trace
+  validation.
 
-| Constants | Acceptors, quorums | Epochs × indexes | Step | TLC on the same bounds |
-|---|---|---|---|---|
-| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 s | 116.9 million states, 80 minutes |
-| `C3E3I1` | 3, 2 / 2 | 3 × 1 | 19 s | 13.0 million states, 5 minutes |
-| `C5E2I1` | 5, 4 / 2 | 2 × 1 | 26 s | not run |
-| `C3E3I3` | 3, 2 / 2 | 3 × 3 | 2 minutes | out of reach |
-| `NoGuard3` | 3, 2 / 2, `Propose` without its new conjunct | 2 × 1 | fails, `CommitsSound` | holds: no reachable state shows it |
-| `Unsafe3` | 3, 2 / 1 | 2 × 1 | fails at `IndInv => Safety` | `FPaxosUnsafeQuorums` |
-
-Also run once, by name: `C5E3I3`, five acceptors at 3 × 3, 8 minutes, and
-`C3E4I4`, 4 × 4, 8 minutes. Both hold. Times are with TLC running beside
-them.
-
-`NoGuard3` is the hole described above, and the row to notice. Among three
-acceptors no behaviour reaches it, so TLC passes. The step from `IndInv`
-fails all the same, in seconds, because an inductive invariant has to hold
-from states a behaviour never reaches. Had this check existed, the model's
-missing rule would have been found at three acceptors.
-
-**What it is not.** The constants are fixed for each check, so this is not
-a proof for every number of acceptors, epochs and indexes; that needs a
-proof system (TLAPS). It is TLC's guarantee at bounds TLC cannot reach.
-Quorum intersection is assumed of the constants. The mutations other than
-`NoGuard3` are not in this module. The membership model has no inductive
-invariant. Apalache is not vendored (190 MB): `check_ind.sh` uses
-`$APALACHE`, or `apalache-mc` on the path, or a release unpacked under
-`_build/apalache-dl`. Checked with 0.63.0.
-
-## Tooling
-
-TLC from `vendor/tla2tools-v1.8.0.jar`, or `$TLA2TOOLS_JAR`, or a
-`tla2tools.jar` dropped next to the scripts. Java 11 or later.
+The header of `peace_dst_trace.erl` has the complete list.
