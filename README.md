@@ -372,6 +372,9 @@ Requirements:
 
 ## Limitations
 
+peace is not ready for production use. [ROADMAP.md](ROADMAP.md) lists the
+work required.
+
 - **Snapshots are not chunked.** A snapshot is one Erlang term, sent in one
   message and stored in one write. The machine state must be small enough
   for that.
