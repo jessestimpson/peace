@@ -1,6 +1,8 @@
-%% The machine the simulation replicates: it remembers every value with the
-%% index it was applied at, and answers each with that index. Enough for the
-%% harness to compare what a client was told against what was decided.
+%% This module is the machine that the simulation replicates. The machine
+%% stores every value together with the index at which the value was
+%% applied. The machine replies to each value with that index. This is
+%% enough for the harness to compare the reply that a client received with
+%% the values that were decided.
 -module(peace_dst_machine).
 
 -behaviour(peace_machine).

@@ -1,16 +1,20 @@
-%% The simulation's disk: an ETS table the harness owns, so what a server
-%% wrote is still there after the harness kills it.
+%% This module is the disk of the simulation. The disk is an ETS table that
+%% the harness owns, so the data that a server wrote is still in the table
+%% after the harness kills the server.
 %%
-%% Args: `#{tab := ets:table()}', or with `amnesia => true' a disk that comes
-%% back empty after a restart, which is the planted bug of
-%% `peace_dst:init/2''s `amnesia' mode.
+%% Args: `#{tab := ets:table()}'. With `amnesia => true' the disk is empty
+%% after a restart. This is the planted bug of the `amnesia' mode of
+%% `peace_dst:init/2'.
 %%
-%% With `disk => {Mod, Args}' every write goes to that backend as well, and
-%% a server that opens is given what that backend recovered, not what is
-%% here. If the two differ the difference is noted for `disk_recovers' to
-%% report. That is how the shipped `peace_storage_dets' is run under the
-%% simulation: its dets calls go to `eta_dets', which keeps the file but is
-%% not dets, so this tests the backend's use of dets and not dets.
+%% With `disk => {Mod, Args}', every write also goes to that backend. A
+%% server that opens its storage receives the state that the backend
+%% recovered, and not the state in the ETS table. If the two states differ,
+%% the difference is recorded for `disk_recovers' to report.
+%%
+%% The shipped `peace_storage_dets' runs under the simulation in this way.
+%% The dets calls of `peace_storage_dets' go to `eta_dets'. `eta_dets' keeps
+%% the file but is not dets. The simulation therefore tests how the backend
+%% uses dets, and does not test dets.
 -module(peace_dst_storage).
 
 -behaviour(peace_storage).
@@ -36,8 +40,10 @@ open(Id, Args = #{tab := Tab}) ->
         end,
     case Args of
         #{disk := {Mod, DiskArgs}, node := Node} ->
-            %% On the server's node by name: table names are per node, and
-            %% the first start of a server is before it is placed on one.
+            %% The backend is opened on the node of the server, and the node
+            %% is given by name. Table names are per node, and the first
+            %% start of a server happens before the server is placed on a
+            %% node.
             {ok, Disk, Recovered} = eta_net:with_node(Node, fun() -> peace_storage:open(Mod, Id, DiskArgs) end),
             _ = Recovered =:= Stored orelse ets:insert(Tab, {{disk_differs, Id}, Recovered, Stored}),
             {ok, {Tab, Id, {Mod, Disk, Node}}, Recovered};
@@ -46,8 +52,8 @@ open(Id, Args = #{tab := Tab}) ->
     end.
 
 write(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
-    %% Nothing between the two writes yields to the scheduler, so a kill
-    %% cannot fall between them.
+    %% No code between the two writes yields to the scheduler, so a kill
+    %% cannot happen between the two writes.
     {ok, Disk} = eta_net:with_node(Node, fun() -> peace_storage:write(Mod, Batch, Disk0) end),
     {ok, _} = write(Batch, {Tab, Id, none}),
     {ok, {Tab, Id, {Mod, Disk, Node}}};
@@ -55,9 +61,10 @@ write(Batch, State = {Tab, Id, none}) ->
     Promised = [{{Id, promised}, B} || {promised, B} <- maps:to_list(Batch)],
     Entries = [{{Id, I}, Entry} || {I, Entry} <- maps:get(entries, Batch, [])],
     true = ets:insert(Tab, Promised ++ Entries),
-    %% The harness's record of what was decided is kept here, at the write,
-    %% and not read off the disks between steps: a server may decide an index
-    %% and drop it under a snapshot in the one step.
+    %% The record that the harness keeps of decided values is updated here,
+    %% at the write. The record is not read from the disks between steps,
+    %% because a server may decide an index and drop that index under a
+    %% snapshot within one step.
     lists:foreach(
         fun
             ({I, {learned, Value}}) ->

@@ -2,37 +2,46 @@
 (***************************************************************************)
 (* Flexible Multi-Paxos, as implemented by `src/peace_core.erl`.           *)
 (*                                                                         *)
-(* Flexible Paxos weakens Paxos's quorum requirement.  It is "revision A"  *)
-(* of Howard's thesis (UCAM-CL-TR-935, in docs/; chapter 4, section 4.1),  *)
-(* and section numbers below refer to the thesis.  Paxos uses one quorum   *)
-(* system for both phases and needs any two quorums to intersect.          *)
-(* Flexible Paxos uses two:                                                *)
+(* Flexible Paxos weakens the quorum requirement of Paxos. Flexible Paxos  *)
+(* is "revision A" of Howard's thesis (UCAM-CL-TR-935, in docs/; chapter   *)
+(* 4, section 4.1). Section numbers in this module refer to the thesis.    *)
+(* Paxos uses one quorum system for both phases and requires any two       *)
+(* quorums to intersect. Flexible Paxos uses two quorum systems:           *)
 (*                                                                         *)
-(*   Quorum1 - who must promise before a proposer may propose (phase one)  *)
-(*   Quorum2 - who must accept before a value is decided       (phase two) *)
+(*   - Quorum1 is the set of phase-one quorums. A phase-one quorum must    *)
+(*     promise before a proposer may propose.                              *)
+(*   - Quorum2 is the set of phase-two quorums. A phase-two quorum must    *)
+(*     accept before a value is decided.                                   *)
 (*                                                                         *)
-(* and needs only that every phase-one quorum intersects every phase-two   *)
-(* quorum (equation 4.4).  Two phase-two quorums need not intersect, and   *)
-(* neither need two phase-one quorums.  The thesis's epochs are epochs     *)
-(* here.  This module does NOT assume the intersection: it is              *)
-(* a property of the constants, so that a config can violate it and show   *)
-(* TLC finding the disagreement (FPaxosUnsafeQuorums.cfg).                 *)
+(* Flexible Paxos requires only that every phase-one quorum intersects     *)
+(* every phase-two quorum (equation 4.4). Two phase-two quorums do not     *)
+(* need to intersect. Two phase-one quorums do not need to intersect. The  *)
+(* epochs of the thesis are the epochs of this module. This module does    *)
+(* NOT assume the intersection. The intersection is a property of the      *)
+(* constants. A config can therefore violate the intersection, and TLC     *)
+(* then finds the disagreement (FPaxosUnsafeQuorums.cfg).                  *)
 (*                                                                         *)
 (* What is modelled                                                        *)
 (*   - Epochs, promises, and per-index accepted (epoch, value) pairs.      *)
-(*   - Phase one over the whole log at once: a promise carries every proposal the *)
-(*     acceptor holds, as peace's `promise` carries its log suffix.        *)
-(*   - Phase two per index, value selection by highest reported epoch.     *)
-(*   - Learning, the optional phase three of section 3.3: an acceptor      *)
-(*     that learns an index is decided keeps the value under the marker    *)
-(*     epoch `Learned`, above every real epoch, and reports it that        *)
-(*     way in later promises.  It is the one place                         *)
-(*     peace departs from textbook Paxos, so it is the part most worth     *)
-(*     checking, and it is modelled the way the code does it, by three     *)
-(*     routes: a leader counts a phase-two quorum (`LeaderLearn`), a       *)
-(*     follower trusts its leader's commit index (`SendCommit`,            *)
-(*     `FollowerCommit`), and anybody copies a decided index from somebody *)
-(*     who has it (`CatchUp`).                                             *)
+(*   - Phase one covers the whole log at once. A promise carries every     *)
+(*     proposal the acceptor holds. In peace, the `promise` message        *)
+(*     carries the log suffix of the acceptor in the same way.             *)
+(*   - Phase two runs per index. The proposer selects the value reported   *)
+(*     at the highest epoch.                                               *)
+(*   - Learning. Learning is the optional phase three of section 3.3. An   *)
+(*     acceptor that learns that an index is decided keeps the value under *)
+(*     the marker epoch `Learned`. `Learned` is higher than every real     *)
+(*     epoch. The acceptor reports the value under `Learned` in later      *)
+(*     promises. Learning is the only place where peace departs from       *)
+(*     textbook Paxos, so learning is the part most worth checking. The    *)
+(*     model has the same three routes for learning as the code:           *)
+(*       1. The leader counts acceptances from a phase-two quorum          *)
+(*          (`LeaderLearn`).                                               *)
+(*       2. A follower receives the commit index of its leader and marks   *)
+(*          its entries from the epoch of that leader as decided           *)
+(*          (`SendCommit`, `FollowerCommit`).                              *)
+(*       3. An acceptor copies a decided index from an acceptor that has   *)
+(*          it (`CatchUp`).                                                *)
 (*   - Stale leaders.  The second route depends on a condition from        *)
 (*     section 3.3: an acceptor that is told "decided in epoch e" may      *)
 (*     treat its own proposal from epoch e as decided.  A commit index     *)
@@ -51,36 +60,40 @@
 (*     peace_core steps down in both cases.  FPaxosNoConflictStepDown.cfg  *)
 (*     is the protocol without the two rules.  Rule 2 was added on         *)
 (*     2026-11-11; see "Model correction" in README.md.                    *)
-(*   - An acceptor holding a decided index still answers a propose for it  *)
-(*     without changing what it holds (`Accept`, second disjunct).         *)
-(*   - Snapshots.  An acceptor may drop an index it knows is decided, as   *)
-(*     peace drops its log below a snapshot (`Snapshot`).  It still knows  *)
-(*     the index is decided, but its promise no longer says what it accepted *)
-(*     there, only that the index is dropped.  A proposer that took silence*)
-(*     to mean "free" could have a second value decided, so it does not    *)
-(*     propose in an index any promise reported dropped (`SnapshotGuard`); *)
-(*     peace abandons the whole campaign and catches up.                   *)
-(*     FPaxosNoSnapshotGuard.cfg is the protocol without it.               *)
-(*   - Message loss, duplication and reordering: `msgs` is a set that      *)
-(*     only grows and nothing is ever obliged to be received.              *)
+(*   - An acceptor that holds a decided index still answers a propose for  *)
+(*     that index. The answer does not change what the acceptor holds      *)
+(*     (`Accept`, the THEN branch).                                        *)
+(*   - Snapshots. An acceptor may drop an index that it knows is decided   *)
+(*     (`Snapshot`). peace drops its log below a snapshot in the same way. *)
+(*     The acceptor still knows that the index is decided. A later promise *)
+(*     from the acceptor does not report what the acceptor accepted at the *)
+(*     index. The promise reports only that the index is dropped. If a     *)
+(*     proposer treated the missing report as an empty index, a second     *)
+(*     value could be decided. A proposer therefore does not propose at an *)
+(*     index that any promise reported as dropped (`SnapshotGuard`). In    *)
+(*     that case peace abandons the whole campaign and catches up.         *)
+(*     FPaxosNoSnapshotGuard.cfg is the protocol without `SnapshotGuard`.  *)
+(*   - Message loss, duplication and reordering. `msgs` is a set that only *)
+(*     grows. No action is required to receive a message.                  *)
 (*                                                                         *)
-(*   - NACKs (section 3.1) are not messages here: a proposer that will     *)
-(*     never get its quorum is one that simply takes no further steps.     *)
+(*   - NACKs (section 3.1) are not messages in this module. A proposer     *)
+(*     that will never get its quorum takes no further steps.              *)
 (*                                                                         *)
-(* What is not                                                             *)
-(*   - Crash and restart.  `promised` and `accepted` are durable in        *)
-(*     peace (written through `peace_storage` before any reply is sent),   *)
-(*     so a restarted acceptor is indistinguishable from a slow one.  The  *)
-(*     volatile state (role, commit index, machine state) is not in this   *)
-(*     model.  The DST harness covers the claim that the code really does  *)
-(*     persist before it replies.                                          *)
+(* What is not modelled                                                    *)
+(*   - Crash and restart. `promised` and `accepted` are durable in peace.  *)
+(*     peace writes them through `peace_storage` before it sends any       *)
+(*     reply. A restarted acceptor therefore behaves the same as a slow    *)
+(*     acceptor. The volatile state (role, commit index, machine state) is *)
+(*     not in this model. The DST harness checks that the code persists    *)
+(*     state before it replies.                                            *)
 (*   - Leader election timing, heartbeats, client replies, the state       *)
-(*     machine.  Any proposer may start any epoch at any time here, which  *)
-(*     is a superset of what election timers allow.                        *)
+(*     machine. In this module any proposer may start any epoch at any     *)
+(*     time. This allows every behaviour that election timers allow, and   *)
+(*     more.                                                               *)
 (*   - Membership change.                                                  *)
 (*   - Quorums that vary by epoch (revision B, section 4.2), completing    *)
 (*     phase one early (revision C, chapter 5) and quorum-based value      *)
-(*     selection (chapter 6).  peace implements none of them.              *)
+(*     selection (chapter 6). peace implements none of these.              *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -91,34 +104,43 @@ CONSTANTS
     MaxIndex,        \* log indexes are 1..MaxIndex
     Quorum1,        \* set of phase-one quorums (subsets of Acceptors)
     Quorum2,        \* set of phase-two quorums (subsets of Acceptors)
-    None,           \* the value of no proposal, and the owner of an unused epoch
-    FenceAccept,    \* TRUE: an acceptor refuses a propose below its promise.
+    None,           \* the value used when there is no proposal, and the owner
+                    \* of an epoch that no acceptor has started
+    FenceAccept,    \* TRUE: an acceptor does not accept a propose whose epoch
+                    \* is below the epoch the acceptor has promised.
                     \* FALSE is a mutation; see FPaxosNoFence.cfg.
-    ConflictStepDown, \* TRUE: a leader that learns an index was decided against
-                    \* its own proposal stops advertising commits.  FALSE is
+    ConflictStepDown, \* TRUE: the two stale-leader rules apply.  A leader
+                    \* that learns an index with a value different from its
+                    \* own proposal sends no more commits, and a leader does
+                    \* not propose at an index it holds as decided.  FALSE is
                     \* a mutation; see FPaxosNoConflictStepDown.cfg.
     Snapshots,      \* TRUE: acceptors may drop decided indexes.  FALSE keeps
-                    \* the state space of configs that are about other things.
-    SnapshotGuard   \* TRUE: a proposer does not propose in an index a promise
-                    \* reported dropped.  FALSE is a mutation; see
+                    \* the state space small in configs that test other
+                    \* things.
+    SnapshotGuard   \* TRUE: a proposer does not propose at an index that a
+                    \* promise reported as dropped.  FALSE is a mutation; see
                     \* FPaxosNoSnapshotGuard.cfg.
 
 VARIABLES
-    promised,       \* promised[a]: highest epoch a has promised, 0 if none
-    accepted,       \* accepted[a][s]: the proposal a last accepted for index s
+    promised,       \* promised[a]: the highest epoch that a has promised, or
+                    \* 0 if a has promised no epoch
+    accepted,       \* accepted[a][s]: the proposal that a last accepted for
+                    \* index s
     owner,          \* owner[b]: the acceptor that started epoch b, or None.
-                    \* peace epochs are {Round, ServerId} pairs, so an epoch
+                    \* A peace epoch is a {Round, ServerId} pair, so an epoch
                     \* has exactly one possible leader.
     msgs,           \* every message ever sent
-    dropped         \* dropped[a]: the indexes a has dropped under a snapshot
+    dropped         \* dropped[a]: the indexes that a has dropped under a
+                    \* snapshot
 
 vars == <<promised, accepted, owner, msgs, dropped>>
 
 Epochs == 1..MaxEpoch
 Indexes   == 1..MaxIndex
 
-\* The marker "epoch" of an index an acceptor knows to be decided.  Above every
-\* real epoch, so highest-epoch value selection always prefers it.
+\* Learned is the marker "epoch" that an acceptor stores for an index that the
+\* acceptor knows is decided.  Learned is higher than every real epoch, so
+\* selection of the value at the highest epoch always selects a learned value.
 Learned == MaxEpoch + 1
 
 NoVote == [epoch |-> -1, val |-> None]
@@ -152,9 +174,10 @@ Send(m) == msgs' = msgs \cup {m}
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 -----------------------------------------------------------------------------
-(* A value is decided at an index once some phase-two quorum has accepted it in *)
-(* one epoch.  An accept names no value; the propose of the same epoch and index *)
-(* does, and there is at most one of those (`Propose`).                    *)
+(* A value is decided at an index when some phase-two quorum has accepted  *)
+(* the value in one epoch. An accept message does not contain a value. The *)
+(* propose message of the same epoch and index contains the value.         *)
+(* `Propose` sends at most one propose message per epoch and index.        *)
 
 DecidedAt(b, s, v) ==
     /\ [type |-> "propose", epoch |-> b, index |-> s, val |-> v] \in msgs
@@ -164,18 +187,20 @@ DecidedAt(b, s, v) ==
 Decided(s, v) == \E b \in Epochs : DecidedAt(b, s, v)
 
 -----------------------------------------------------------------------------
-(* peace: a candidate broadcasts `{prepare, Epoch, From}`.  An epoch is    *)
-(* started once, by one acceptor.                                          *)
+(* In peace, a candidate broadcasts `{prepare, Epoch, From}`. One acceptor *)
+(* starts an epoch, and an epoch starts only once.                         *)
 Prepare(a, b) ==
     /\ owner[b] = None
     /\ owner' = [owner EXCEPT ![b] = a]
     /\ Send([type |-> "prepare", epoch |-> b])
     /\ UNCHANGED <<promised, accepted, dropped>>
 
-(* peace: `{promise, Epoch, Entries, Snapshot}`.  Strictly greater, so an  *)
-(* acceptor answers a given epoch at most once and a proposer never sees   *)
-(* two different reports from the same acceptor.  Of a dropped index it    *)
-(* reports no proposal, and that it is dropped.                            *)
+(* In peace, the message is `{promise, Epoch, Entries, Snapshot}`. The     *)
+(* epoch must be strictly greater than the epoch the acceptor has          *)
+(* promised. An acceptor therefore answers a given epoch at most once, and *)
+(* a proposer never receives two different reports from the same acceptor. *)
+(* For a dropped index, the promise reports no proposal and reports that   *)
+(* the index is dropped.                                                   *)
 Promise(a, b) ==
     /\ [type |-> "prepare", epoch |-> b] \in msgs
     /\ b > promised[a]
@@ -186,25 +211,34 @@ Promise(a, b) ==
              dropped |-> dropped[a]])
     /\ UNCHANGED <<accepted, owner, dropped>>
 
-(* peace: on a phase-one quorum of promises the new leader re-proposes, for*)
-(* every index anybody reported, the value reported at the highest epoch,  *)
-(* and is free to propose anything where nobody reported a proposal.       *)
+(* In peace, a new leader acts when it has promises from a phase-one       *)
+(* quorum. For every index at which any promise reported a proposal, the   *)
+(* new leader proposes again the value reported at the highest epoch. At   *)
+(* an index where no promise reported a proposal, the new leader may       *)
+(* propose any value.                                                      *)
 (*                                                                         *)
-(* It does not propose in an index it already knows is decided.  Without   *)
-(* that the commit index is unsound in a way `Conflict` below does not     *)
-(* cover: a leader that has been deposed without hearing of it can learn   *)
-(* an index a later epoch decided, advertise a commit index over it having *)
-(* proposed nothing there, and only then propose there, freely, since its  *)
-(* own phase one saw the index empty.  A follower holding that proposal    *)
-(* takes it as decided.  Five acceptors are the fewest that can do it, and *)
-(* TLC finds it in nineteen states (FPaxosFiveAcceptors.cfg, before this   *)
-(* conjunct).  peace_core never proposes in an index it holds decided, and *)
-(* steps down on learning one it has not proposed in: the simulation found *)
-(* that case in the code long before the model was asked about it, and it  *)
-(* is deposed_leader_steps_down_on_unproposed_index_test.                  *)
+(* The leader does not propose at an index that the leader already knows   *)
+(* is decided. Without this conjunct the commit index is unsound in a case *)
+(* that `Conflict` below does not cover:                                   *)
+(*   1. A leader is deposed and receives no message that tells it so.      *)
+(*   2. The leader learns an index that a later epoch decided.             *)
+(*   3. The leader sends a commit index that covers the index. The leader  *)
+(*      has proposed nothing at the index.                                 *)
+(*   4. The leader then proposes at the index. Phase one permits any       *)
+(*      value, because the promises that the leader received reported the  *)
+(*      index as empty.                                                    *)
+(*   5. A follower that holds that proposal treats the proposal as         *)
+(*      decided.                                                           *)
+(* The case needs at least five acceptors. TLC finds the case in nineteen  *)
+(* states (FPaxosFiveAcceptors.cfg, before this conjunct was added).       *)
+(* peace_core never proposes at an index that it holds as decided.         *)
+(* peace_core steps down when it learns an index at which it has not       *)
+(* proposed. The simulation found the case in the code long before the     *)
+(* model was checked for it.                                               *)
+(* deposed_leader_steps_down_on_unproposed_index_test tests the case.      *)
 Propose(b, s, v) ==
     /\ ~ \E m \in msgs : m.type = "propose" /\ m.epoch = b /\ m.index = s
-    /\ owner[b] # None    \* implied by the promises below; here so the next line is defined
+    /\ owner[b] # None    \* The promises below imply this conjunct.  It makes the next line defined.
     /\ ConflictStepDown => accepted[owner[b]][s].epoch # Learned
     /\ \E Q \in Quorum1 :
           LET reports == {m \in msgs : m.type = "promise" /\ m.epoch = b /\ m.acc \in Q}
@@ -218,11 +252,15 @@ Propose(b, s, v) ==
     /\ Send([type |-> "propose", epoch |-> b, index |-> s, val |-> v])
     /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
-(* peace: `{propose, Epoch, Entries, Commit}` answered by `{accept, ...}`. *)
-(* An index already known decided is acknowledged and left alone: the      *)
-(* acceptor must never replace a decided entry with a lower-epoch one,     *)
-(* and it must still answer or a leader that has not yet learned the index *)
-(* is decided could wait forever for a phase-two quorum.                   *)
+(* In peace, `{propose, Epoch, Entries, Commit}` is answered by            *)
+(* `{accept, ...}`. An acceptor that already knows that the index is       *)
+(* decided acknowledges the propose and does not change its entry. There   *)
+(* are two reasons:                                                        *)
+(*   - The acceptor must never replace a decided entry with an entry from  *)
+(*     a lower epoch.                                                      *)
+(*   - The acceptor must still answer. Otherwise a leader that has not yet *)
+(*     learned that the index is decided could wait forever for a          *)
+(*     phase-two quorum.                                                   *)
 Accept(a, b, s) ==
     /\ \E m \in msgs :
           /\ m.type = "propose" /\ m.epoch = b /\ m.index = s
@@ -238,12 +276,14 @@ Accept(a, b, s) ==
 -----------------------------------------------------------------------------
 (* Learning.                                                               *)
 
-\* peace_core's leader role: it has promised nothing above its own epoch.
-\* (It also steps down on a nack; fewer behaviours, not more.)
+\* Leads(a, b) is the leader role of peace_core.  Acceptor a started epoch b,
+\* and acceptor a has promised no epoch above b.  peace_core also steps down
+\* when it receives a nack.  That rule removes behaviours and adds none, so
+\* the model omits it.
 Leads(a, b) == owner[b] = a /\ promised[a] = b
 
-(* peace: the leader counts `accepted` replies and marks the index decided *)
-(* once they form a phase-two quorum.                                      *)
+(* In peace, the leader counts `accepted` replies. The leader marks the    *)
+(* index as decided when the replies come from a phase-two quorum.         *)
 LeaderLearn(b, s) ==
     /\ owner[b] # None
     /\ Leads(owner[b], b)
@@ -254,16 +294,17 @@ LeaderLearn(b, s) ==
                              [epoch |-> Learned, val |-> v]]
     /\ UNCHANGED <<promised, owner, msgs, dropped>>
 
-\* The leader of b holds an index decided with a value other than the one it
-\* proposed there.  Only a later epoch can have decided that value.
+\* Conflict(b) holds when the leader of epoch b holds an index as decided with
+\* a value different from the value the leader proposed at that index.  Only a
+\* later epoch can have decided that value.
 Conflict(b) ==
     \E m \in msgs :
         /\ m.type = "propose" /\ m.epoch = b
         /\ accepted[owner[b]][m.index].epoch = Learned
         /\ accepted[owner[b]][m.index].val # m.val
 
-(* peace: every `accept` (and so every heartbeat) carries the leader's     *)
-(* commit index.                                                           *)
+(* In peace, every `propose` message, and therefore every heartbeat,       *)
+(* carries the commit index of the leader.                                 *)
 SendCommit(b, s) ==
     /\ owner[b] # None
     /\ Leads(owner[b], b)
@@ -272,10 +313,10 @@ SendCommit(b, s) ==
     /\ Send([type |-> "commit", epoch |-> b, index |-> s])
     /\ UNCHANGED <<promised, accepted, owner, dropped>>
 
-(* peace: a follower marks decided each index the leader's commit index    *)
-(* covers, provided its own entry there is from that leader's epoch.  An   *)
-(* entry from an older epoch may be a different value; that index waits    *)
-(* for `CatchUp`.                                                          *)
+(* In peace, a follower marks as decided each index that the commit index  *)
+(* of the leader covers, if the entry of the follower at that index is     *)
+(* from the epoch of that leader. An entry from an older epoch may hold a  *)
+(* different value. The follower learns such an index through `CatchUp`.   *)
 FollowerCommit(a, b, s) ==
     /\ [type |-> "commit", epoch |-> b, index |-> s] \in msgs
     /\ b >= promised[a]
@@ -284,18 +325,22 @@ FollowerCommit(a, b, s) ==
     /\ accepted' = [accepted EXCEPT ![a][s].epoch = Learned]
     /\ UNCHANGED <<owner, msgs, dropped>>
 
-(* peace: `{catchup, From}` answered by `{learned, Entries}` or, from a    *)
-(* server that has dropped the entries, by `{install, Index, State}`; and  *)
-(* decided entries carried in a `promise`.  A decided index never changes, *)
-(* so copying it atomically loses nothing against copying it by message.   *)
+(* In peace, a server receives decided entries in these ways:              *)
+(*   - `{catchup, From}` is answered by `{learned, Entries}`.              *)
+(*   - A server that has dropped the entries answers `{catchup, From}`     *)
+(*     with `{install, Index, State}`.                                     *)
+(*   - A `promise` carries decided entries.                                *)
+(* A decided index never changes. This action copies a decided index in    *)
+(* one atomic step. The atomic copy therefore loses nothing compared with  *)
+(* a copy by message.                                                      *)
 CatchUp(a, from, s) ==
     /\ accepted[from][s].epoch = Learned
     /\ accepted[a][s].epoch # Learned
     /\ accepted' = [accepted EXCEPT ![a][s] = accepted[from][s]]
     /\ UNCHANGED <<promised, owner, msgs, dropped>>
 
-(* peace: a server writes a snapshot and drops its log up to there.  Only  *)
-(* decided indexes are ever under a snapshot.                              *)
+(* In peace, a server writes a snapshot and drops its log up to the        *)
+(* snapshot. A snapshot covers only decided indexes.                       *)
 Snapshot(a, s) ==
     /\ Snapshots
     /\ accepted[a][s].epoch = Learned
@@ -319,15 +364,16 @@ Spec == Init /\ [][Next]_vars
 -----------------------------------------------------------------------------
 (* Safety.                                                                 *)
 
-\* At most one value is ever decided per index.  The whole point.
+\* At most one value is ever decided per index.  This is the main safety
+\* property.
 Agreement ==
     \A s \in Indexes, v1, v2 \in Values :
         Decided(s, v1) /\ Decided(s, v2) => v1 = v2
 
-\* The thesis's safe learning: "If a participant learns a value, it must
-\* learn the decided value."  This is what
-\* a peace server applies to its state machine, so it is the property the
-\* state machines' agreement actually rests on.
+\* This is safe learning as defined in the thesis: "If a participant learns a
+\* value, it must learn the decided value."  A peace server applies learned
+\* values to its state machine.  The agreement of the state machines
+\* therefore depends on this property.
 LearnedSound ==
     \A a \in Acceptors, s \in Indexes :
         accepted[a][s].epoch = Learned => Decided(s, accepted[a][s].val)
@@ -338,39 +384,45 @@ OneValuePerEpoch ==
         (m1.type = "propose" /\ m2.type = "propose" /\ m1.epoch = m2.epoch /\ m1.index = m2.index)
             => m1.val = m2.val
 
-\* Learned entries agree across acceptors.  Implied by the two above; stated
-\* because it is literally what the DST harness checks on the running code.
+\* Learned entries are equal across acceptors.  Agreement and LearnedSound
+\* imply this property.  It is stated separately because the DST harness
+\* checks exactly this property on the running code.
 LearnedAgree ==
     \A a1, a2 \in Acceptors, s \in Indexes :
         (accepted[a1][s].epoch = Learned /\ accepted[a2][s].epoch = Learned)
             => accepted[a1][s].val = accepted[a2][s].val
 
-\* What Flexible Paxos asks of the quorum system, and all it asks.
+\* Every phase-one quorum intersects every phase-two quorum.  This is the only
+\* requirement that Flexible Paxos places on the quorum system.
 QuorumIntersection ==
     \A Q1 \in Quorum1, Q2 \in Quorum2 : Q1 \cap Q2 # {}
 
 -----------------------------------------------------------------------------
-(* Reachability.  These are meant to FAIL: each is the negation of a state *)
-(* the model has to be able to reach for the invariants above to mean      *)
-(* anything.  See FPaxosReachable.cfg.                                     *)
+(* Reachability. Each invariant below must FAIL. Each invariant is the     *)
+(* negation of a state that the model must be able to reach. If the model  *)
+(* could not reach these states, the invariants above could hold only      *)
+(* because the model does very little. See the FPaxosReachable*.cfg        *)
+(* configs.                                                                *)
 
 NothingDecided == \A s \in Indexes, v \in Values : ~ Decided(s, v)
 
 NothingLearned == \A a \in Acceptors, s \in Indexes : accepted[a][s].epoch # Learned
 
-\* Never does every acceptor know every index: followers never finish learning.
+\* In every state, some acceptor has not learned some index.  This says that
+\* the followers never finish learning.
 NotAllLearned == \E a \in Acceptors, s \in Indexes : accepted[a][s].epoch # Learned
 
-\* No epoch is ever promised by an acceptor that has dropped an index, i.e.
-\* the SnapshotGuard guards nothing.
+\* No acceptor that has dropped an index ever sends a promise.  If this held,
+\* SnapshotGuard would have no effect.
 NoPromiseAfterSnapshot == \A m \in msgs : m.type = "promise" => m.dropped = {}
 
-\* A leader never finds itself contradicted, i.e. the ConflictStepDown guard
-\* guards nothing.
+\* Conflict(b) never holds for the leader of any epoch b.  If this held, the
+\* ConflictStepDown guard would have no effect.
 NoConflict == \A b \in Epochs : owner[b] # None => ~ Conflict(b)
 
-\* No value decided in one epoch is ever re-proposed by a later one, i.e. a
-\* leader change never has to recover anything.
+\* No value is decided in two epochs.  The model must be able to violate
+\* this: after a change of leader, the later epoch proposes a value that an
+\* earlier epoch decided, and decides it again.
 NoRecovery ==
     \A s \in Indexes, v \in Values, b1, b2 \in Epochs :
         ~ (b1 < b2 /\ DecidedAt(b1, s, v) /\ DecidedAt(b2, s, v))

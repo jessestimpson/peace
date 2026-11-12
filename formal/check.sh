@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run TLC on one model config.
 #   usage: check.sh <ConfigBasenameWithout.cfg> [pass|fail]
-# `fail` asserts TLC finds an invariant violation (mutation and reachability
-# configs).
-# Jar: $TLA2TOOLS_JAR, else formal/tla2tools.jar, else the vendored one.
+# With `fail`, the script requires TLC to find an invariant violation. Use
+# `fail` for mutation configs and reachability configs.
+# The TLC jar is $TLA2TOOLS_JAR if it is set, then formal/tla2tools.jar, then
+# the jar in formal/vendor.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -16,22 +17,22 @@ elif [ -f tla2tools.jar ]; then
 else
   JAR="vendor/tla2tools-v1.8.0.jar"
 fi
-# The module a config instantiates goes by the config's name.
+# The name of the config determines the module that TLC checks.
 case "$CFG" in
   Reconfig*) MODULE="MCReconfig.tla" ;;
   *) MODULE="MCFlexiblePaxos.tla" ;;
 esac
 OUT="$(mktemp)"
-# A private metadir per run, so concurrent invocations cannot delete each
-# other's state pools.
+# Each run has its own metadir, so that one run cannot delete the state pools
+# of another run that is in progress at the same time.
 META="$(mktemp -d)"
 trap 'rm -rf "$OUT" "$META"' EXIT
 
 set +e
-# -noGenerateSpecTE: no trace-explorer files left behind by the configs that
-# are meant to fail.
-# -deadlock disables deadlock checking: a bounded model legitimately runs out
-# of enabled actions once every epoch and index is used up.
+# -noGenerateSpecTE: TLC writes no trace-explorer files for the configs that
+# must fail.
+# -deadlock disables deadlock checking. A bounded model has no enabled action
+# after every epoch and index is used. That state is not an error.
 java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
   -workers auto -deadlock -noGenerateSpecTE -metadir "$META" \
   -config "${CFG}.cfg" "$MODULE" 2>&1 | tee "$OUT"
@@ -42,8 +43,8 @@ if [ "$EXPECT" = "pass" ]; then
   exit "$STATUS"
 fi
 
-# Expected failure: demand a genuine invariant violation, so a parse error or
-# a JVM crash cannot pass for the counterexample.
+# Expected failure: require an invariant violation. A parse error or a JVM
+# crash does not count as the expected failure.
 if [ "$STATUS" -ne 0 ] && grep -Eq "Invariant .* is violated" "$OUT"; then
   echo "OK: expected invariant violation was found"
   exit 0

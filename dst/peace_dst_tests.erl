@@ -1,5 +1,6 @@
-%% The simulation suite. `make dst', which is `rebar3 as dst eunit' on one
-%% scheduler thread; see the Makefile for why.
+%% This module is the simulation suite. `make dst' runs the suite. `make dst'
+%% is `rebar3 as dst eunit' on one scheduler thread. See the Makefile for the
+%% reason.
 -module(peace_dst_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -15,8 +16,9 @@ opts(Seed, Config) ->
         max_ops => 120,
         max_steps => 60000,
         settle_steps => 4000,
-        %% When nothing is runnable, let time pass more often than not:
-        %% elections and retransmissions only happen on the clock.
+        %% When no process is runnable, the run lets time pass more often
+        %% than not. Elections and retransmissions happen only when timers
+        %% on the clock fire.
         op_p => 0.15,
         quiet_p => 0.8,
         preload => [peace],
@@ -29,7 +31,8 @@ calm(Seed, Config) ->
 run(Opts) ->
     eta_run:run(peace_dst, Opts).
 
-%% A seed is a run: same trace every time, and the recorded trace replays.
+%% A seed determines a run. The same seed produces the same trace every
+%% time, and the recorded trace can be replayed.
 determinism_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -54,8 +57,8 @@ determinism_test_() ->
         )
     end}.
 
-%% No faults at all: every server ends with the same log, and clients were
-%% answered.
+%% This test runs with no faults. Every server ends with the same log, and
+%% clients received answers.
 calm_cluster_converges_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -64,7 +67,8 @@ calm_cluster_converges_test_() ->
         ?assert(Acked >= 20 * 40, Stats)
     end}.
 
-%% Loss, delay, isolation, crashes and restarts, majority quorums.
+%% This test runs with majority quorums and these faults: message loss,
+%% message delay, isolation, crashes and restarts.
 faults_majority_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -72,7 +76,8 @@ faults_majority_test_() ->
         exercised(peace_dst:stats())
     end}.
 
-%% Five servers, two to commit and four to elect.
+%% This test runs the same faults with five servers. Two servers are needed
+%% to commit and four servers are needed to elect.
 faults_flexible_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -82,7 +87,8 @@ faults_flexible_test_() ->
         exercised(peace_dst:stats())
     end}.
 
-%% Four servers in two rows: a row commits, one from each row elects.
+%% This test runs the same faults with four servers in a grid of two rows.
+%% One row is needed to commit. One server from each row is needed to elect.
 faults_grid_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -93,9 +99,10 @@ faults_grid_test_() ->
         exercised(peace_dst:stats())
     end}.
 
-%% Leadership under attack: forced elections, two-server splits and late
-%% `learned' messages, five servers. This is the workload that reaches the
-%% stale-leader hazard; see the planted bug below.
+%% This test runs the churn workload with five servers: forced elections,
+%% two-server splits and late `learned' messages. The churn workload is the
+%% workload that reaches the stale-leader hazard. See the planted bug in
+%% `stale_leader_is_caught_test_' below.
 churn_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -115,9 +122,9 @@ churn_test_() ->
         ?assert(Rumours >= Runs * 5, Stats)
     end}.
 
-%% Membership changing under the run: three founders out of five servers,
-%% and requests to move to other members and other quorum systems arriving
-%% among the values and the faults.
+%% This test changes membership during the run. Three of the five servers
+%% are founders. Requests to change to other members and to other quorum
+%% systems arrive among the values and the faults.
 membership_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -138,7 +145,9 @@ membership_test_() ->
         ?assert(Changes >= Runs, Stats)
     end}.
 
-%% Straight to the new configuration, and the old and the new decide apart.
+%% With `no_joint', a membership change goes directly to the new
+%% configuration. The old configuration and the new configuration then
+%% decide values separately from each other.
 joint_configuration_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -151,9 +160,9 @@ joint_configuration_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
-%% Proposals sent to a phase-two quorum and no further (thesis section
-%% 4.3.3), under every workload:
-%% the servers left out learn by asking, and still have to end up the same.
+%% This test sends proposals to a phase-two quorum only (thesis section
+%% 4.3.3), under every workload. The servers outside that quorum learn the
+%% values by requesting them. All servers must still reach the same state.
 propose_to_quorum_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -173,9 +182,9 @@ propose_to_quorum_test_() ->
         ?assert(Leaderships > Runs, Stats)
     end}.
 
-%% Read leases, under both workloads. Reads are answered from the leader's
-%% state whenever it holds a lease, and are held to the same check as reads
-%% that go through the log.
+%% This test runs read leases under both workloads. A leader answers a read
+%% from the state of the leader whenever the leader holds a lease. The same
+%% check applies to these reads as to reads that go through the log.
 leases_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -187,8 +196,8 @@ leases_test_() ->
             opts(Seed, #{servers => 5, quorum => {counting, 4, 2}, churn => true, read_lease_ms => 40})
         end),
         sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, long_lease()) end),
-        %% Two servers in three with clocks six per cent fast: inside the
-        %% tenth a lease allows for.
+        %% Two servers in three have clocks that run six per cent fast. Six
+        %% per cent is within the tenth that a lease allows for.
         sweep(lists:seq(1, 60), fun(Seed) -> opts(Seed, (long_lease())#{clock_drift => 6}) end),
         #{runs := Runs, queries_answered := Queries, leaderships := Leaderships} = Stats = peace_dst:stats(),
         ?assert(Queries >= Runs * 2, Stats),
@@ -198,13 +207,14 @@ leases_test_() ->
 long_lease() ->
     #{servers => 3, churn => true, read_lease_ms => 200, election_timeout_ms => 200}.
 
-%% Without the fence a lease is a leader's unfounded belief, and a read sees
-%% a state that is missing acknowledged values.
+%% Without the lease fence, nothing guarantees the lease that a leader
+%% assumes it holds. A read then returns a state that lacks acknowledged
+%% values.
 lease_fence_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
-        %% A lease long enough for a cut-off leader to be asked something
-        %% before it expires.
+        %% The lease is long enough that a leader that is cut off receives a
+        %% read before the lease expires.
         Config = long_lease(),
         {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
             opts(Seed, Config#{mode => no_lease_fence})
@@ -213,11 +223,13 @@ lease_fence_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
-%% A lease assumes clocks that run at nearly one rate. With two servers in
-%% three running ten times fast they are free of a lease long before a true
-%% leader stops counting on it, and a read is stale. Not a bug in peace: it
-%% shows the simulation can tell when the assumption is broken. About one
-%% seed in three hundred finds it, so the search starts near one that does.
+%% A lease assumes that all clocks run at nearly the same rate. In this
+%% test the clocks of two servers in three run ten times fast. Those servers
+%% stop being bound by a lease long before a leader with a true clock stops
+%% relying on the lease, and a read returns stale state. This is not a bug
+%% in peace. The test shows that the simulation detects a violation of the
+%% clock assumption. About one seed in three hundred produces the violation,
+%% so the search starts near a seed that produces the violation.
 lease_needs_clocks_that_agree_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -229,8 +241,9 @@ lease_needs_clocks_that_agree_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config#{clock_drift => 6}))), {seed, Seed})
     end}.
 
-%% The suite can fail. Quorums that do not intersect lose agreement, and the
-%% failure shrinks to a trace that still reproduces it.
+%% This test shows that the suite can fail. With quorums that do not
+%% intersect, the servers do not keep agreement. The failing trace shrinks
+%% to a trace that still reproduces the failure.
 unsafe_quorums_are_caught_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -242,7 +255,8 @@ unsafe_quorums_are_caught_test_() ->
         ?assertMatch(#{verified := true}, Shrunk, eta_run:summary(Shrunk))
     end}.
 
-%% A server that forgets its promises across a restart is caught too.
+%% This test shows that the suite also detects a server that loses its
+%% promises across a restart.
 amnesia_is_caught_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -252,8 +266,9 @@ amnesia_is_caught_test_() ->
         ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
     end}.
 
-%% The shipped dets backend under the same faults: every server that reopens
-%% its file finds what it wrote, across kills, snapshots and truncation.
+%% This test runs the shipped dets backend under the same faults. Every
+%% server that reopens its file recovers the state that the server wrote,
+%% across kills, snapshots and truncation.
 dets_backend_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -264,7 +279,8 @@ dets_backend_test_() ->
         ?assert(Snapshots > 0, Stats)
     end}.
 
-%% And that check can fail: a backend that does not write promises.
+%% This test shows that the check in `dets_backend_test_' can fail. The
+%% test uses a backend that does not write promises.
 lossy_disk_is_caught_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -276,9 +292,10 @@ lossy_disk_is_caught_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
-%% A deposed leader that learns an index went against it and leads on gets a
-%% follower to decide the value that lost. With the guard, the same seed is
-%% clean.
+%% A deposed leader learns that an index was decided with a value other than
+%% the value that the leader proposed, and the leader continues to lead. The
+%% leader then causes a follower to decide the value that was not decided.
+%% With the guard, the same seed produces no violation.
 stale_leader_is_caught_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -291,8 +308,9 @@ stale_leader_is_caught_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, Config))), {seed, Seed})
     end}.
 
-%% A candidate that leads on a promise from a server that has dropped indexes
-%% the candidate never saw puts its own values in them.
+%% A candidate becomes leader on a promise from a server that has dropped
+%% indexes that the candidate never saw. The candidate then proposes its own
+%% values at those indexes.
 snapshot_guard_is_needed_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -303,8 +321,8 @@ snapshot_guard_is_needed_test_() ->
         ?assertEqual(ok, maps:get(outcome, run(opts(Seed, #{}))), {seed, Seed})
     end}.
 
-%% Clients that retry without a session get values applied twice, which
-%% is what the suite's clients would be doing to every run without them.
+%% Clients that retry without a session cause values to be applied twice.
+%% Without sessions, the clients of the suite would cause this in every run.
 bare_retries_apply_twice_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
@@ -336,9 +354,12 @@ first_violation([Seed | Seeds], OptsFun) ->
         Other -> error({seed, Seed, Other, eta_run:summary(Result)})
     end.
 
-%% The sweep did what it exists to do: clients were answered, the network
-%% lost messages, servers were cut off, killed and brought back, and
-%% leadership changed hands.
+%% Asserts that the sweep exercised the behaviour that the sweep is meant to
+%% exercise:
+%%   - clients received acknowledgements of values and answers to queries;
+%%   - leadership changed;
+%%   - servers were cut off, killed and restarted;
+%%   - servers took snapshots.
 exercised(Stats) ->
     #{
         runs := Runs,

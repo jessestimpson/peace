@@ -45,9 +45,8 @@ changed.
 - Each row holds the config name, the expected outcome, a hash of the
   inputs, the date, the number of distinct states, and the duration.
 - The inputs are the config file, the two modules it uses, `check.sh`, and
-  the name of the TLC jar. Comments and blank lines in the config and the
-  modules are removed before hashing, so a change to a comment does not
-  cause a run.
+  the name of the TLC jar. Comments and blank lines are removed from all of
+  them before hashing, so a change to a comment does not cause a run.
 - `FORCE=1 ./check_all.sh <set>` runs every config in the set.
 - The full TLC output of each run is kept in `logs/<Config>.log`. The `logs`
   directory is not committed.
@@ -56,8 +55,8 @@ changed.
 
 `check_ind.sh` does the same with [`checked_ind.tsv`](checked_ind.tsv). Its
 inputs are `FlexiblePaxosInd.tla`, `MCFlexiblePaxosInd.tla` and the script.
-Comments are not removed from these modules, because Apalache reads its
-type annotations from comments.
+Comments are removed before hashing, except the Apalache type annotations,
+which are comments that Apalache reads.
 
 ## The protocol model
 

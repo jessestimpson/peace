@@ -1,9 +1,12 @@
-%% @doc Volatile storage: nothing outlives the server process.
+%% @doc Volatile storage. This backend stores nothing: `write/2' discards
+%% the batch and `open/2' recovers no data. No data survives the end of the
+%% server process.
 %%
-%% A server on this backend that restarts comes back having forgotten every
-%% promise it made, which is exactly the acceptor Paxos does not tolerate. It
-%% is safe only if a restarted server never rejoins under the same id. Use it
-%% for tests, and `peace_storage_dets' for anything else.
+%% A server that uses this backend and restarts has lost every promise that
+%% it made. Paxos does not tolerate an acceptor that loses its promises. This
+%% backend is safe only if a restarted server never rejoins under the same
+%% id. Use this backend for tests. Use `peace_storage_dets' for everything
+%% else.
 -module(peace_storage_mem).
 
 -behaviour(peace_storage).

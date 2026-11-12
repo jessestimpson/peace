@@ -1,9 +1,11 @@
-%% What the simulation's operations do, as code the scheduler steps.
+%% This module contains the code of the operations of the simulation. The
+%% scheduler steps this code.
 %%
-%% These run in processes spawned by `eta_run:spawn_op/1', which makes them
-%% part of the system: their sleeps and call timeouts have to be on the
-%% virtual clock and their calls routed through the simulated network, so
-%% this module takes the transform. The harness itself does not.
+%% The functions run in processes spawned by `eta_run:spawn_op/1', so the
+%% processes are part of the simulated system. The sleeps and the call
+%% timeouts of the processes must use the virtual clock, and the calls of
+%% the processes must go through the simulated network. This module is
+%% therefore compiled with the eta transform. The harness module is not.
 -module(peace_dst_client).
 
 -include("peace_eta.hrl").
@@ -14,13 +16,17 @@
 -define(RETRY_AFTER_MS, 60).
 -define(ATTEMPTS, 4).
 
-%% Submits one value and records what the client was told. `Op' is unique
-%% to this operation, so the harness can find the value in the log.
+%% Submits one value and records the result that the client received. `Op'
+%% is unique to this operation, so the harness can find the value in the
+%% log.
 %%
-%% `Retry' is what the client does when it cannot tell what happened:
-%% `session' submits again under the same session, which is what sessions
-%% are for; `bare' submits again without one, which is the mistake they
-%% prevent; `none' gives up.
+%% `Retry' selects what the client does when the outcome of the request is
+%% unknown:
+%%   - `session' submits the value again under the same session. This is
+%%     the purpose of sessions.
+%%   - `bare' submits the value again without a session. This is the
+%%     mistake that sessions prevent.
+%%   - `none' stops.
 value(Tab, N, Servers, Op, Retry) ->
     ?ETA_LABEL({client, N}),
     true = ets:insert(Tab, {{op, Op}, invoked}),
@@ -34,9 +40,9 @@ value(Tab, N, Servers, Op, Retry) ->
     true = ets:insert(Tab, {{op, Op}, Result}),
     ok.
 
-%% A linearizable read of every value applied so far. Records, with the
-%% answer, which values had already been acknowledged when it asked: all of
-%% them have to be in it.
+%% Performs a linearizable read of every value applied so far. Records the
+%% answer together with the values that had already been acknowledged when
+%% the query was issued. The answer must contain all of those values.
 query(Tab, N, Servers) ->
     ?ETA_LABEL({client, N}),
     Before = [Op || [Op] <- ets:match(Tab, {{op, '$1'}, {ok, '_'}})],
@@ -53,8 +59,13 @@ query(Tab, N, Servers) ->
     true = ets:insert(Tab, {{query, N}, lists:sort(Before), Result}),
     ok.
 
-%% Asks for a change of membership. Not retried: whether it happened is in
-%% the log, and the next request finds out.
+%% Requests a membership change. `submit/3' is called with `Again' false:
+%%   - After `{error, no_leader}' or `{error, noproc}' the request was
+%%     never submitted. The request is retried, for at most four attempts
+%%     in total.
+%%   - After any other answer, including a timeout, the request is not
+%%     retried. The log shows whether the change happened, and the next
+%%     request discovers the result.
 reconfigure(Tab, N, Servers, Members, Quorum) ->
     ?ETA_LABEL({client, N}),
     Result = submit(fun() -> peace:change_members(Servers, Members, Quorum, ?CALL_TIMEOUT_MS) end, ?ATTEMPTS, false),
@@ -62,11 +73,12 @@ reconfigure(Tab, N, Servers, Members, Quorum) ->
     true = ets:insert(Tab, {{reconfigure, N}, Result}),
     ok.
 
-%% Brings a killed server back, from inside the schedule: a start from the
-%% driver would wait on a child the scheduler never releases. Linked, and
-%% then parked for good, so that the server has the one thing a supervisor
-%% gives it here: whatever kills this process takes the server with it, even
-%% a server that has not got as far as registering its name.
+%% Restarts a killed server from inside the schedule. A start from the
+%% driver would wait on a child process that the scheduler never releases.
+%% This process links to the server and then waits indefinitely. The link
+%% gives the server the one property that a supervisor provides here:
+%% whatever kills this process also kills the server, even a server that has
+%% not yet registered its name.
 restart(Config) ->
     ?ETA_LABEL(restarter),
     case peace_server:start_link(Config) of
@@ -78,9 +90,10 @@ restart(Config) ->
             ok
     end.
 
-%% Always retries the answers that mean the request was never submitted.
-%% Anything else, a timeout included, may have been, and is retried only if
-%% `Again': otherwise the client stops and reports the outcome as unknown.
+%% Always retries after an answer that means the request was never
+%% submitted. After any other answer, including a timeout, the request may
+%% have been submitted. Such a request is retried only if `Again' is true.
+%% Otherwise the client stops and reports the outcome as unknown.
 submit(Fun, Attempts, Again) ->
     case Fun() of
         {ok, Reply, _Leader} ->
@@ -97,7 +110,8 @@ submit(Fun, Attempts, Again) ->
             {unknown, Other}
     end.
 
-%% Hands a server a protocol message as if `From' had sent it.
+%% Delivers a protocol message to a server as if `From' had sent the
+%% message.
 deliver(To, From, Msg) ->
     ?ETA_LABEL(rumour),
     _ = erlang:send(To, {peace_msg, From, Msg}, [noconnect]),

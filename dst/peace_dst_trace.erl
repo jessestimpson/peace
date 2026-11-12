@@ -1,59 +1,86 @@
-%% Trace validation: a simulated run, restated as a behaviour of
-%% `formal/FlexiblePaxos.tla' for TLC to accept or reject.
+%% This module implements trace validation. The module converts a simulated
+%% run into a behaviour of `formal/FlexiblePaxos.tla'. TLC then accepts or
+%% rejects the behaviour.
 %%
-%% The model is checked exhaustively, but of itself. The simulation checks
-%% the code, but against invariants. This is the link between them: every
-%% change a server makes to what it has promised and accepted has to be a
-%% step the model allows, in the state the model is in by then.
+%% TLC checks the model exhaustively, but that check covers only the model.
+%% The simulation checks the code, but only against invariants. Trace
+%% validation connects the model and the code. Every change that a server
+%% makes to its promise and to its accepted entries must be a step that the
+%% model allows in the state that the model has reached at that point.
 %%
-%% == How ==
+%% == Method ==
 %%
-%% A server in a test build reports each step of its core: the event, the
-%% core before and after, the effects (`peace_server', `test_tracer'). From a
-%% run's steps, in order, `actions/2' derives the model's actions. It does
-%% not ask the code which action it thinks it took. It looks at what changed
-%% in the durable state (`promised', the log, the snapshot index) and what
-%% was sent, and names the actions that would account for it:
+%% A server in a test build reports each step of its core (`peace_server',
+%% `test_tracer'). A report contains:
 %%
 %% <ul>
-%% <li>a `prepare' sent in a new epoch is `Prepare'; a promise that rose is
-%%   `Promise';</li>
-%% <li>an entry stored under the server's own epoch is `Propose' and its own
-%%   `Accept'; indexes named in an `accept' it sent are `Accept';</li>
-%% <li>an entry that became `learned' is `LeaderLearn' if the server leads
-%%   the epoch the entry was held under, `FollowerCommit' if it followed a
-%%   `propose', and `CatchUp' if it came by `learned', `install' or a
-%%   promise;</li>
-%% <li>a snapshot index that rose is `Snapshot' for each index it covers;</li>
-%% <li>a `propose' sent with a commit index is `SendCommit' for the indexes
-%%   of that epoch it covers.</li>
+%% <li>the event;</li>
+%% <li>the core before the step;</li>
+%% <li>the core after the step;</li>
+%% <li>the effects.</li>
 %% </ul>
 %%
-%% Anything else that changed (a promise that fell, an entry that vanished
-%% above the snapshot) is `Invalid', which the model never allows. After the
-%% last action of each step the trace carries what the server then held, and
-%% the trace spec (`formal/TraceFlexiblePaxos.tla') requires the model's
-%% `promised' and `accepted' to say the same.
-%%
-%% TLC then has one behaviour to find. Each action must be enabled when its
-%% turn comes: a `LeaderLearn' needs the model to hold accepts from a
-%% phase-two quorum, a `Propose' needs a phase-one quorum of promises whose
-%% reports allow the value, a `SendCommit' needs a leader that has not been
-%% contradicted, and so on.
-%%
-%% == What it does not show ==
+%% `actions/2' derives the actions of the model from the steps of a run, in
+%% order. `actions/2' does not use any statement by the code about which
+%% action the code took. `actions/2' examines the change in the durable
+%% state (`promised', the log, the snapshot index) and the messages that
+%% were sent, and names the actions that explain the change:
 %%
 %% <ul>
-%% <li>The model's messages are every message sent, so an action is allowed
-%%   if the messages that justify it were sent, whether or not this server
-%%   had received them. A leader that counted a quorum it had not heard from
-%%   would pass if the quorum had spoken.</li>
-%% <li>A promise raised by a heartbeat is put to the model as `Promise',
-%%   which there sends a promise message the code did not send.</li>
-%% <li>Only what the model has: no membership change, leases, sessions,
-%%   pre-votes or client replies.</li>
-%% <li>The rumour of the churn workload names a sender that may not hold the
-%%   entries; `CatchUp' is taken from any server that does.</li>
+%% <li>A `prepare' sent in a new epoch is `Prepare'.</li>
+%% <li>A promise that increased is `Promise'.</li>
+%% <li>An entry stored under the epoch of the server itself is `Propose'
+%%   and the `Accept' of that server.</li>
+%% <li>Each index named in an `accept' that the server sent is
+%%   `Accept'.</li>
+%% <li>An entry that became `learned' is one of:
+%%   <ul>
+%%   <li>`LeaderLearn', if the server leads the epoch that the entry was
+%%     held under;</li>
+%%   <li>`FollowerCommit', if the entry followed a `propose';</li>
+%%   <li>`CatchUp', if the entry arrived in a `learned', an `install' or a
+%%     promise.</li>
+%%   </ul></li>
+%% <li>A snapshot index that increased is `Snapshot' for each index that
+%%   the snapshot index covers.</li>
+%% <li>A `propose' sent with a commit index is `SendCommit' for the indexes
+%%   of that epoch that the commit index covers.</li>
+%% </ul>
+%%
+%% Any other change is `Invalid', which the model never allows. Examples are
+%% a promise that decreased and an entry that disappeared above the
+%% snapshot. The last action of each step carries the state that the server
+%% held after the step. The trace spec (`formal/TraceFlexiblePaxos.tla')
+%% requires `promised' and `accepted' in the model to equal that state.
+%%
+%% TLC then has one behaviour to find. Each action must be enabled at its
+%% position in the trace. For example:
+%%
+%% <ul>
+%% <li>`LeaderLearn' requires that the model holds accepts from a phase-two
+%%   quorum.</li>
+%% <li>`Propose' requires a phase-one quorum of promises whose reports allow
+%%   the value.</li>
+%% <li>`SendCommit' requires a leader that has not been contradicted.</li>
+%% </ul>
+%%
+%% == Limitations ==
+%%
+%% <ul>
+%% <li>The messages of the model are all messages that were ever sent. The
+%%   model therefore allows an action if the messages that justify the
+%%   action were sent, whether or not this server had received them. A
+%%   leader that counted a quorum without having received the messages of
+%%   that quorum would pass validation if the members of the quorum had sent
+%%   the messages.</li>
+%% <li>A promise that a heartbeat raised is given to the model as `Promise'.
+%%   In the model, `Promise' sends a promise message. The code did not send
+%%   that message.</li>
+%% <li>Validation covers only what the model contains. The model has no
+%%   membership change, leases, sessions, pre-votes or client replies.</li>
+%% <li>The rumour operation of the churn workload names a sender that may
+%%   not hold the entries. `CatchUp' is taken from any server that holds the
+%%   entries.</li>
 %% </ul>
 -module(peace_dst_trace).
 
@@ -63,10 +90,10 @@
 -define(NO_EPOCH, {0, none}).
 
 %% ---------------------------------------------------------------------------
-%% Recording: called by the server's tracer, inside the run
+%% Recording. The tracer of the server calls these functions during the run.
 %% ---------------------------------------------------------------------------
 
-%% What of an event the derivation needs.
+%% Returns the parts of an event that the derivation needs.
 event({msg, Peer, {propose, Epoch, _Entries, Commit, _Stamp}}) ->
     {propose, Peer, Epoch, Commit};
 event({msg, Peer, {promise, Epoch, Entries, _Snap}}) ->
@@ -80,8 +107,8 @@ event(init) ->
 event(_Other) ->
     other.
 
-%% A server's durable state, and the epoch it is running as candidate or
-%% leader.
+%% Returns the durable state of a server, and the epoch in which the server
+%% is running as candidate or leader.
 view(undefined) ->
     undefined;
 view(Core) ->
@@ -105,7 +132,7 @@ sends(Effects) ->
         )
     ).
 
-%% The steps a run left in its trace table, in order.
+%% Returns the steps that a run recorded in its trace table, in order.
 steps(Table) ->
     lists:sort([Step || Step <- ets:tab2list(Table), is_integer(element(1, Step))]).
 
@@ -113,19 +140,24 @@ steps(Table) ->
 %% Deriving the model's actions
 %% ---------------------------------------------------------------------------
 
-%% One action is a map: `act', its arguments among `a', `b', `s', `v' and
-%% `from' as the code has them, the step it came from, and on the last
-%% action of a step, `chk'.
+%% One action is a map that contains:
+%%   - `act';
+%%   - the arguments of the action, among `a', `b', `s', `v' and `from', as
+%%     the code represents them;
+%%   - the step that the action came from;
+%%   - `chk', on the last action of a step only.
 actions(Steps, Ids) ->
     St0 = #{
         ids => Ids,
-        %% Per server: what the model holds for it, as far as this needs.
+        %% `shadow' holds, for each server, the part of the state of the
+        %% model for that server that the derivation needs.
         shadow => maps:from_list([{Id, #{promised => ?NO_EPOCH, log => #{}, snap => 0, learned => #{}}} || Id <- Ids]),
         prepared => #{},
         proposed => #{},
         commits => #{},
-        %% Per candidate and epoch: who promised, and the indexes each
-        %% reported decided.
+        %% `promises' holds, for each candidate and epoch, the servers that
+        %% promised and the indexes that each of those servers reported as
+        %% decided.
         promises => #{},
         acc => []
     },
@@ -158,14 +190,15 @@ step({N, Id, Event, Before, After, Sends}, St0) ->
     ],
     St2 = lists:foldl(fun(F, St) -> F(St) end, St1, Pipeline),
     St3 = unexplained(Id, After, Mark, St2),
-    %% From here the model is held to what the server holds.
+    %% From this point, the model is required to hold the same state as the
+    %% server holds.
     Sh = shadow(Id, St3),
     Learned = maps:merge(maps:get(learned, Sh), maps:from_list([{I, true} || {I, {learned, _}} <- maps:to_list(Log)])),
     St4 = put_shadow(Id, Sh#{promised := Promised, log := Log, snap := Snap, learned := Learned}, St3),
     stamp(N, Id, After, Mark, St4).
 
-%% The step's number on each of its actions, and what the server holds on
-%% the last.
+%% Puts the number of the step on each action of the step, and puts the
+%% state that the server holds on the last action of the step.
 stamp(N, Id, #{promised := Promised, log := Log}, Mark, St = #{acc := Acc}) ->
     {New, Old} = lists:split(length(Acc) - Mark, Acc),
     case [A#{step => N} || A <- New] of
@@ -207,8 +240,9 @@ raise(Id, Promised, St) ->
         false -> St
     end.
 
-%% The snapshot index covers more: each index newly under it is dropped, and
-%% one this server never learned came with an `install'.
+%% The snapshot index increased. The server dropped each index that the
+%% snapshot index newly covers. If the server never learned one of those
+%% indexes, the index arrived with an `install'.
 snapshot(Id, Event, Snap, St0) ->
     #{snap := Old} = shadow(Id, St0),
     case Snap < Old of
@@ -230,7 +264,7 @@ snapshot(Id, Event, Snap, St0) ->
             )
     end.
 
-%% An entry above the snapshot is never given up.
+%% A server never removes an entry above the snapshot.
 vanished(Id, Log, Snap, St0) ->
     #{log := Old} = shadow(Id, St0),
     lists:foldl(
@@ -239,8 +273,9 @@ vanished(Id, Log, Snap, St0) ->
         [I || I <- lists:sort(maps:keys(Old)), I > Snap, not is_map_key(I, Log)]
     ).
 
-%% An accepted `propose': Accept for each index acknowledged, then
-%% FollowerCommit for each entry that became decided.
+%% The server accepted a `propose'. The actions are Accept for each index
+%% that the server acknowledged, then FollowerCommit for each entry that
+%% became decided.
 entries(Id, {propose, Peer, Epoch, _Commit}, _Own, Log, _Snap, Sends, St0) ->
     case [Indexes || {accept, To, E, Indexes} <- Sends, To =:= Peer, E =:= Epoch] of
         [] ->
@@ -259,7 +294,8 @@ entries(Id, {learned, Peer}, _Own, Log, _Snap, _Sends, St0) ->
         St0,
         newly_learned(Id, Log, St0)
     );
-%% Anything else is this server acting as proposer, or not at all.
+%% On any other event, this server either acts as proposer or takes no
+%% action.
 entries(Id, _Event, Own, Log, Snap, _Sends, St0) ->
     #{log := Old} = shadow(Id, St0),
     lists:foldl(
@@ -314,8 +350,10 @@ commits(Sends, St0 = #{proposed := Proposed}) ->
         [{Epoch, Commit} || {propose, Epoch, Commit} <- Sends]
     ).
 
-%% A step that changed what a server holds and that nothing above accounts
-%% for would otherwise pass unseen: no action, so nothing checked.
+%% Emits `Invalid' for a step that changed the state that a server holds
+%% when no function above produced an action for the change. Without this
+%% function such a step would not be checked, because a step with no action
+%% carries no check.
 unexplained(Id, #{promised := Promised, log := Log, snap := Snap}, Mark, St = #{acc := Acc}) ->
     #{promised := P0, log := L0, snap := S0} = shadow(Id, St),
     Kept = maps:filter(fun(I, _) -> I > Snap end, L0),
@@ -335,8 +373,9 @@ reported(Id, Epoch, I, #{promises := Promises}) ->
         [] -> none
     end.
 
-%% Whom to copy a decided index from: the sender if it has it, or anybody
-%% who does.
+%% Returns the server to copy a decided index from. This server is the
+%% sender if the sender holds the index, and otherwise any server that holds
+%% the index.
 source(Peer, I, St = #{ids := Ids}) ->
     case [Id || Id <- [Peer | Ids], lists:member(Id, Ids), is_learned(Id, I, St)] of
         [Id | _] -> Id;
@@ -352,7 +391,8 @@ shadow(Id, #{shadow := Shadow}) ->
 put_shadow(Id, Sh, St = #{shadow := Shadow}) ->
     St#{shadow := Shadow#{Id := Sh}}.
 
-%% Appends an action and does to the shadow what the model's action does.
+%% Appends an action, and applies to the shadow the change that the action
+%% makes in the model.
 emit(Action, St0 = #{acc := Acc}) ->
     St = St0#{acc := [Action | Acc]},
     case Action of
@@ -385,7 +425,7 @@ learn(Id, I, St) ->
         _ -> St
     end.
 
-%% How many of each action a trace has.
+%% Returns the number of occurrences of each action in a trace.
 counts(Actions) ->
     lists:foldl(fun(#{act := Act}, Acc) -> maps:update_with(Act, fun(N) -> N + 1 end, 1, Acc) end, #{}, Actions).
 
@@ -393,9 +433,10 @@ counts(Actions) ->
 %% Writing the trace for TLC
 %% ---------------------------------------------------------------------------
 
-%% Writes `TraceData.tla', the module `formal/TraceFlexiblePaxos.tla'
-%% extends, into `Dir', with `events.txt' beside it for a person: the same
-%% actions, numbered as TLC will number them, in the code's own terms.
+%% Writes `TraceData.tla' into `Dir'. `TraceData.tla' is the module that
+%% `formal/TraceFlexiblePaxos.tla' extends. Also writes `events.txt' into
+%% `Dir' for a human reader. `events.txt' lists the same actions, numbered
+%% as TLC numbers them, in the terms that the code uses.
 write(Dir, Actions, Ids, Quorum) ->
     Epochs = lists:usort(
         [E || #{b := E} <- Actions] ++
@@ -484,7 +525,8 @@ set(Items) -> ["{", lists:join(", ", Items), "}"].
 
 tuple(Items) -> ["<<", lists:join(", ", Items), ">>"].
 
-%% Every set of members that is a quorum, by asking `peace_quorum'.
+%% Returns every set of members that is a quorum. `peace_quorum' decides
+%% whether a set is a quorum.
 quorums(Is, Quorum, Ids, Env) ->
     set([set([acceptor(Id, Env) || Id <- Set]) || Set <- subsets(Ids), Is(Quorum, Ids, Set)]).
 

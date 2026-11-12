@@ -2,26 +2,32 @@
 # Run a set of model configs.
 #   usage: check_all.sh [quick|long|soak|all]
 #          check_all.sh hash <Config>
-# quick: a few minutes. long: the configs with tens of millions of states.
-# soak: hours. See README.md for how long each took.
+# - quick takes a few minutes.
+# - long runs the configs with millions of states. It takes about 2 hours.
+# - soak takes hours.
+# README.md gives the time that each config took.
 #
-# A config whose inputs have not changed since it last behaved as expected is
-# not run again: TLC's answer depends on the model and the config and nothing
-# else. The inputs are the config and the two modules it instantiates, without
-# their comments, check.sh and the name of the jar; checked.tsv records a
-# hash of them beside each result. FORCE=1 runs everything regardless. Each run's output is left in
+# The script skips a config if the inputs of the config have not changed
+# since the config last gave the expected result. The result of TLC depends
+# only on the model and the config. The inputs are:
+# - the config and the two modules it uses, without comments
+# - check.sh, without comments
+# - the name of the jar
+# checked.tsv records a hash of the inputs beside each result. FORCE=1 runs
+# every config in the set. The output of each run is kept in
 # logs/<Config>.log.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 QUICK_PASS="FPaxosMajority FPaxosSingleton FPaxosAllAboard FPaxosEvenNodes FPaxosSnapshots ReconfigCoLocated"
-# Mutations: each must produce a counterexample.
+# Mutations: each config must produce a counterexample.
 QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown FPaxosNoSnapshotGuard ReconfigNoJoint ReconfigCoLocatedNoJoint ReconfigCoLocatedNoClosure"
-# Reachability: each must reach the state its invariant denies.
+# Reachability: each config must reach the state that the invariant of the
+# config says is never reached.
 QUICK_REACH="FPaxosReachableDecided FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict FPaxosReachableSnapshot ReconfigCoLocatedReachableFinal ReconfigCoLocatedReachableRaised ReconfigReachableAfterFinal"
 LONG_PASS="FPaxosThreeEpochs FPaxosGrid FPaxosFiveAcceptors FPaxosSingletonTwoIndexes FPaxosMajorityTwoIndexes Reconfig"
-# Membership change with separate roles: a mutation and two reachability
-# checks that take minutes.
+# Membership change with separate roles: one mutation, which takes about 6
+# minutes, and two reachability checks, which take seconds.
 LONG_FAIL="ReconfigNoClosure ReconfigReachableFinal ReconfigReachableRaised"
 SOAK_PASS="ReconfigThreeIndexes"
 
@@ -45,11 +51,11 @@ inputs_hash() { # config
     *) modules="MCFlexiblePaxos.tla FlexiblePaxos.tla" ;;
   esac
   # shellcheck disable=SC2086
-  { uncommented "$1.cfg" $modules; cat check.sh; jar_name; } | shasum -a 256 | cut -c1-16
+  { uncommented "$1.cfg" $modules; grep -v '^[[:space:]]*#' check.sh; jar_name; } | shasum -a 256 | cut -c1-16
 }
 
-# TLA+ and config files without their comments and blank lines, so that a
-# change to a comment does not cost a run. Block comments nest.
+# Print TLA+ and config files without comments and blank lines, so that a
+# change to a comment does not cause a run. Block comments nest.
 uncommented() { # files
   perl -0pe '
     1 while s/\(\*(?:(?!\(\*|\*\)).)*\*\)//s;
@@ -70,8 +76,8 @@ run() { # config expectation
     fi
   fi
   echo "=== $1 (expect $2)"
-  # The whole of TLC's output is kept, so the verdict of a run that took
-  # hours does not depend on whoever was watching it.
+  # The full TLC output is kept in a log file. The result of a run that takes
+  # hours can then be read from the log, and nobody has to watch the run.
   mkdir -p logs
   out="logs/$1.log"
   if ./check.sh "$1" "$2" >|"$out" 2>&1; then

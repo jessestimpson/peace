@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Hold one run of the code against the model.
+# Check one run of the code against the model.
 #   usage: check_trace.sh <dir>
-# <dir> holds TraceData.tla, TraceData.len and events.txt, as written by
-# dst/peace_dst_trace.erl. Exits 0 if the run is a behaviour of
-# FlexiblePaxos.tla. If it is not, prints the action the model refused and
-# exits 1. TLC's output is left in <dir>/tlc.log.
+# <dir> contains TraceData.tla, TraceData.len and events.txt, as written by
+# dst/peace_dst_trace.erl. The script exits 0 if the run is a behaviour of
+# FlexiblePaxos.tla. Otherwise the script prints the first action that the
+# model did not permit and exits 1. The TLC output is kept in <dir>/tlc.log.
 set -euo pipefail
 DIR="$(cd "${1:?usage: check_trace.sh <dir>}" && pwd)"
 cd "$(dirname "$0")"
@@ -20,7 +20,8 @@ META="$(mktemp -d)"
 trap 'rm -rf "$META"' EXIT
 
 set +e
-# One behaviour, so one worker. -deadlock: the behaviour is meant to end.
+# The spec has one behaviour, so TLC uses one worker. -deadlock disables
+# deadlock checking, because the behaviour ends after the last action.
 java -XX:+UseParallelGC -DTLA-Library="$DIR" -cp "$JAR" tlc2.TLC \
   -workers 1 -deadlock -noGenerateSpecTE -metadir "$META" \
   -config TraceFlexiblePaxos.cfg TraceFlexiblePaxos.tla >"$DIR/tlc.log" 2>&1

@@ -1,4 +1,4 @@
-%% The whole thing with real processes, on one node.
+%% These tests run the whole library with real processes on one node.
 -module(peace_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -20,7 +20,8 @@ peace_test_() ->
 
 setup() ->
     {ok, _} = application:ensure_all_started(peace),
-    %% Names are per test so a slow shutdown cannot collide with the next one.
+    %% Each test uses different server names. A slow shutdown in one test
+    %% then cannot collide with the next test.
     Tag = erlang:unique_integer([positive]),
     [{list_to_atom(lists:concat([peace_t, Tag, "_", N])), node()} || N <- lists:seq(1, 5)].
 
@@ -33,14 +34,15 @@ values_and_queries(Ids0) ->
         {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Ids),
         {ok, ok, Leader} = peace:propose(Ids, {put, a, 1}),
-        %% Any member will do: the request follows the redirect.
+        %% A request can be sent to any member. The request follows the
+        %% redirect to the leader.
         [Follower | _] = Ids -- [Leader],
         {ok, 1, Leader} = peace:propose(Follower, {get, a}),
         {ok, #{a := 1}, Leader} = peace:consistent_query(Follower, fun(#{kv := KV}) -> KV end),
         {ok, Ids, Leader} = peace:members(Leader),
         ok = peace:propose_async(Leader, {put, b, 2}),
         {ok, 2, Leader} = peace:propose(Leader, {get, b}),
-        %% Followers converge on the same history.
+        %% Every server, the leader included, converges on the same history.
         Histories = await(fun() ->
             Hs = [history(Id) || Id <- Ids],
             case lists:usort(Hs) of
@@ -63,9 +65,10 @@ leader_failover(Ids0) ->
         Rest = Ids -- [Leader],
         NewLeader = await_leader(Rest),
         ?assertNotEqual(Leader, NewLeader),
-        %% What was acknowledged is still there.
+        %% The value that was acknowledged is still present.
         {ok, 1, NewLeader} = peace:propose(Rest, {get, a}),
-        %% One more down leaves no majority, and nothing is acknowledged.
+        %% Stopping one more server leaves no majority. No value is
+        %% acknowledged.
         [Last] = Rest -- [NewLeader],
         ok = peace:stop_server(NewLeader),
         ?assertMatch(
@@ -74,8 +77,10 @@ leader_failover(Ids0) ->
         )
     end).
 
-%% Five members, {counting, 4, 2}: values commit with three members down,
-%% which a majority system cannot do. The price is at election time.
+%% The cluster has five members and the quorum system {counting, 4, 2}.
+%% Values commit with three members stopped. A majority quorum system cannot
+%% commit values with three of five members stopped. The cost is that an
+%% election needs more members.
 flexible_quorum_survives_what_majority_cannot(Ids) ->
     ?_test(begin
         {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, (fast())#{quorum => {counting, 4, 2}}),
@@ -84,7 +89,8 @@ flexible_quorum_survives_what_majority_cannot(Ids) ->
         [ok = peace:stop_server(F) || F <- [F2, F3, F4]],
         {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
         {ok, 1, Leader} = peace:propose(F1, {get, a}),
-        %% With the leader gone too, one member is nowhere near four promises.
+        %% The leader is stopped as well. One member remains. An election
+        %% needs four promises, so the remaining member cannot be elected.
         ok = peace:stop_server(Leader),
         timer:sleep(400),
         ?assertMatch(#{role := Role} when Role =/= leader, peace:overview(F1))
@@ -103,17 +109,19 @@ durable_restart(Ids0) ->
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
             Leader = await_leader(Ids),
             {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
-            %% The whole cluster goes down and comes back.
+            %% Every server in the cluster is stopped and then started again.
             [ok = peace:stop_server(Id) || Id <- Ids],
             [ok = peace:start_server(Config(Id)) || Id <- Ids],
             NewLeader = await_leader(Ids),
             {ok, 1, NewLeader} = peace:propose(NewLeader, {get, a}),
-            %% Epochs moved on from where they were, not from zero.
+            %% After the restart, epochs continue from the epoch before the
+            %% restart. Epochs do not start again from zero.
             #{promised := {Round, _}} = peace:overview(NewLeader),
             ?assert(Round >= 2)
         end)}.
 
-%% The three together, through the public API and the dets backend.
+%% This test uses sessions, snapshots and leases together, through the
+%% public API and the dets backend.
 sessions_snapshots_and_leases(Ids0) ->
     Ids = lists:sublist(Ids0, 3),
     Dir = filename:join([
@@ -132,16 +140,17 @@ sessions_snapshots_and_leases(Ids0) ->
             Leader = await_leader(Ids),
             Put = fun(N) -> peace:propose(Ids, {put, N, N}, #{session => {me, N}}) end,
             [{ok, ok, Leader} = Put(N) || N <- lists:seq(1, 7)],
-            %% A retry of the last value changes nothing and is answered.
+            %% A retry of the last value changes no state and is answered.
             {ok, ok, Leader} = Put(7),
-            %% Nor does a late copy of an earlier one, which is refused.
+            %% A late copy of an earlier value also changes no state. The
+            %% late copy is refused.
             {error, {session_superseded, 7}} = Put(2),
             #{snapshot_index := Snapshot, sessions := 1} = peace:overview(Leader),
             ?assert(Snapshot >= 6),
-            %% A read under a lease takes no index.
-            %% On a machine too busy to keep the heartbeat the lease lapses
-            %% and the read goes through the log, so look for one that
-            %% did not.
+            %% A read under a lease uses no index.
+            %% On a computer that is too busy to send heartbeats on time,
+            %% the lease ends and the read goes through the log. The test
+            %% therefore retries until one read uses no index.
             ok = await(fun() ->
                 #{last_index := Before} = peace:overview(Leader),
                 {ok, 7, Leader} = peace:consistent_query(Leader, fun(#{kv := KV}) -> map_size(KV) end),
@@ -150,17 +159,18 @@ sessions_snapshots_and_leases(Ids0) ->
                     _ -> retry
                 end
             end),
-            %% Everybody restarts from a snapshot and the tail of the log.
+            %% Every server restarts from a snapshot and the log entries
+            %% after the snapshot.
             [ok = peace:stop_server(Id) || Id <- Ids],
             [ok = peace:start_server(Config(Id)) || Id <- Ids],
             NewLeader = await_leader(Ids),
             {ok, 7, NewLeader} = peace:consistent_query(Ids, fun(#{kv := KV}) -> map_size(KV) end),
-            %% The session table came back too.
+            %% The restart also recovered the session table.
             {ok, ok, NewLeader} = Put(7),
             {ok, 7, NewLeader} = peace:propose(NewLeader, {get, 7})
         end)}.
 
-%% One server out and one in, on real processes.
+%% This test removes one server and adds one server, with real processes.
 change_members(Ids0) ->
     [A, B, C, D | _] = Ids0,
     Old = [A, B, C],
@@ -168,18 +178,20 @@ change_members(Ids0) ->
         {ok, Old, []} = peace:start_cluster(Old, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Old),
         {ok, ok, Leader} = peace:propose(Old, {put, a, 1}),
-        %% The newcomer is told who the cluster is, and waits.
+        %% The new server is started with the members of the cluster. The
+        %% new server then waits.
         ok = peace:start_server((fast())#{id => D, members => Old, machine => ?TEST_MACHINE}),
         [Gone | Stay] = [Leader | Old -- [Leader]],
         New = lists:sort([D | Stay]),
         {ok, ok, Leader} = peace:change_members(Old, New, majority),
-        %% The leader removed itself, saw it through and stood down.
+        %% The change removed the leader. The leader completed the change
+        %% and then stopped leading.
         NewLeader = await_leader(New),
         ?assert(lists:member(NewLeader, New)),
         {ok, New, NewLeader} = peace:members(NewLeader),
         ok = peace:stop_server(Gone),
         {ok, 1, NewLeader} = peace:propose(New, {get, a}),
-        %% The newcomer has the history from before it arrived.
+        %% The new server has the history from before the new server joined.
         ok = await(fun() ->
             case history(D) of
                 [{_, {put, a, 1}}, {_, {get, a}}] -> {ok, ok};
@@ -194,11 +206,13 @@ machine_effects(Ids0) ->
         Self = self(),
         {ok, Ids, []} = peace:start_cluster(Ids, {module, peace_test_machine, #{notify => Self}}, ?FAST),
         Leader = await_leader(Ids),
-        %% state_enter runs on every server as its role changes.
+        %% state_enter runs on every server when the role of the server
+        %% changes.
         ok = receive_all([{state_enter, follower}, {state_enter, candidate}, {state_enter, leader}]),
         {ok, ok, Leader} = peace:propose(Leader, {tell, Self, hello}),
         ?assertEqual({told, hello}, receive_told()),
-        %% Applied on three servers, performed by one.
+        %% Three servers apply the value. Only one server performs the
+        %% effect.
         ?assertEqual(none, receive_told())
     end).
 
@@ -209,7 +223,8 @@ unsafe_quorum_is_refused(Ids0) ->
             {error, {invalid_quorum, {quorums_do_not_intersect, _}}},
             peace:start_cluster(Ids, ?TEST_MACHINE, #{quorum => {counting, 2, 1}})
         ),
-        %% The server checks for itself, whoever starts it.
+        %% peace_server also validates the quorum system, regardless of
+        %% which caller starts the server.
         process_flag(trap_exit, true),
         ?assertMatch(
             {error, {invalid_quorum, _}},
@@ -226,7 +241,8 @@ await_leader(Ids) ->
         Leaders = [Id || Id <- Ids, is_leader(Id)],
         case Leaders of
             [Leader] ->
-                %% Stable only once everybody running agrees.
+                %% The leader is stable only when every running server
+                %% reports the same leader.
                 Views = [L || Id <- Ids, {ok, _, L} <- [peace:members(Id, 200)]],
                 case lists:usort(Views) of
                     [Leader] -> {ok, Leader};

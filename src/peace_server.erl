@@ -1,13 +1,20 @@
-%% @doc One member of a peace cluster: the process around `peace_core'.
+%% @doc One member of a peace cluster. This module is the process that runs
+%% `peace_core'.
 %%
-%% The core decides; this module does what it decided. It owns the storage
-%% handle, the timers and the mailbox, turns calls, casts and timeouts into
-%% core events, and performs the effects that come back.
+%% `peace_core' computes the effects. This module performs them. This
+%% module:
 %%
-%% The one rule that matters here is ordering: everything the core asked to
-%% persist is written before anything it asked to send. A promise or an
-%% acceptance that reached a peer and then did not survive a restart is the
-%% failure Paxos cannot absorb.
+%% <ul>
+%% <li>owns the storage handle, the timers and the mailbox,</li>
+%% <li>converts calls, casts and timeouts into `peace_core' events, and</li>
+%% <li>performs the effects that `peace_core' returns.</li>
+%% </ul>
+%%
+%% The important rule in this module is about ordering. This module writes
+%% everything that `peace_core' asked to persist before it sends anything
+%% that `peace_core' asked to send. Paxos does not tolerate the failure in
+%% which a promise or an acceptance reaches a peer and is then lost in a
+%% restart.
 -module(peace_server).
 
 -behaviour(gen_server).
@@ -20,7 +27,8 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export_type([step/0]).
 
-%% What a simulated run's log says this server did, one line per event.
+%% In a simulated run, this macro writes one line to the run's log for each
+%% event that this server handles.
 -ifdef(DST).
 -define(TRACE(Event, Core),
     ?ETA_LOG({peace, peace_core:id(Core), log_event(Event), peace_core:role(Core)})
@@ -44,16 +52,20 @@ log_event(Event) -> Event.
     election_ms :: pos_integer(),
     heartbeat_ms :: pos_integer(),
     timers = #{} :: #{election | heartbeat => reference()},
-    %% Nodes a connection attempt is in flight to. See `send/3'.
+    %% The nodes to which a connection attempt is in progress. See `send/3'.
     connecting = #{} :: #{node() => reference()},
-    %% Told every step the core takes. Only ever set in a test build: see
-    %% `tracer/1'.
+    %% A function that is called with every step of `peace_core'. It is set
+    %% only in a test build. See `tracer/1'.
     tracer :: undefined | fun((step()) -> term())
 }).
 
-%% One step of the core, for trace validation against the TLA+ model: the
-%% event (`init' on start), the core before (`undefined' on start) and
-%% after, and the effects, all of which have been performed.
+%% One step of `peace_core', for trace validation against the TLA+ model.
+%% A step contains:
+%%   - the id of the server,
+%%   - the event (`init' on start),
+%%   - the core state before the event (`undefined' on start),
+%%   - the core state after the event, and
+%%   - the effects. All of the effects have been performed.
 -type step() ::
     {peace:server_id(), init | peace_core:event(), undefined | peace_core:core(), peace_core:core(), [
         peace_core:effect()
@@ -67,7 +79,8 @@ log_event(Event) -> Event.
 start_link(Config = #{id := {Name, _Node}}) ->
     gen_server:start_link({local, Name}, ?MODULE, Config, []).
 
-%% @doc Unlinked start, for callers that are not supervisors.
+%% @doc Starts a server without a link to the caller. This function is for
+%% callers that are not supervisors.
 -spec start(peace:server_config()) -> {ok, pid()} | {error, term()}.
 start(Config = #{id := {Name, _Node}}) ->
     gen_server:start({local, Name}, ?MODULE, Config, []).
@@ -141,7 +154,7 @@ handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
                 end,
             {noreply, event(Event, State#state{timers = maps:remove(Timer, Timers)})};
         _ ->
-            %% Cancelled or replaced after it fired.
+            %% The timer was cancelled or replaced after it fired.
             {noreply, State}
     end;
 handle_info({peace_msg, Peer, Msg}, State) ->
@@ -160,7 +173,10 @@ terminate(_Reason, #state{storage_mod = Mod, storage = Storage}) ->
 %% ---------------------------------------------------------------------------
 
 -ifdef(TEST).
-%% A test build may ask for a broken cluster on purpose.
+%% A test build may set `unsafe_no_quorum_check', to start a cluster that
+%% is deliberately broken. The setting skips all of `check_quorum1/2': the
+%% validation of the quorum system and the check of the bound on
+%% `read_lease_ms'.
 check_quorum(#{unsafe_no_quorum_check := true}, _Members) -> ok;
 check_quorum(Config, Members) -> check_quorum1(Config, Members).
 -else.
@@ -170,8 +186,9 @@ check_quorum(Config, Members) -> check_quorum1(Config, Members).
 check_quorum1(Config, Members) ->
     Election = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
     case Config of
-        %% Not for safety: a follower bound for longer than it waits before
-        %% campaigning would only wait again.
+        %% This limit is not needed for safety. With a longer lease, a
+        %% follower would still be bound by the lease when its election
+        %% timeout expired, and the follower would only wait again.
         #{read_lease_ms := Lease} when not is_integer(Lease); Lease < 1; Lease > Election ->
             {error, {read_lease_must_not_exceed_election_timeout, Lease, Election}};
         _ ->
@@ -185,8 +202,9 @@ event(Event, State = #state{core = Core0}) ->
     ok = trace(State1, {peace_core:id(Core), Event, Core0, Core, Effects}),
     State1.
 
-%% A test build may ask to be told each step, once it has been performed, so
-%% that a run can be checked against the model: see `dst/peace_dst_trace'.
+%% A test build may supply a function that is called with each step, after
+%% the step has been performed. A test uses the function to check a run
+%% against the model. See `dst/peace_dst_trace'.
 -ifdef(TEST).
 tracer(Config) -> maps:get(test_tracer, Config, undefined).
 
@@ -201,7 +219,8 @@ tracer(_Config) -> undefined.
 trace(_State, _Step) -> ok.
 -endif.
 
-%% Persist first, in one write, then everything else in the order given.
+%% Performs the persist effects first, in one write. Then performs every
+%% other effect in the order given.
 perform(Effects, State0) ->
     {Batches, Rest} = lists:partition(fun(E) -> element(1, E) =:= persist end, Effects),
     State1 = persist([Batch || {persist, Batch} <- Batches], State0),
@@ -213,8 +232,11 @@ persist(Batches, State = #state{storage_mod = Mod, storage = Storage0}) ->
     {ok, Storage} = peace_storage:write(Mod, lists:foldl(fun merge_batch/2, #{}, Batches), Storage0),
     State#state{storage = Storage}.
 
-%% Later batches win, index by index, and a snapshot takes out of the write
-%% every entry it covers.
+%% Merges one batch into the write.
+%%   - A later batch overrides an earlier batch. For entries, the later
+%%     batch overrides the earlier batch index by index.
+%%   - A snapshot removes from the write every entry that the snapshot
+%%     covers.
 merge_batch(Batch, Acc0) ->
     Acc1 = maps:merge(Acc0, maps:with([promised, snapshot], Batch)),
     Entries = maps:merge(
@@ -249,11 +271,14 @@ effect({machine, Effects}, State) ->
     State.
 
 %% A server must not wait on the network. A plain send to a node that is not
-%% connected blocks the sender while the connection is set up, for seconds if
-%% the node is down, and `gen_server:cast/2' avoids that by spawning a process
-%% per message. Here the message is simply dropped, which the protocol already
-%% tolerates since everything is retransmitted on the heartbeat, and one
-%% process per unreachable node goes off to connect.
+%% connected blocks the sender while the connection is set up. If the node is
+%% down, the sender is blocked for seconds. `gen_server:cast/2' avoids the
+%% block by spawning a process per message. This function does the following
+%% instead:
+%%   - It drops the message. The protocol already tolerates a dropped
+%%     message, because everything is retransmitted on the heartbeat.
+%%   - It spawns one process per unreachable node. That process connects to
+%%     the node.
 send(To = {_Name, Node}, Msg, State = #state{connecting = Connecting}) ->
     case catch erlang:send(To, Msg, [noconnect]) of
         noconnect when not is_map_key(Node, Connecting) ->
@@ -263,13 +288,15 @@ send(To = {_Name, Node}, Msg, State = #state{connecting = Connecting}) ->
             State
     end.
 
-%% Module-qualified, so that a simulation can put its own clock behind it.
-%% The rate is 1 except in a test build that asks for a clock that drifts.
+%% The call to `erlang:monotonic_time/1' is module-qualified, so that a
+%% simulation can substitute its own clock. The rate is 1, except in a test
+%% build that configures a clock that drifts.
 now_ms({Num, Den}) ->
     erlang:monotonic_time(millisecond) * Num div Den.
 
-%% Read leases assume clocks that run at nearly the same rate. A test build
-%% can give a server one that does not, to test that assumption's margin.
+%% Read leases assume that the servers' clocks run at nearly the same rate.
+%% A test build can give a server a clock that runs at a different rate, to
+%% test the margin of that assumption.
 -ifdef(TEST).
 clock_rate(Config) -> maps:get(test_clock_rate, Config, {1, 1}).
 -else.
@@ -285,8 +312,9 @@ cancel(Timer, State = #state{timers = Timers}) ->
             State
     end.
 
-%% Election timeouts are randomised over [T, 2T) so that followers which lose
-%% their leader together do not keep splitting the vote.
+%% Election timeouts are randomised over [T, 2T). The randomisation prevents
+%% followers that lose their leader at the same time from splitting the vote
+%% repeatedly.
 duration(election, #state{election_ms = Ms}) -> Ms + rand:uniform(Ms) - 1;
 duration(heartbeat, #state{heartbeat_ms = Ms}) -> Ms.
 

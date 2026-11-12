@@ -8,9 +8,9 @@ majority_test() ->
     ?assertEqual(ok, peace_quorum:validate(majority, ?M(5))),
     ?assert(peace_quorum:is_phase_one_quorum(majority, ?M(5), [1, 2, 3])),
     ?assertNot(peace_quorum:is_phase_two_quorum(majority, ?M(5), [1, 2])),
-    %% Half is not a majority.
+    %% Half of the members is not a majority.
     ?assertNot(peace_quorum:is_phase_two_quorum(majority, ?M(4), [1, 2])),
-    %% Strangers and duplicates do not count.
+    %% Non-members and duplicates are not counted.
     ?assertNot(peace_quorum:is_phase_one_quorum(majority, ?M(5), [1, 1, 2, 9, 10])).
 
 counting_test() ->
@@ -29,12 +29,13 @@ counting_must_intersect_test() ->
         {error, {quorum_size_out_of_range, _, 3}},
         peace_quorum:validate({counting, 4, 1}, ?M(3))
     ),
-    %% All for phase one buys single-member replication.
+    %% When phase one needs all members, phase two can use a single member.
     ?assertEqual(ok, peace_quorum:validate({counting, 3, 1}, ?M(3))).
 
-%% The thesis's named points on the counting line (sections 4.3.2, 4.3.3).
+%% The counting quorum systems that the thesis names (sections 4.3.2, 4.3.3).
 named_counting_systems_test() ->
-    %% Even nodes: half the cluster commits, where a majority needs one more.
+    %% An even number of nodes: half of the cluster commits a value. A
+    %% majority needs one more node.
     Even = {counting, 3, 2},
     ?assertEqual(ok, peace_quorum:validate(Even, ?M(4))),
     ?assert(peace_quorum:is_phase_two_quorum(Even, ?M(4), [1, 2])),
@@ -45,9 +46,11 @@ named_counting_systems_test() ->
     ?assert(peace_quorum:is_phase_one_quorum({counting, 1, 5}, ?M(5), [3])),
     ?assertNot(peace_quorum:is_phase_two_quorum({counting, 1, 5}, ?M(5), [1, 2, 3, 4])).
 
-%% The thesis's running example for revision A (section 4.1.3): four
-%% acceptors, phase one on rows and phase two on columns, or the other way round.
-%% Either is a grid here, and the minimum the intersection rule allows.
+%% The example that the thesis uses for revision A (section 4.1.3). The
+%% example has four acceptors. Phase one uses rows and phase two uses
+%% columns, or phase one uses columns and phase two uses rows. In peace,
+%% either arrangement is a grid. Either arrangement is the minimum that the
+%% intersection rule allows.
 thesis_grid_example_test() ->
     Spec = {grid, [[a1, a3], [a2, a4]]},
     Members = [a1, a2, a3, a4],
@@ -62,11 +65,12 @@ grid_test() ->
     Rows = [[1, 2, 3], [4, 5, 6]],
     Spec = {grid, Rows},
     ?assertEqual(ok, peace_quorum:validate(Spec, ?M(6))),
-    %% Phase two: one whole row. Two rows are disjoint and both are quorums.
+    %% A phase-two quorum is one whole row. The two rows are disjoint and
+    %% each row is a quorum.
     ?assert(peace_quorum:is_phase_two_quorum(Spec, ?M(6), [1, 2, 3])),
     ?assert(peace_quorum:is_phase_two_quorum(Spec, ?M(6), [4, 5, 6])),
     ?assertNot(peace_quorum:is_phase_two_quorum(Spec, ?M(6), [1, 2, 4, 5])),
-    %% Phase one: one from every row.
+    %% A phase-one quorum is one member from every row.
     ?assert(peace_quorum:is_phase_one_quorum(Spec, ?M(6), [3, 4])),
     ?assertNot(peace_quorum:is_phase_one_quorum(Spec, ?M(6), [1, 2, 3])),
     ?assertMatch(

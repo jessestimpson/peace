@@ -2,22 +2,26 @@
 # Check the inductive invariant of FlexiblePaxosInd.tla with Apalache.
 #   usage: check_ind.sh <ConstInit> [init|step|safe]...
 #          check_ind.sh all | refines
-# <ConstInit> is an operator of MCFlexiblePaxosInd.tla, e.g. C3E2I2. With no
-# further argument all three implications are checked:
+# <ConstInit> is an operator of MCFlexiblePaxosInd.tla, for example C3E2I2.
+# With no further argument the script checks all three implications:
 #   init  Init => IndInv
 #   step  IndInv /\ Next => IndInv'
 #   safe  IndInv => Safety, given QuorumIntersection of the constants
-# `all` runs the bounds below, about five minutes, the two instances that
-# are meant to fail, and `refines`: TLC checking that FlexiblePaxosInd.tla is
-# FlexiblePaxos.tla (FPaxosIndRefines.tla).
-# Apalache: $APALACHE, else apalache-mc on the path, else the copy unpacked
-# under _build/apalache-dl by hand (it is not vendored: 190 MB).
+# `all` runs:
+# - the bounds listed below, which take about three minutes
+# - the two sets of constants that must fail
+# - `refines`, in which TLC checks that FlexiblePaxosInd.tla is the same
+#   protocol as FlexiblePaxos.tla (FPaxosIndRefines.tla)
+# Apalache is $APALACHE if it is set, then apalache-mc on the path, then the
+# copy unpacked by hand under _build/apalache-dl. Apalache is not vendored
+# because the release is 190 MB.
 #
-# A check whose inputs have not changed since it last gave the expected
-# result is skipped, as in check_all.sh. The results are in checked_ind.tsv.
-# The inputs are the modules and this script (and the TLC jar, for `refines`). Comments
-# are not stripped, because Apalache reads its type annotations from them.
-# FORCE=1 runs every check.
+# The script skips a check if the inputs of the check have not changed since
+# the check last gave the expected result. check_all.sh does the same. The
+# results are in checked_ind.tsv. The inputs are the modules and this script.
+# For `refines` the TLC jar is also an input. Comments are removed before
+# hashing, except the Apalache type annotations, which are comments that
+# Apalache reads. FORCE=1 runs every check.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -27,10 +31,29 @@ TAB="$(printf '\t')"
 inputs_hash() { # tool, files...
   local tool="$1"
   shift
-  { cat "$@" check_ind.sh; echo "$tool"; } | shasum -a 256 | cut -c1-16
+  {
+    for f in "$@"; do
+      uncommented "$f"
+      grep '@type' "$f" || true
+    done
+    grep -v '^[[:space:]]*#' check_ind.sh
+    echo "$tool"
+  } | shasum -a 256 | cut -c1-16
 }
 
-# Succeeds, and says so, if the ledger has this key with this hash.
+# A TLA+ or config file without its comments and blank lines. Block comments
+# nest. This is the same function as in check_all.sh.
+uncommented() { # file
+  perl -0pe '
+    1 while s/\(\*(?:(?!\(\*|\*\)).)*\*\)//s;
+    s/\\\*[^\n]*//g;
+    s/[ \t]+$//mg;
+    s/\n{2,}/\n/g;
+  ' "$1"
+}
+
+# Returns success and prints a message if the ledger has this key with this
+# hash.
 recorded() { # key hash
   local line
   [ -z "${FORCE:-}" ] && [ -f "$LEDGER" ] || return 1
@@ -50,13 +73,13 @@ record() { # key hash result
 
 IND_FILES="FlexiblePaxosInd.tla MCFlexiblePaxosInd.tla"
 if [ "${1:-}" = all ]; then
-  for C in C3E2I2 C3E3I1 C5E2I1 C3E3I3; do "$0" "$C"; done
-  # Each must fail, and at the named implication.
+  for C in C3E2I2 C3E3I1 C5E2I1 C3E3I3; do ./check_ind.sh "$C"; done
+  # Each set of constants must fail, and must fail at the named implication.
   for PAIR in NoGuard3:step Unsafe3:safe; do
     # shellcheck disable=SC2086
     HASH="$(inputs_hash apalache $IND_FILES)"
     if recorded "$PAIR:fails" "$HASH"; then continue; fi
-    if FORCE=1 "$0" "${PAIR%%:*}" "${PAIR##*:}" >/dev/null 2>&1; then
+    if FORCE=1 ./check_ind.sh "${PAIR%%:*}" "${PAIR##*:}" >/dev/null 2>&1; then
       echo "ERROR: ${PAIR%%:*} ${PAIR##*:} held, and was meant to fail"
       exit 1
     fi
@@ -67,11 +90,12 @@ if [ "${1:-}" = all ]; then
     record "$PAIR:fails" "$HASH" "fails, as it should"
     echo "${PAIR%%:*} ${PAIR##*:}: fails, as it should"
   done
-  "$0" refines
+  ./check_ind.sh refines
   echo "inductive invariant: all as expected"
   exit 0
 fi
-# TLC: FlexiblePaxosInd is FlexiblePaxos, and IndInv holds wherever it goes.
+# TLC checks that FlexiblePaxosInd is the same protocol as FlexiblePaxos, and
+# that IndInv holds in every reachable state.
 if [ "${1:-}" = refines ]; then
   if [ -n "${TLA2TOOLS_JAR:-}" ]; then JAR="$TLA2TOOLS_JAR"; elif [ -f tla2tools.jar ]; then JAR="tla2tools.jar"; else JAR="vendor/tla2tools-v1.8.0.jar"; fi
   HASH="$(inputs_hash "$JAR" FlexiblePaxosInd.tla FlexiblePaxos.tla FPaxosIndRefines.tla FPaxosIndRefines.cfg)"

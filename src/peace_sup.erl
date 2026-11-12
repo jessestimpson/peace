@@ -1,8 +1,13 @@
 %% @doc Supervises every peace server on this node.
 %%
-%% Servers are `transient': one that crashes is restarted and recovers its
-%% promise and log from its storage backend, and one stopped with
-%% `peace:stop_server/1' stays stopped.
+%% The servers are `transient':
+%%
+%% <ul>
+%% <li>A server that crashes is restarted. The restarted server recovers its
+%%   promise and its log from its storage backend.</li>
+%% <li>A server that is stopped with `peace:stop_server/1' stays
+%%   stopped.</li>
+%% </ul>
 -module(peace_sup).
 
 -behaviour(supervisor).

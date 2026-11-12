@@ -1,10 +1,17 @@
-%% @doc Durable storage: one dets file per server, synced on every write.
+%% @doc Durable storage. Each server has one dets file. The file is synced on
+%% every write.
 %%
 %% Args: `#{dir := file:name_all()}'. The file is named after the server.
 %%
-%% This is the simple backend, not the fast one. Every write is a `dets:sync',
-%% so throughput is bounded by the disk's fsync rate, and dets caps a file at
-%% 2 GB. A snapshot is one object, so the machine state has to fit too.
+%% This backend is simple and is not fast.
+%%
+%% <ul>
+%% <li>Every write calls `dets:sync', so throughput is bounded by the fsync
+%%   rate of the disk.</li>
+%% <li>dets limits a file to 2 GB.</li>
+%% <li>A snapshot is one object, so the machine state must also fit in the
+%%   file.</li>
+%% </ul>
 -module(peace_storage_dets).
 
 -behaviour(peace_storage).
@@ -19,8 +26,8 @@
 open({Name, Node}, #{dir := Dir}) ->
     File = filename:join(Dir, lists:concat([Name, "@", Node, ".peace"])),
     ok = filelib:ensure_dir(File),
-    %% An atom, one per server: a dets table may be named by any term, but
-    %% the simulation's stand-in for dets wants an atom.
+    %% The table name is an atom, one per server. dets accepts any term as a
+    %% table name, but the simulation's replacement for dets requires an atom.
     Tab = binary_to_atom(<<"peace_storage_dets/", (atom_to_binary(Name))/binary, "@", (atom_to_binary(Node))/binary>>),
     {ok, Tab} = dets:open_file(Tab, [{file, to_list(File)}, {type, set}, {auto_save, infinity}]),
     Stored = dets:foldl(
@@ -46,8 +53,9 @@ write(Batch, Tab) ->
             {ok, Tab};
         Objects ->
             ok = dets:insert(Tab, Objects),
-            %% After the snapshot is in, not before: a crash in between
-            %% leaves entries the snapshot covers, which are ignored.
+            %% The entries are deleted after the snapshot is inserted, not
+            %% before. A crash between the insert and the delete leaves
+            %% entries that the snapshot covers. Those entries are ignored.
             _ = [
                 dets:select_delete(Tab, [{{'$1', '_'}, [{is_integer, '$1'}, {'=<', '$1', Index}], [true]}])
              || {?SNAPSHOT, {Index, _}} <- Snapshot

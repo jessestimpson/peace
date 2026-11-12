@@ -19,6 +19,9 @@ logs
 rebar3.crashdump
 *~
 
+# edoc output
+doc/
+
 # TLC
 formal/states/
 formal/logs/

@@ -1,71 +1,127 @@
-%% A peace cluster under eta: the harness that starts it, drives it with
-%% clients and faults, and judges it.
+%% This module is the eta harness for a peace cluster. The harness starts the
+%% cluster, runs a workload of client operations and faults against the
+%% cluster, and checks invariants on the cluster.
 %%
-%% == What runs ==
+%% == Simulated system ==
 %%
-%% `servers' (default 3) peace servers on one VM, each a `gen_server' the
-%% scheduler steps and each on a simulated node of its own, with election and
-%% heartbeat timers on the virtual clock and every message between them
-%% through `eta_net', which the run's policy may drop or delay. Clients share
-%% one more node. Their storage is `peace_dst_storage', an ETS table the
-%% harness owns, so a killed server finds its promise and its log again when
-%% it is restarted. That is the fault model `formal/FlexiblePaxos.tla'
-%% assumes: messages are lost, duplicated in effect by retransmission, and
-%% delayed; servers stop and come back with their durable state.
-%%
-%% == The workload ==
-%%
-%% Values and linearizable reads from clients, and when `faults' is on:
-%% cutting a server off from the others, healing every cut, killing a
-%% server, restarting one. A fault is an operation like any other, so it
-%% lands where the seed put it, is recorded in the trace, and replays.
-%%
-%% == What is checked, after every step ==
+%% The harness starts `servers' (default 3) peace servers on one VM.
 %%
 %% <ul>
-%% <li>`storage_matches_memory' - what a server holds in memory as promised
-%%   and accepted is what is on its disk. Since a step ends with the server
-%%   back in its receive loop, having sent whatever it was going to send,
-%%   this is "persist before you reply" observed from outside.</li>
-%% <li>`promise_never_regresses' - a server's durable promise only grows.</li>
-%% <li>`agreement' - no index is ever decided with two values, by anybody, at
-%%   any time in the run. TLA+ `LearnedAgree'.</li>
-%% <li>`applied_matches_decided' - a server's machine has applied exactly the
-%%   decided log up to its commit index, in order, each session's value
-%%   once. The decided log is the harness's own record, so this holds a
-%%   server that was sent a snapshot to the same account as one that
-%%   applied every entry.</li>
-%% <li>`acknowledged_is_decided' - a client told `{ok, Index}' finds its
-%%   value decided at that index.</li>
-%% <li>`applied_once' - no machine has applied a value twice, however many
-%%   indexes a client's retries put it in.</li>
-%% <li>`linearizable_read' - a consistent query returns a prefix of the
-%%   decided log that contains every value acknowledged before the query
-%%   was issued.</li>
+%% <li>Each server is a `gen_server' that the scheduler steps.</li>
+%% <li>Each server runs on a separate simulated node.</li>
+%% <li>The election timers and the heartbeat timers run on the virtual
+%%   clock.</li>
+%% <li>Every message between servers goes through `eta_net'. The network
+%%   policy of the run may drop or delay a message.</li>
+%% <li>All clients share one additional node.</li>
+%% <li>The storage of each server is `peace_dst_storage', an ETS table that
+%%   the harness owns. A server that is killed and then restarted therefore
+%%   reads back the promise and the log that the server wrote before the
+%%   kill.</li>
 %% </ul>
 %%
-%% and at the end of a run with `converge' on: every server has applied the
-%% same indexes to the same state and at least one value was acknowledged.
+%% This is the fault model that `formal/FlexiblePaxos.tla' assumes:
 %%
-%% Servers snapshot every few indexes, so that truncation, recovery from a
-%% snapshot and catching up by one are part of every run. Clients submit
-%% under a session and retry when they cannot tell what happened.
+%% <ul>
+%% <li>Messages are lost.</li>
+%% <li>Messages are in effect duplicated, because servers retransmit.</li>
+%% <li>Messages are delayed.</li>
+%% <li>Servers stop, and restart with their durable state.</li>
+%% </ul>
+%%
+%% == Workload ==
+%%
+%% Clients submit values and linearizable reads. When `faults' is on, the
+%% workload also contains these fault operations:
+%%
+%% <ul>
+%% <li>cut one server off from the other servers;</li>
+%% <li>heal every cut;</li>
+%% <li>kill a server;</li>
+%% <li>restart a server.</li>
+%% </ul>
+%%
+%% The harness generates a fault in the same way as any other operation. The
+%% seed therefore determines the position of each fault in the run. Each
+%% fault is recorded in the trace, and a replay of the trace repeats the
+%% fault.
+%%
+%% == Invariants ==
+%%
+%% The harness checks these invariants after every step:
+%%
+%% <ul>
+%% <li>`storage_matches_memory' - the promise, the accepted entries and the
+%%   snapshot index that a server holds in memory are equal to the promise,
+%%   the entries and the snapshot index on the disk of that server. A step
+%%   ends when the server is back in its receive loop, and by then the
+%%   server has sent every message of that step. This invariant therefore
+%%   checks, from outside the server, the rule that a server persists its
+%%   state before the server replies.</li>
+%% <li>`promise_never_regresses' - the durable promise of a server never
+%%   decreases.</li>
+%% <li>`agreement' - no index is decided with two different values, by any
+%%   server, at any time in the run. This is TLA+ `LearnedAgree'.</li>
+%% <li>`applied_matches_decided' - the machine of a server has applied
+%%   exactly the decided log up to the commit index of the server, in order,
+%%   and has applied the value of each session once. The decided log is a
+%%   record that the harness keeps. A server that received a snapshot is
+%%   therefore checked against the same record as a server that applied
+%%   every entry.</li>
+%% <li>`acknowledged_is_decided' - when a client receives `{ok, Index}', the
+%%   value of that client is decided at that index.</li>
+%% <li>`applied_once' - no machine has applied a value twice, regardless of
+%%   how many indexes hold the value because of client retries.</li>
+%% <li>`linearizable_read' - a consistent query returns a prefix of the
+%%   decided log, and the prefix contains every value that was acknowledged
+%%   before the query was issued.</li>
+%% </ul>
+%%
+%% At the end of a run with `converge' on, the harness also checks that:
+%%
+%% <ul>
+%% <li>every server has applied the same indexes and has the same state;</li>
+%% <li>at least one value was acknowledged.</li>
+%% </ul>
+%%
+%% Servers take a snapshot every few indexes. Every run therefore includes
+%% log truncation, recovery from a snapshot, and catch-up from a snapshot
+%% that another server sends.
+%%
+%% Clients submit values under a session. A client retries a request when the
+%% outcome of the request is unknown.
 %%
 %% == Membership ==
 %%
-%% With `reconfigure' on, the first three servers are the cluster and the
-%% rest are running outside it, waiting to be told. One more operation asks
-%% whoever leads to move to another configuration from a fixed list: other
-%% members, more, fewer, none in common, another quorum system. Everything
-%% above is checked as before, across every configuration the run passes
-%% through, and convergence is asked of the members of the last one.
+%% With `reconfigure' on, the first three servers are the initial members of
+%% the cluster. The remaining servers run outside the cluster and wait for
+%% messages from the cluster.
+%%
+%% The workload has one additional operation. The operation asks the current
+%% leader to change to another configuration from a fixed list. Compared
+%% with the current configuration, a configuration in the list can have:
+%%
+%% <ul>
+%% <li>different members;</li>
+%% <li>more members;</li>
+%% <li>fewer members;</li>
+%% <li>no member in common;</li>
+%% <li>a different quorum system.</li>
+%% </ul>
+%%
+%% The harness checks every invariant above in the same way, across every
+%% configuration that the run uses. The convergence check applies to the
+%% members of the last configuration.
 %%
 %% == Disks and clocks ==
 %%
-%% `disk => dets' runs the shipped `peace_storage_dets' behind the
-%% simulation's disk: see `peace_dst_storage'. `clock_drift => P' gives two
-%% servers in three a clock P per cent fast, which matters only to read
-%% leases; far enough beyond the tenth a lease allows for, a read is stale.
+%% `disk => dets' runs the shipped `peace_storage_dets' backend behind the
+%% disk of the simulation. See `peace_dst_storage'.
+%%
+%% `clock_drift => P' makes the clocks of two servers in every three run P
+%% per cent fast. Clock drift affects only read leases. A lease allows for a
+%% drift of one tenth. When the drift is far enough beyond one tenth, a read
+%% returns stale state.
 %%
 %% == Trace validation ==
 %%
@@ -79,52 +135,62 @@
 %%
 %% == Planted bugs ==
 %%
-%% `mode' selects one, so that the suite can show each check is able to fail:
+%% `mode' selects one planted bug. The suite uses the planted bugs to show
+%% that each check can fail:
 %%
 %% <ul>
-%% <li>`unsafe_quorums' - `{counting, 2, 1}' over three servers, with the
-%%   server's own validation switched off. The same constants as
-%%   `formal/FPaxosUnsafeQuorums.cfg'.</li>
-%% <li>`amnesia' - a disk that comes back empty after a restart.</li>
-%% <li>`lossy_disk' - with `disk => dets', the dets backend behind a layer
-%%   that does not write promises. It shows `disk_recovers' can fail.</li>
-%% <li>`no_snapshot_guard' - a candidate leads on a promise from an acceptor
-%%   that has dropped indexes the candidate never learned. The same change as
-%%   `formal/FPaxosNoSnapshotGuard.cfg'.</li>
-%% <li>`no_joint' - a change of membership goes straight to the new
-%%   configuration. The same change as `formal/ReconfigNoJoint.cfg'.</li>
+%% <li>`unsafe_quorums' - the quorum system is `{counting, 2, 1}' over three
+%%   servers, and the quorum validation of the server is switched off. These
+%%   are the same constants as `formal/FPaxosUnsafeQuorums.cfg'.</li>
+%% <li>`amnesia' - the disk of a server is empty after a restart.</li>
+%% <li>`lossy_disk' - with `disk => dets', the dets backend runs behind a
+%%   layer that does not write promises. This mode shows that
+%%   `disk_recovers' can fail.</li>
+%% <li>`no_snapshot_guard' - a candidate becomes leader on a promise from an
+%%   acceptor that has dropped indexes that the candidate never learned.
+%%   This is the same change as `formal/FPaxosNoSnapshotGuard.cfg'.</li>
+%% <li>`no_joint' - a membership change goes directly to the new
+%%   configuration. This is the same change as
+%%   `formal/ReconfigNoJoint.cfg'.</li>
 %% <li>`no_lease_fence' - with read leases on, servers promise other epochs
-%%   while a leader still counts on them, and a deposed leader answers a
-%%   read from its own stale state.</li>
+%%   while a leader still relies on those servers for its lease, and a
+%%   deposed leader answers a read from the stale state of that leader.</li>
 %% <li>`bare_retries' - clients retry without a session, and a value is
-%%   applied twice. Not a bug in peace: it shows `applied_once' can fail.</li>
-%% <li>`no_conflict_step_down' - a leader that learns an index was decided
-%%   against its own proposal goes on leading. The same change as
+%%   applied twice. This mode is not a bug in peace. This mode shows that
+%%   `applied_once' can fail.</li>
+%% <li>`no_conflict_step_down' - a leader learns that an index was decided
+%%   with a value other than the value that the leader proposed, and the
+%%   leader continues to lead. This is the same change as
 %%   `formal/FPaxosNoConflictStepDown.cfg'.</li>
 %% </ul>
 %%
 %% == Churn ==
 %%
-%% With `churn' on, the workload is aimed at leadership instead of at
-%% durability, with three more operations in place of crashes:
+%% With `churn' on, the workload tests leadership changes instead of
+%% durability. The workload generates neither `{crash, I}' nor
+%% `{restart, I}'. It generates three additional operations in their place:
 %%
 %% <ul>
-%% <li>`{elect, I}' - a server is told its election timeout has fired when
-%%   it has not. Any server may suspect its leader at any time.</li>
-%% <li>`{split, I, J}' - two servers are cut off together from the rest, so
-%%   that a leader can keep a follower while a new leader rises without
-%%   either of them hearing of it.</li>
-%% <li>`{rumour, I}' - a server receives `learned' for the latest indexes
-%%   anybody has decided, through any cut. It stands for an answer to a
-%%   catch-up request that was sent long ago and is only now arriving, and
-%%   it is the TLA+ `CatchUp' action, which the model allows anybody at any
-%%   time. The network policy alone almost never produces it: a leader
-%%   only asks to catch up while it is still a follower.</li>
+%% <li>`{elect, I}' - the harness tells a server that the election timeout
+%%   of the server has fired, although the timeout has not fired. Any server
+%%   may suspect its leader at any time.</li>
+%% <li>`{split, I, J}' - the harness cuts two servers off together from the
+%%   other servers. A leader can then keep one follower while another server
+%%   becomes leader, and neither the first leader nor that follower receives
+%%   a message about the new leader.</li>
+%% <li>`{rumour, I}' - a server receives a `learned' message for the latest
+%%   indexes that any server has decided. The message is delivered
+%%   regardless of any cut. The message represents an answer to a catch-up
+%%   request that was sent long before and arrives only now. The message
+%%   corresponds to the TLA+ `CatchUp' action, which the model allows for
+%%   any server at any time. The network policy alone almost never produces
+%%   this message, because a server that becomes leader sends catch-up
+%%   requests only while that server is still a follower.</li>
 %% </ul>
 %%
-%% Together they reach the stale-leader hazard that `ConflictStepDown' in the
-%% model guards against, which random loss and delay did not reach in
-%% thousands of runs.
+%% Together, the three operations reach the stale-leader hazard that
+%% `ConflictStepDown' in the model guards against. Random loss and delay did
+%% not reach this hazard in thousands of runs.
 -module(peace_dst).
 
 -behaviour(eta_harness).
@@ -150,15 +216,18 @@
 init(_Seed, Config) ->
     N = maps:get(servers, Config, 3),
     Mode = maps:get(mode, Config, correct),
-    %% dst/ is not part of the peace application, so `preload => [peace]'
-    %% does not reach these, and a module loaded mid-run is a call to the
-    %% code server that the schedule does not own.
+    %% The modules in dst/ are not part of the peace application, so
+    %% `preload => [peace]' does not load them. The harness loads them here.
+    %% Loading a module during a run would make a call to the code server,
+    %% and the scheduler does not control the code server.
     [{module, M} = code:ensure_loaded(M) || M <- [peace_dst_client, peace_dst_machine, peace_dst_storage, peace_dst_lossy_disk, peace_dst_trace]],
-    %% Ordered, so that reading one server's disk is a range and not a scan.
+    %% The table is an `ordered_set', so that reading the disk of one server
+    %% is a range read and not a scan of the whole table.
     Tab = ets:new(peace_dst, [public, ordered_set]),
     Ids = [id(I) || I <- lists:seq(1, N)],
     Reconfigure = maps:get(reconfigure, Config, false),
-    %% Who the cluster is to begin with. The others know it and wait.
+    %% `Founders' are the initial members of the cluster. The other servers
+    %% are configured with the same list of members, and wait.
     Founders =
         case Reconfigure of
             true -> lists:sublist(Ids, 3);
@@ -172,16 +241,20 @@ init(_Seed, Config) ->
     ok = clear_disk(),
     Pids = [start(maps:get(I, Configs)) || I <- lists:seq(1, N)],
     ok = await_idle(Pids, 1000),
-    %% Every process the run sends between is placed on a simulated node:
-    %% one node per server, as deployed. Placement is what gives the faults
-    %% their meaning. A cut is between nodes and so survives a restart, a
-    %% kill takes everything on the node, and a restarted server inherits
-    %% its node from the process that started it.
+    %% The harness places every process that sends or receives messages in
+    %% the run on a simulated node. Each server has its own node, as in a
+    %% deployment. Placement defines the effect of each fault:
+    %%   - A cut is between nodes, so a cut stays in place when a server
+    %%     restarts.
+    %%   - A kill stops every process on the node.
+    %%   - A restarted server inherits the node of the process that started
+    %%     the server.
     lists:foreach(
         fun({I, Pid}) -> ok = eta_net:place(node_name(I), [Pid]) end,
         lists:zip(lists:seq(1, N), Pids)
     ),
-    %% Connected at the start, as a cluster that has just booted is.
+    %% All server nodes are connected to each other at the start, as the
+    %% nodes of a cluster are immediately after boot.
     [
         true = eta_net:with_node(node_name(I), fun() -> eta_net:connect_node(node_name(J)) end)
      || I <- lists:seq(1, N), J <- lists:seq(1, N), I < J
@@ -200,24 +273,31 @@ init(_Seed, Config) ->
                 _ -> maps:get(retry, Config, session)
             end,
         converge => maps:get(converge, Config, false),
-        %% Every client process ever spawned, oldest first.
+        %% `ops' lists every process that the run has started through
+        %% `spawn_op/3', oldest first. These are the processes of the value,
+        %% query, reconfigure, elect and rumour operations.
         ops => [],
-        %% Every restarter, oldest first. One stays alive for as long as the
-        %% server it started, linked to it, as a supervisor would be.
+        %% `sups' lists every restarter process, oldest first. A restarter
+        %% stays alive for as long as the server that the restarter started.
+        %% The restarter is linked to that server, as a supervisor is.
         sups => [],
         clients => 0
     }}.
 
-%% Servers by index, then operation processes by age. A restarted server is a
-%% child of the operation that restarted it and is adopted with it; listing
-%% it here as well is harmless and keeps the order a function of the run.
+%% Returns the servers in index order, then the operation processes in order
+%% of age. A restarted server is a child of the operation process that
+%% restarted the server, and the scheduler adopts the server together with
+%% that process. Listing the server here as well is harmless, and makes the
+%% order of the list a function of the run.
 processes(#{n := N, ops := Ops, sups := Sups}) ->
     [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)] ++
         [Pid || Pid <- Ops ++ Sups, is_process_alive(Pid)].
 
 generate(S = #{reconfigure := true}, Rand0) ->
-    %% One draw more than a run without, and only here, so that turning
-    %% this on does not change what every other seed means.
+    %% A run with `reconfigure' on makes one more random draw per operation
+    %% than a run with `reconfigure' off. The extra draw is made only in
+    %% this clause, so that the run that a seed produces with `reconfigure'
+    %% off is unchanged.
     {Roll, Rand1} = rand:uniform_s(Rand0),
     case Roll < 0.07 of
         true ->
@@ -243,8 +323,8 @@ generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
             Churn -> heal;
             not Faults, Roll < 0.80 -> {value, I};
             not Faults -> {query, I};
-            %% Faults are kept rare. Too many and no value ever completes,
-            %% and only a completed value can contradict anything.
+            %% Faults are rare. With too many faults no value ever completes,
+            %% and only a completed value can violate an invariant.
             Roll < 0.62 -> {value, I};
             Roll < 0.80 -> {query, I};
             Roll < 0.84 -> {isolate, I};
@@ -254,9 +334,10 @@ generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
         end,
     {Op, Rand2}.
 
-%% Client operations name the server they try first by index, and the
-%% operation's own identity is its position in the run: nothing in an
-%% operation is a pid, a ref or a generated name, so a trace replays.
+%% A client operation names the server that the client tries first by index.
+%% The identity of an operation is the position of the operation in the run.
+%% An operation contains no pid, no ref and no generated name, so a trace can
+%% be replayed.
 execute({value, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
@@ -266,9 +347,10 @@ execute({query, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
     spawn_op(clients, fun() -> peace_dst_client:query(Tab, C, Servers) end, S#{clients := C});
-%% A message fault, not a node failure: both ends go on believing the link is
-%% up, which is all peace can tell anyway, since it detects failure by
-%% silence and not by `nodedown'.
+%% An isolation is a message fault and not a node failure. Both ends of the
+%% link continue to treat the link as up. peace cannot observe more than
+%% that, because peace detects failure by the absence of messages and not by
+%% `nodedown'.
 execute({isolate, I}, S = #{n := N}) ->
     lists:foreach(
         fun(J) ->
@@ -287,8 +369,9 @@ execute({crash, I}, S) ->
         undefined ->
             S;
         _Pid ->
-            %% Everything on the node dies at once, between steps, and is
-            %% waited for. Its disk is the harness's and stays.
+            %% Every process on the node dies at once, between steps, and the
+            %% kill waits until the processes are dead. The disk of the
+            %% server belongs to the harness and keeps its contents.
             ok = eta_net:kill_node(node_name(I)),
             bump(crashes),
             S
@@ -326,8 +409,9 @@ execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
             bump(rumours),
             To = lists:nth(I, Ids),
             From = lists:nth(I rem N + 1, Ids),
-            %% Sent from the receiver's own node: it was in flight before
-            %% whatever cut there is now.
+            %% The message is sent from the node of the receiver. The message
+            %% represents a message that was already in flight before the
+            %% cuts that exist now were made.
             spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, From, {learned, Latest}) end, S)
     end;
 execute({restart, I}, S = #{configs := Configs}) ->
@@ -335,7 +419,8 @@ execute({restart, I}, S = #{configs := Configs}) ->
         undefined ->
             Config = maps:get(I, Configs),
             bump(restarts),
-            %% The server is the restarter's child and inherits its node.
+            %% The server is a child of the restarter process and inherits
+            %% the node of the restarter process.
             Pid = eta_run:spawn_op(fun() -> peace_dst_client:restart(Config) end),
             ok = eta_net:place(node_name(I), [Pid]),
             S#{sups := maps:get(sups, S) ++ [Pid]};
@@ -373,10 +458,11 @@ check_final(Settled, #{tab := Tab, ids := Ids, converge := true}) ->
             violation(converged, #{settled => Settled, decided => Logs})
     end.
 
-%% The workload is over once every client has its answer. A cluster with a
-%% heartbeat never goes quiet, so without this every run would spend its
-%% whole settle budget watching heartbeats. When convergence is going to be
-%% asserted, wait for it.
+%% The workload is finished when every client has received its answer. A
+%% cluster with a heartbeat never becomes idle, so without this callback
+%% every run would use its whole settle budget on heartbeat steps. When
+%% `converge' is on, this callback also waits until the servers have
+%% converged.
 settle_done(#{ops := Ops, converge := Converge, ids := Ids}) ->
     not lists:any(fun is_process_alive/1, Ops) andalso
         (not Converge orelse
@@ -387,8 +473,9 @@ settle_done(#{ops := Ops, converge := Converge, ids := Ids}) ->
 
 terminate(S = #{tab := Tab, n := N}) ->
     ok = record_stats(Tab),
-    %% Restarters first: a server one of them has started but that has not
-    %% registered its name yet can only be reached through the link.
+    %% The restarters are killed first. A server that a restarter has started
+    %% but that has not yet registered its name can only be reached through
+    %% the link to the restarter.
     ok = kill(maps:get(sups, S)),
     ok = kill(maps:get(ops, S) ++ [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)]),
     ok = await_unregistered(N, 1000),
@@ -396,12 +483,14 @@ terminate(S = #{tab := Tab, n := N}) ->
     ok = clear_disk(),
     ok.
 
-%% Where `disk => dets' keeps its files. One place, emptied before and after
-%% each run, so that a run's name for it does not differ from the last one's.
+%% Returns the directory in which `disk => dets' keeps its files. Every run
+%% uses this one directory, so that the name of the directory is the same in
+%% every run. The harness empties the directory before and after each run.
 disk_dir() ->
     filename:join(filename:basedir(user_cache, "peace_dst"), "disk").
 
-%% With `prim_file': the file server is a process no schedule owns.
+%% This function uses `prim_file' because the file server is a process that
+%% no schedule controls.
 clear_disk() ->
     Dir = disk_dir(),
     case prim_file:list_dir(Dir) of
@@ -411,7 +500,8 @@ clear_disk() ->
             ok
     end.
 
-%% Kills and waits, so that nothing from this run is still dying into the next.
+%% Kills the processes and waits until each process is dead, so that no
+%% process from this run is still terminating when the next run starts.
 kill(Pids) ->
     Refs = [{Pid, erlang:monitor(process, Pid)} || Pid <- Pids],
     lists:foreach(fun({Pid, _Ref}) -> exit(Pid, kill) end, Refs),
@@ -428,8 +518,9 @@ kill(Pids) ->
 %% Invariants
 %% ---------------------------------------------------------------------------
 
-%% With `disk => dets': a server that opened its dets file found what it had
-%% written, which is to say what the simulation's own disk holds.
+%% This invariant applies with `disk => dets'. A server that opened its dets
+%% file recovered the state that the server had written. The state that the
+%% server had written is the state that the disk of the simulation holds.
 disk_recovers(Tab) ->
     case ets:match(Tab, {{disk_differs, '$1'}, '$2', '$3'}) of
         [] -> ok;
@@ -468,9 +559,10 @@ promise_never_regresses(Tab, Disks) ->
         _ -> violation(promise_never_regresses, #{servers => Regressed})
     end.
 
-%% Read from the disks, not from the servers, so that a server that decided
-%% something and was then killed still counts. Each index's value is
-%% remembered the first time anybody decides it and compared ever after.
+%% The check reads the disks and not the servers, so that the check includes
+%% a server that decided a value and was then killed. The first time any
+%% server decides an index, the check stores the value of that index. The
+%% check compares every later decision of that index with the stored value.
 agreement(Tab, Disks) ->
     Conflicts =
         [
@@ -480,7 +572,8 @@ agreement(Tab, Disks) ->
             Earlier <- [remembered(Tab, {decided, I}, Value)],
             Earlier =/= Value
         ] ++
-            %% Noted by the disk at the write: see `peace_dst_storage'.
+            %% The disk recorded these conflicts at the time of the write.
+            %% See `peace_dst_storage'.
             [
                 #{index => I, server => Id, decided => Value, earlier => Earlier}
              || [I, Id, Value, Earlier] <- ets:match(Tab, {{conflict, '$1', '$2'}, '$3', '$4'})
@@ -504,10 +597,13 @@ applied_matches_decided(Views, Record) ->
         _ -> violation(applied_matches_decided, #{servers => Wrong})
     end.
 
-%% What a machine holds after the first `Commit' indexes of the decided log:
-%% every value without a session, and each session's value the first
-%% time it appears. `missing' if the record does not reach that far, which
-%% no server's commit index may run ahead of.
+%% Returns the state that a machine holds after the first `Commit' indexes
+%% of the decided log. The state contains:
+%%   - every value that has no session;
+%%   - the value of each session, the first time that value appears.
+%% Returns `{missing, I}' if the record has no value at an index `I' that is
+%% at or below `Commit'. The commit index of a server must never be beyond
+%% the end of the record.
 expected(Commit, Record) ->
     expected(1, Commit, Record, #{}, []).
 
@@ -535,9 +631,11 @@ expected(I, Commit, Record, Sessions, Acc) ->
 decided_record(Tab) ->
     maps:from_list([{I, Value} || [I, Value] <- ets:match(Tab, {{decided, '$1'}, '$2'})]).
 
-%% The live members of the latest configuration anybody has: the one in
-%% force at whoever has applied most. A server that was removed stops being
-%% told anything and is not expected to keep up.
+%% Returns the live members of the latest configuration that any server
+%% holds. The latest configuration is the configuration in force at the
+%% live server that has the highest commit index. A server that was removed
+%% from the configuration no longer receives messages and is not expected to
+%% stay up to date.
 current_members(Ids) ->
     Live = [{Id, Core} || Id <- Ids, {live, Core} <- [view(Id)]],
     case lists:sort([{peace_core:commit_index(Core), Id} || {Id, Core} <- Live]) of
@@ -549,9 +647,13 @@ current_members(Ids) ->
             [{Id, Core} || {Id, Core} <- Live, lists:member(Id, Members)]
     end.
 
-%% The configurations a run moves between. Over five servers: back to the
-%% founders, a set that shares one server with them, everybody with two to
-%% commit, a pair with nothing in common with the founders, and four.
+%% Returns the configurations that a run changes between. Over five servers,
+%% the configurations are:
+%%   - the founders;
+%%   - a set that shares one server with the founders;
+%%   - all five servers, with two servers needed to commit;
+%%   - a pair with no server in common with the founders;
+%%   - four servers.
 targets(#{ids := Ids}) ->
     Pick = fun(Is) -> [lists:nth(I, Ids) || I <- Is, I =< length(Ids)] end,
     [
@@ -562,8 +664,9 @@ targets(#{ids := Ids}) ->
         {Pick([1, 2, 4, 5]), {counting, 3, 2}}
     ].
 
-%% What is compared between servers at the end: how far each has applied,
-%% and to what.
+%% Returns the value that is compared between servers at the end of a run:
+%% the index up to which the server has applied, and the resulting machine
+%% state.
 applied(Core) ->
     {peace_core:commit_index(Core), peace_core:machine_state(Core)}.
 
@@ -602,8 +705,8 @@ linearizable_read(Tab, Record) ->
         _ -> violation(linearizable_read, #{queries => Wrong})
     end.
 
-%% Whether `Ops', oldest first, is what a machine holds after some prefix of
-%% the decided log.
+%% Returns whether `Ops', oldest first, is equal to the state that a machine
+%% holds after some prefix of the decided log.
 is_applied_prefix(Record, Ops) ->
     Last = lists:max([0 | maps:keys(Record)]),
     lists:any(
@@ -633,11 +736,13 @@ first_violation([Check | Rest]) ->
         Violation -> Violation
     end.
 
-%% A `property' key is what `eta_shrink' uses to tell one failure from another.
+%% `eta_shrink' uses the `property' key to distinguish one failure from
+%% another.
 violation(Property, Detail) ->
     {violation, Detail#{property => Property}}.
 
-%% The value first stored under `Key', storing `Value' if there is none.
+%% Returns the value that was first stored under `Key'. Stores `Value' if no
+%% value is stored under `Key' yet.
 remembered(Tab, Key, Value) ->
     case ets:insert_new(Tab, {Key, Value}) of
         true -> Value;
@@ -657,9 +762,10 @@ stored_promised(Tab, Id) ->
 server_config(I, Id, Founders, Mode, Tab, Config) ->
     Server = server_config1(I, Id, Founders, Mode, Tab, Config),
     case Config of
-        %% Every step every server takes, in the order they were taken, for
-        %% `peace_dst_trace' to hold against the model. The table is the
-        %% caller's, so it outlives the run.
+        %% The tracer records every step of every server, in the order in
+        %% which the steps were taken. `peace_dst_trace' checks the steps
+        %% against the model. The caller owns the table, so the table still
+        %% exists after the run.
         #{trace := Trace} ->
             Server#{
                 test_tracer => fun({_, Event, Before, After, Effects}) ->
@@ -690,21 +796,25 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         machine => {module, peace_dst_machine, []},
         quorum => maps:get(quorum, Config, majority),
         storage => {peace_dst_storage, Storage},
-        %% Short against the pace of the workload. A run injects its
-        %% operations within a few virtual seconds, so an election that took
-        %% one of them would leave most clients with nobody to talk to.
+        %% The election timeout is short relative to the rate of the
+        %% workload. A run injects its operations within a few virtual
+        %% seconds. An election that took one of those seconds would leave
+        %% most clients without a leader to contact.
         election_timeout_ms => maps:get(election_timeout_ms, Config, 50),
         heartbeat_ms => 10,
-        %% Often enough that every run truncates, restarts from a snapshot
-        %% and sends one.
+        %% The snapshot interval is small enough that every run truncates the
+        %% log, restarts a server from a snapshot and sends a snapshot.
         snapshot_interval => maps:get(snapshot_interval, Config, 5)
     },
     Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to], Config)),
-    %% Clocks that run at different rates: every third server's is true and
-    %% the others run fast by `clock_drift' per cent, so that they count a
-    %% lease out sooner than a true leader does. (A slow server is no
-    %% threat: it stays bound, and so out of elections, for longer.) The
-    %% simulation's own clock is the true one, and timers run on it.
+    %% The clocks of the servers run at different rates. The clock of every
+    %% third server runs at the true rate. The clocks of the other servers
+    %% run fast by `clock_drift' per cent, so those servers measure the end
+    %% of a lease earlier than a leader with a true clock does. (A server
+    %% with a slow clock is not a hazard: the slow server stays bound by the
+    %% lease for longer, and so stays out of elections for longer.) The
+    %% clock of the simulation is the true clock, and timers run on the
+    %% clock of the simulation.
     Leased =
         case {maps:get(clock_drift, Config, 0), I rem 3} of
             {0, _} -> Leased0;
@@ -732,22 +842,25 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}
     end.
 
-%% Before the scheduler exists, so this is an ordinary start on the real
-%% scheduler. The clock is already virtual: the election timer armed in
-%% `init/1' is the first thing the run will advance to.
+%% This function runs before the eta scheduler exists, so the start is an
+%% ordinary start on the real scheduler. The clock is already virtual. The
+%% election timer that `init/1' arms is the first event that the run
+%% advances the clock to.
 start(Config) ->
     {ok, Pid} = peace_server:start(Config),
     Pid.
 
-%% A server that was mid-start when the previous run was torn down dies with
-%% its restarter, but may have registered its name on the way out.
+%% A server that was starting when the previous run was torn down dies with
+%% its restarter. The server may have registered its name before the server
+%% died.
 clear_leftovers(N) ->
     ok = kill([Pid || I <- lists:seq(1, N), Pid <- [whereis(name(I))], is_pid(Pid)]),
     await_unregistered(N, 1000).
 
-%% The system is handed over idle: every server in its receive loop with
-%% nothing queued, so nothing that happened on the real scheduler is left to
-%% land at a point the seed did not choose.
+%% The harness hands the system to the eta scheduler idle: every server is in
+%% its receive loop with an empty message queue. No event from the real
+%% scheduler then remains to take effect at a point that the seed did not
+%% choose.
 await_idle(_Pids, 0) ->
     error(servers_not_idle);
 await_idle(Pids, Attempts) ->
@@ -777,14 +890,16 @@ await_unregistered(N, Attempts) ->
             await_unregistered(N, Attempts - 1)
     end.
 
-%% The new process is blocked until the scheduler adopts it, so it is on its
-%% node before it has run a line.
+%% The new process is blocked until the scheduler adopts the process. The
+%% process is therefore placed on its node before the process executes any
+%% code.
 spawn_op(Node, Fun, S = #{ops := Ops}) ->
     Pid = eta_run:spawn_op(Fun),
     ok = eta_net:place(Node, [Pid]),
     S#{ops := Ops ++ [Pid]}.
 
-%% A server's protocol state, read without asking it.
+%% Returns the protocol state of a server. The read does not send a message
+%% to the server.
 view({Name, Node}) ->
     case server_pid(Name, Node) of
         undefined ->
@@ -805,9 +920,10 @@ node_name(I) -> list_to_atom("peace_n" ++ integer_to_list(I)).
 server_pid(I) ->
     server_pid(name(I), node_name(I)).
 
-%% A server started in `init/2' registered its name before it was placed, in
-%% the VM's own namespace. One restarted during the run was born on its node
-%% and registered in that node's.
+%% A server started in `init/2' registered its name before the harness
+%% placed the server on a node, so the name is in the namespace of the VM. A
+%% server restarted during the run started on its node, and registered its
+%% name in the namespace of that node.
 server_pid(Name, Node) ->
     case whereis(Name) of
         undefined ->
@@ -824,11 +940,13 @@ rotate(First, Ids) ->
     Back ++ Front.
 
 %% ---------------------------------------------------------------------------
-%% Statistics: did the run exercise what it was meant to?
+%% Statistics
 %%
-%% A sweep that passes because no client was ever answered, or no leader ever
-%% changed, has checked nothing. The suite owns a table, the harness adds a
-%% run's counts to it, and the suite asserts on the totals.
+%% The statistics show whether the runs exercised the behaviour that the
+%% runs were meant to exercise. A sweep has checked nothing if the sweep
+%% passes because no client ever received an answer, or because the leader
+%% never changed. The suite owns a table. The harness adds the counts of
+%% each run to the table. The suite asserts on the totals.
 %% ---------------------------------------------------------------------------
 
 reset_stats() ->
@@ -849,7 +967,8 @@ bump(Key, By) ->
     end,
     ok.
 
-%% Epochs somebody led with. More than one in a run means leadership moved.
+%% Records each epoch in which a server was leader. More than one such epoch
+%% in a run means that leadership changed.
 note_leaders(Views) ->
     lists:foreach(
         fun

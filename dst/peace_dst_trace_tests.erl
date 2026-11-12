@@ -1,7 +1,8 @@
-%% Trace validation of simulated runs against `formal/FlexiblePaxos.tla'.
-%% `make trace'. Needs Java, for TLC, which `make dst' does not.
-%% See `peace_dst_trace' for what is derived from a run and what a pass
-%% means.
+%% This suite validates traces of simulated runs against
+%% `formal/FlexiblePaxos.tla'. `make trace' runs the suite. The suite needs
+%% Java to run TLC. `make dst' does not need Java.
+%% See `peace_dst_trace' for the actions that are derived from a run and for
+%% the meaning of a pass.
 -module(peace_dst_trace_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -10,8 +11,9 @@
 
 -define(TIMEOUT, 1800).
 
-%% Runs one seed, writes its trace under `_build/traces/Name' and has TLC
-%% judge it. `{accepted | rejected | error, Outcome, Counts, Output}'.
+%% Runs one seed, writes the trace of the run under `_build/traces/Name' and
+%% runs TLC on the trace. Returns
+%% `{accepted | rejected | error, Outcome, Counts, Output}'.
 validate(Name, Seed, Config) ->
     Table = ets:new(peace_dst_trace, [public, ordered_set]),
     Opts = peace_dst_tests:opts(Seed, Config#{trace => Table}),
@@ -22,7 +24,8 @@ validate(Name, Seed, Config) ->
     Ids = [peace_dst:id(I) || I <- lists:seq(1, N)],
     Quorum =
         case maps:get(mode, Config, correct) of
-            %% Held to the quorums a correct cluster of this size would have.
+            %% The trace is validated against the quorums that a correct
+            %% cluster of this size has.
             unsafe_quorums -> majority;
             _ -> maps:get(quorum, Config, majority)
         end,
@@ -50,7 +53,7 @@ sweep(Prefix, Seeds, Config) ->
         Seeds
     ).
 
-%% Every action of the model is something the runs did.
+%% Asserts that the runs produced every action of the model.
 exercised(Counts) ->
     ?debugFmt("actions validated: ~0p", [Counts]),
     [
@@ -59,35 +62,40 @@ exercised(Counts) ->
     ],
     ?assertEqual(0, maps:get(invalid, Counts, 0)).
 
-%% Crashes, restarts and cuts.
+%% This test validates runs of the faults workload: crashes, restarts and
+%% network cuts.
 faults_are_behaviours_of_the_model_test_() ->
     {timeout, ?TIMEOUT, fun() -> exercised(sweep("faults", lists:seq(1, 20), #{})) end}.
 
-%% Forced elections, splits and rumours: the stale-leader workload.
+%% This test validates runs of the churn workload: forced elections, splits
+%% and rumours. The churn workload is the stale-leader workload.
 churn_is_a_behaviour_of_the_model_test_() ->
     {timeout, ?TIMEOUT, fun() -> exercised(sweep("churn", lists:seq(1, 20), #{churn => true})) end}.
 
-%% Five servers, two to decide and four to elect.
+%% This test validates runs with five servers. Two servers are needed to
+%% decide and four servers are needed to elect.
 flexible_quorums_are_behaviours_of_the_model_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         exercised(sweep("flexible", lists:seq(1, 10), #{servers => 5, quorum => {counting, 4, 2}}))
     end}.
 
 %% ---------------------------------------------------------------------------
-%% Planted bugs: validation has to be able to say no. Each is a mode of
-%% `peace_dst'. The model refuses some runs the simulation's own invariants
-%% pass: a run in which the bug has acted but has not yet done harm.
+%% Planted bugs. These tests show that validation can reject a run. Each
+%% planted bug is a mode of `peace_dst'. The model rejects some runs that
+%% pass the invariants of the simulation. In such a run the planted bug has
+%% taken effect but has not yet violated an invariant.
 %% ---------------------------------------------------------------------------
 
-%% `{Rejected, Violated}': how many runs the model refused, and how many the
-%% simulation's invariants did.
+%% Returns `{Rejected, Violated}': the number of runs that the model
+%% rejected, and the number of runs that violated the invariants of the
+%% simulation.
 planted(Prefix, Seeds, Config) ->
     lists:foldl(
         fun(Seed, {Rejected, Violated}) ->
             Name = Prefix ++ "-" ++ integer_to_list(Seed),
             {Verdict, Outcome, _Counts, Output} = validate(Name, Seed, Config),
             ?assertNotEqual(error, Verdict, {seed, Seed, Output}),
-            %% What the invariants catch, the model catches.
+            %% The model rejects every run that violates an invariant.
             ?assert(Outcome =:= ok orelse Verdict =:= rejected, {seed, Seed, Outcome}),
             {
                 Rejected + length([x || Verdict =:= rejected]),
@@ -98,8 +106,9 @@ planted(Prefix, Seeds, Config) ->
         Seeds
     ).
 
-%% Two to elect and one to decide, held to a majority: a leader counts one
-%% acceptance as a decision, and the model has no quorum to show for it.
+%% The servers need two servers to elect and one server to decide. The trace
+%% is validated against majority quorums. A leader treats one accept as a
+%% decision, and the model holds no quorum of accepts for that decision.
 unsafe_quorums_are_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Rejected, Violated} = planted("unsafe-quorums", lists:seq(1, 30), #{mode => unsafe_quorums}),
@@ -107,7 +116,8 @@ unsafe_quorums_are_rejected_test_() ->
         ?assert(Rejected >= 20 andalso Rejected > Violated, {Rejected, Violated})
     end}.
 
-%% A disk that forgets: a promise falls, which no action of the model does.
+%% The disk of a server loses its contents on restart. A promise then
+%% decreases, and no action of the model decreases a promise.
 amnesia_is_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Rejected, Violated} = planted("amnesia", lists:seq(1, 30), #{mode => amnesia}),
@@ -115,7 +125,8 @@ amnesia_is_rejected_test_() ->
         ?assert(Rejected >= 10, {Rejected, Violated})
     end}.
 
-%% A candidate that leads from behind a snapshot.
+%% A candidate becomes leader on a promise from an acceptor that has dropped,
+%% under a snapshot, indexes that the candidate never learned.
 no_snapshot_guard_is_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Rejected, Violated} = planted("no-snapshot-guard", lists:seq(1, 60), #{mode => no_snapshot_guard}),
@@ -123,9 +134,10 @@ no_snapshot_guard_is_rejected_test_() ->
         ?assert(Rejected >= 1, {Rejected, Violated})
     end}.
 
-%% A contradicted leader that goes on leading. The invariants need hundreds
-%% of seeds to see harm come of it; the model refuses the first proposal it
-%% makes over an index it has been told is decided.
+%% A contradicted leader continues to lead. The invariants need hundreds of
+%% seeds before a run violates an invariant. The model rejects the first
+%% proposal that the leader makes for an index that the leader has been told
+%% is decided.
 no_conflict_step_down_is_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Rejected, Violated} = planted(

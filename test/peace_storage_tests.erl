@@ -1,11 +1,13 @@
-%% What every durable storage backend owes `peace_server': after any sequence
-%% of writes, an open returns exactly what was written, whether the previous
-%% owner closed the store or was killed holding it.
+%% These tests check the contract between every durable storage backend and
+%% `peace_server'. After any sequence of writes, an open returns exactly
+%% what was written. This holds whether the previous owner closed the store
+%% or was killed while the owner held the store.
 %%
-%% The simulation runs the dets backend too, but on eta's stand-in for dets:
-%% a real dets table is served by processes the simulation's scheduler does
-%% not own. So this is where the backend is held, on real dets, to the
-%% contract the simulation assumes of a disk.
+%% The simulation also runs the dets backend, but on the replacement for
+%% dets that eta provides. The reason is that a real dets table is served by
+%% processes that the scheduler of the simulation does not control. These
+%% tests therefore check the backend on real dets. The contract checked here
+%% is the contract that the simulation assumes of a disk.
 -module(peace_storage_tests).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -17,8 +19,8 @@ dets_test_() ->
         lists:foreach(fun(Seed) -> conforms(peace_storage_dets, Seed) end, lists:seq(1, 20))
     end}.
 
-%% A store that was never written to recovers nothing, and says so in the
-%% shape `peace_core:init/2' reads.
+%% An open of a store that was never written to recovers no data. The open
+%% returns that empty result in the shape that `peace_core:init/2' reads.
 dets_empty_test() ->
     with_dir(fun(Dir) ->
         ?assertEqual(#{entries => #{}}, in_owner(peace_storage_dets, Dir, fun(_Mod, State) -> {State, close} end))
@@ -26,9 +28,9 @@ dets_empty_test() ->
 
 %% ---------------------------------------------------------------------------
 
-%% Rounds of random writes, each round by a fresh owner that ends by closing
-%% or by being killed. Every owner must recover what all the earlier ones
-%% wrote.
+%% Runs rounds of random writes. A new owner performs each round. The owner
+%% ends the round either by closing the store or by being killed. Every
+%% owner must recover everything that all the earlier owners wrote.
 conforms(Mod, Seed) ->
     with_dir(fun(Dir) ->
         lists:foldl(
@@ -61,9 +63,11 @@ conforms(Mod, Seed) ->
         ok
     end).
 
-%% Opens the store in a process of its own, as a server does, runs `Fun' on
-%% it, and ends that process the way `Fun' asks. Returns what the open
-%% recovered.
+%% Does the following:
+%%   1. Opens the store in a separate process, as a server does.
+%%   2. Runs `Fun' on the store.
+%%   3. Ends that process in the way that the result of `Fun' requests.
+%% Returns the data that the open recovered.
 in_owner(Mod, Dir, Fun) ->
     Self = self(),
     {Pid, Ref} = spawn_monitor(fun() ->
@@ -97,8 +101,9 @@ in_owner(Mod, Dir, Fun) ->
     end,
     Stored.
 
-%% What `peace_core' never writes is left out: an entry at or below the
-%% snapshot, and a snapshot older than the one there is.
+%% Removes from the batches the writes that `peace_core' never makes:
+%%   - an entry at or below the snapshot
+%%   - a snapshot that is not newer than the snapshot that is already stored
 lawful([], _Model) ->
     [];
 lawful([Batch0 | Rest], Model) ->
@@ -120,8 +125,14 @@ batches(Rand0) ->
     {N, Rand1} = rand:uniform_s(8, Rand0),
     lists:mapfoldl(fun(_, R) -> batch(R) end, Rand1, lists:seq(1, N)).
 
-%% Promises, entries, both, neither or a snapshot, over few enough indexes that
-%% entries are overwritten, as an acceptor overwrites them, and dropped.
+%% Generates one random batch. The batch contains one of the following:
+%%   - a promise
+%%   - entries
+%%   - a promise and entries
+%%   - neither a promise nor entries
+%%   - a snapshot
+%% The batches use few indexes. Entries are therefore overwritten, as an
+%% acceptor overwrites entries, and dropped.
 batch(Rand0) ->
     {Kind, Rand1} = rand:uniform_s(5, Rand0),
     {Round, Rand2} = rand:uniform_s(50, Rand1),
@@ -140,7 +151,8 @@ batch(Rand0) ->
         Rand3,
         lists:seq(1, Count)
     ),
-    %% One write per index in a batch: peace never sends two.
+    %% A batch has one write per index. peace never sends two writes for
+    %% one index in a batch.
     Unique = maps:to_list(maps:from_list(Entries)),
     Batch =
         case Kind of
@@ -148,7 +160,7 @@ batch(Rand0) ->
             2 -> #{entries => Unique};
             3 -> #{promised => {Round, ?ID}, entries => Unique};
             4 -> #{};
-            %% A snapshot, and with it only entries above it.
+            %% A snapshot, together with only the entries above the snapshot.
             5 -> #{snapshot => {Count, {{state, Round}, #{}}}, entries => [E || E = {I, _} <- Unique, I > Count]}
         end,
     {Batch, Rand4}.

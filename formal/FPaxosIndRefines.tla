@@ -1,14 +1,15 @@
 -------------------------- MODULE FPaxosIndRefines --------------------------
 (***************************************************************************)
-(* For TLC: FlexiblePaxosInd is FlexiblePaxos.  `Msgs` rebuilds the        *)
-(* message set of FlexiblePaxos.tla from the variables FlexiblePaxosInd    *)
-(* keeps in its place, and `Refines` says that every behaviour of the one  *)
-(* is, read that way, a behaviour of the other.  The config also checks    *)
-(* that IndInv holds in every reachable state, which an inductive          *)
-(* invariant must.                                                         *)
+(* This module is for TLC. It checks that FlexiblePaxosInd is the same     *)
+(* protocol as FlexiblePaxos. `Msgs` rebuilds the message set of           *)
+(* FlexiblePaxos.tla from the variables that FlexiblePaxosInd has in place *)
+(* of the message set. `Refines` states that every behaviour of            *)
+(* FlexiblePaxosInd, under that mapping, is a behaviour of FlexiblePaxos.  *)
+(* The config also checks that IndInv holds in every reachable state. An   *)
+(* inductive invariant must hold in every reachable state.                 *)
 (*                                                                         *)
-(* This module is not for Apalache: a set of records of different shapes   *)
-(* is what its types do not allow.                                         *)
+(* This module is not for Apalache. The types of Apalache do not allow a   *)
+(* set of records with different fields.                                   *)
 (***************************************************************************)
 EXTENDS FlexiblePaxosInd
 

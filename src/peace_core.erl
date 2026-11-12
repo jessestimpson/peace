@@ -1,206 +1,350 @@
-%% @doc The Flexible Paxos protocol, as a pure function.
+%% @doc The Flexible Paxos protocol, written as a pure function.
 %%
-%% `handle/2' takes an event and a state and returns the new state and a list
-%% of effects. It sends nothing, writes nothing and reads no clock;
-%% `peace_server' does those on its behalf. That keeps the protocol testable
-%% without processes, and keeps it close to `formal/FlexiblePaxos.tla', which
-%% is the same protocol with the effects left out. Comments below name the
-%% TLA+ action each clause corresponds to.
+%% `handle/2' takes an event and a state. It returns the new state and a
+%% list of effects. `handle/2' does not send messages, does not write to
+%% storage and does not read a clock. `peace_server' performs those actions
+%% when it executes the effects. This design has two results:
+%%
+%% <ul>
+%% <li>The protocol can be tested without processes.</li>
+%% <li>The code stays close to `formal/FlexiblePaxos.tla'. That model is the
+%%   same protocol without the effects.</li>
+%% </ul>
+%%
+%% Comments in this module name the TLA+ action that each clause corresponds
+%% to.
 %%
 %% == The protocol ==
 %%
-%% Multi-Paxos with co-located roles and distinct quorums per phase, from
-%% Howard's thesis (UCAM-CL-TR-935, in `docs/'): her sections 3.6, 3.7 and
-%% 4.1. Section references below are to it, and so are the words: epoch,
-%% prepare, promise, propose, accept, phase one and phase two, proposer and
-%% acceptor, value, decided, learn, the sequence and its indexes, the
-%% leader. Where the thesis has
-%% no word, because the thing is not in it, the section says so:
+%% The protocol is Multi-Paxos with co-located roles and a distinct quorum
+%% system for each phase. It comes from Howard's thesis (UCAM-CL-TR-935, in
+%% `docs/'), sections 3.6, 3.7 and 4.1. Section references in this module
+%% refer to the thesis. This module uses the terms of the thesis: epoch,
+%% prepare, promise, propose, accept, phase one, phase two, proposer,
+%% acceptor, value, decided, learn, sequence, index and leader. Some
+%% features of this module are not in the thesis, so the thesis has no term
+%% for them. The text about each such feature says that the feature is not
+%% in the thesis.
+%%
+%% These features are in the thesis:
 %%
 %% <ul>
-%% <li>in the thesis: Multi-Paxos (3.6), co-located roles (3.7), NACKs (3.1),
-%%   learning (3.3), revision A's quorums (4.1), proposing to a phase-two
-%%   quorum (4.3.3);</li>
-%% <li>not in the thesis: the pre-vote, a leader standing down for want of a
-%%   quorum, the commit index, sessions, snapshots, read leases, and the way
-%%   membership changes. Their names are the usual ones from Raft and
-%%   Viewstamped Replication.</li>
+%% <li>Multi-Paxos (section 3.6)</li>
+%% <li>co-located roles (section 3.7)</li>
+%% <li>NACKs (section 3.1)</li>
+%% <li>learning (section 3.3)</li>
+%% <li>the quorums of revision A (section 4.1)</li>
+%% <li>proposing to a phase-two quorum (section 4.3.3)</li>
 %% </ul>
 %%
-%% Every server is proposer, acceptor and learner at once. An epoch is
-%% `{Round, ServerId}', so it has exactly one possible leader, and a server
-%% leads for as long as nobody promises a higher one.
+%% These features are not in the thesis:
 %%
-%% Phase one, once per leadership. A follower that hears nothing from a leader
-%% for an election timeout picks an epoch above any it has seen and sends
-%% `{prepare, Epoch, From}', where `From' is its first undecided index. An
-%% acceptor that has promised nothing higher promises, and answers with every
-%% log entry it holds from `From' on. With promises from a phase-one quorum the
-%% candidate leads: for every index anybody reported it re-proposes the value
-%% reported at the highest epoch, and fills gaps with no-ops. An acceptor
-%% that has promised something higher says so, with the epoch (a NACK,
-%% section 3.1), and the candidate stands down and outbids it next time.
+%% <ul>
+%% <li>the pre-vote</li>
+%% <li>a leader that steps down because it has no quorum</li>
+%% <li>the commit index</li>
+%% <li>sessions</li>
+%% <li>snapshots</li>
+%% <li>read leases</li>
+%% <li>the method for changing membership</li>
+%% </ul>
 %%
-%% Before any of that, a pre-vote, which is not in the thesis. A follower whose election timeout fires
-%% does not raise its epoch straight away: it asks its peers whether they
-%% would promise, and they say yes only if they have lost their leader too.
-%% Nothing is promised and nothing is written. Only with yes from a phase-one
-%% quorum does it campaign. A server that was merely cut off therefore comes
-%% back without deposing a leader everybody else is content with. This is
-%% liveness only: a campaign is always safe, and `force_election' still
-%% starts one unasked.
+%% The names of the features that are not in the thesis are the usual names
+%% from Raft and Viewstamped Replication.
 %%
-%% Phase two, once per value. The leader assigns the next index and sends
-%% `{propose, Epoch, Entries, Commit}'. An acceptor that has promised nothing
-%% higher stores the entries and answers `{accept, Epoch, Indexes}'. The
-%% value at an index is decided once a phase-two quorum has accepted it. The two quorum
-%% systems only have to intersect each other; see `peace_quorum'.
+%% Every server is a proposer, an acceptor and a learner at the same time.
+%% An epoch is `{Round, ServerId}'. Therefore exactly one server can be the
+%% leader of a given epoch. A server remains the leader for as long as no
+%% server promises a higher epoch.
 %%
-%% Not in the thesis: a leader keeps its election timer running and, each
-%% time it fires, asks whether a phase-two quorum has answered a heartbeat since the last time. If
-%% not, it can decide nothing, and it steps down so that clients stop waiting
-%% on it. Also liveness only.
+%% Phase one runs once for each leadership:
 %%
-%% Learning, the thesis's optional phase three (section 3.3, "Termination").
-%% A decided entry is kept under the marker `learned' in place of an epoch,
-%% and is reported that way in promises, where it outranks every epoch.
-%% Entries become decided by three routes, and they are the three learning
+%% <ol>
+%% <li>A follower receives nothing from a leader for one election
+%%   timeout.</li>
+%% <li>The follower picks an epoch higher than every epoch it has seen. It
+%%   sends `{prepare, Epoch, From}'. `From' is the first undecided index of
+%%   the follower. The follower is now a candidate.</li>
+%% <li>An acceptor promises the epoch only if the epoch is higher than the
+%%   epoch that the acceptor has promised. The acceptor replies with every
+%%   log entry that it holds at index `From' or above.</li>
+%% <li>An acceptor that has promised a higher epoch replies with that epoch.
+%%   This reply is a NACK (section 3.1). The candidate then abandons its
+%%   campaign. The next campaign of that server uses an epoch higher than
+%%   the epoch in the NACK.</li>
+%% <li>An acceptor that has promised exactly this epoch ignores the prepare
+%%   and sends no reply.</li>
+%% <li>An acceptor that is bound by a read lease also ignores the prepare
+%%   and sends no reply. See "Read leases".</li>
+%% <li>When the candidate has promises from a phase-one quorum, the
+%%   candidate becomes the leader. For every index that any server reported,
+%%   the leader proposes again the value that was reported with the highest
+%%   epoch. The leader fills gaps with no-ops.</li>
+%% </ol>
+%%
+%% A pre-vote runs before phase one. The pre-vote is not in the thesis. A
+%% follower whose election timeout fires does not raise its epoch
+%% immediately. The pre-vote works as follows:
+%%
+%% <ol>
+%% <li>The follower asks its peers whether they would promise.</li>
+%% <li>A peer answers yes only if the peer has also lost its leader.</li>
+%% <li>No server promises anything and no server writes anything during the
+%%   pre-vote.</li>
+%% <li>The follower starts a campaign only when it has a yes answer from a
+%%   phase-one quorum.</li>
+%% </ol>
+%%
+%% As a result, a server that was only disconnected from the other servers
+%% reconnects without deposing a leader that all the other servers still
+%% accept. The pre-vote affects liveness only. It does not affect safety,
+%% because a campaign is always safe. `force_election' still starts a
+%% campaign without a pre-vote.
+%%
+%% Phase two runs once for each value:
+%%
+%% <ol>
+%% <li>The leader assigns the next index to the value and sends
+%%   `{propose, Epoch, Entries, Commit, Stamp}'. `Commit' is the commit
+%%   index of the leader. `Stamp' is the clock reading of the leader.</li>
+%% <li>An acceptor that has not promised a higher epoch stores the entries
+%%   and replies `{accept, Epoch, Indexes, Stamp}'. `Stamp' is the clock
+%%   reading from the propose message.</li>
+%% <li>The value at an index is decided when a phase-two quorum has accepted
+%%   it.</li>
+%% </ol>
+%%
+%% The phase-one quorum system and the phase-two quorum system only have to
+%% intersect each other. See `peace_quorum'.
+%%
+%% The following feature is not in the thesis. A leader keeps its election
+%% timer running. Each time the election timer fires, the leader checks
+%% whether a phase-two quorum has answered a heartbeat since the timer last
+%% fired. If no phase-two quorum has answered, the leader cannot decide any
+%% value. The leader then steps down, so that clients stop waiting for it.
+%% This feature also affects liveness only. It does not affect safety.
+%%
+%% Learning is the optional phase three of the thesis (section 3.3,
+%% "Termination"). A server stores a decided entry with the marker `learned'
+%% in place of an epoch. A promise reports a decided entry with the same
+%% marker. In a promise, `learned' ranks above every epoch. An entry becomes
+%% decided in one of three ways. The three ways are the three learning
 %% actions of the TLA+ model:
 %%
 %% <ul>
-%% <li>the leader counts a phase-two quorum (`LeaderLearn');</li>
-%% <li>a follower sees its leader's commit index reach an index where its
-%%   own entry is from that leader's epoch (`FollowerCommit');</li>
-%% <li>anybody is told outright, by `{learned, Entries}' in answer to a
-%%   `{catchup, From}', or by a promise (`CatchUp').</li>
+%% <li>`LeaderLearn': the leader counts accepts from a phase-two
+%%   quorum.</li>
+%% <li>`FollowerCommit': a follower sees that the commit index of its leader
+%%   has reached an index, and the entry of the follower at that index is
+%%   from the epoch of that leader.</li>
+%% <li>`CatchUp': a server is told directly that the entry is decided. The
+%%   server is told by `{learned, Entries}' in reply to `{catchup, From}',
+%%   or by a promise.</li>
 %% </ul>
 %%
-%% The second route is the commit index of Raft and Viewstamped Replication,
-%% and section 3.3 gives the condition it rests on: an acceptor told "decided
-%% in epoch e" may conclude its own entry is decided if that entry is from e,
-%% where e is the epoch the value was decided in. So it is sound only while
-%% a leader's commit index means "my proposals up to here were decided in my
-%% epoch, or agree with what was". A deposed leader that has not yet
-%% heard it was deposed can learn what a later epoch decided at an index and
-%% find it is not the value it proposed there. It steps down on the spot, before
-%% it can advertise a commit index covering that index (`ConflictStepDown',
-%% and `FPaxosNoConflictStepDown.cfg' is the counterexample without it).
+%% `FollowerCommit' is the commit index of Raft and Viewstamped Replication.
+%% Section 3.3 gives the condition that `FollowerCommit' depends on: an
+%% acceptor that is told "decided in epoch e" may conclude that its own
+%% entry is decided if that entry is from e, where e is the epoch in which
+%% the value was decided. Therefore `FollowerCommit' is sound only while the
+%% commit index of a leader means "my proposals up to here were decided in
+%% my epoch, or agree with what was".
+%%
+%% A leader can be deposed and not yet know that it was deposed. Such a
+%% leader can learn the value that a later epoch decided at an index. That
+%% value can differ from the value that the leader proposed at that index.
+%% In that case the leader steps down immediately. The leader steps down
+%% before it can send a commit index that covers that index. This rule is
+%% `ConflictStepDown'. `FPaxosNoConflictStepDown.cfg' is the counterexample
+%% without this rule.
 %%
 %% == Sessions ==
 %%
-%% Not in the thesis.
-%% A client that is told nothing (a timeout, a lost leader) cannot know
-%% whether its value was decided, and a retry may put it in the log twice.
-%% A value submitted with a session, `{ClientId, Seq}', is applied at most
-%% once however often it is decided: each server remembers, per client, the
-%% highest sequence number it has applied and the reply, and a later copy of
-%% the same number gets that reply without touching the machine. The table is
-%% a function of the decided log, like the machine state, so every server
-%% agrees on it. A client uses one sequence number at a time, increasing.
+%% Sessions are not in the thesis.
+%%
+%% A client that receives no reply (for example after a timeout or after
+%% the leader is lost) cannot know whether its value was decided. If the
+%% client retries, the value can enter the log twice. A value submitted with
+%% a session, `{ClientId, Seq}', is applied at most once, however many times
+%% it is decided. Each server records, for each client, the highest sequence
+%% number that the server has applied and the reply to that value. When a
+%% later copy with the same sequence number is decided, the server returns
+%% the recorded reply and does not apply the value to the machine. The
+%% session table is a function of the decided log, as the machine state is.
+%% Therefore every server has the same session table. A client uses one
+%% sequence number at a time, and its sequence numbers increase.
 %%
 %% == Snapshots ==
 %%
-%% Not in the thesis.
-%% Every `snapshot_interval' applied indexes a server writes its machine state
-%% and session table to storage and drops the log up to there. A server asked
-%% to catch somebody up from an index it no longer has sends its state instead
-%% (`install').
+%% Snapshots are not in the thesis.
 %%
-%% Truncation takes away what phase one relies on: an acceptor's report of what
-%% it accepted. A candidate that asks from an index the acceptor has dropped
-%% would hear nothing about it, take it to be free, and could get a second
-%% value decided there. So a promise carries the acceptor's snapshot index,
-%% and a candidate that is behind one abandons its campaign and catches up.
-%% `FPaxosNoSnapshotGuard.cfg' is the protocol without that.
+%% Each time a server has applied `snapshot_interval' indexes, the server
+%% writes its machine state, its session table and the configuration that
+%% it has applied to storage, and removes the log up to the last applied
+%% index. When a server is asked to catch another
+%% server up from an index that it no longer holds, it sends its state
+%% instead (`install').
+%%
+%% Removing log entries removes information that phase one relies on: the
+%% report by an acceptor of the values that it accepted. Without a guard,
+%% the following could happen:
+%%
+%% <ol>
+%% <li>A candidate asks from an index that the acceptor has removed.</li>
+%% <li>The promise contains nothing about that index.</li>
+%% <li>The candidate treats the index as free.</li>
+%% <li>The candidate gets a second value decided at that index.</li>
+%% </ol>
+%%
+%% To prevent this, a promise carries the snapshot index of the acceptor. A
+%% candidate that is behind that snapshot index abandons its campaign and
+%% catches up. `FPaxosNoSnapshotGuard.cfg' is the protocol without this
+%% guard.
 %%
 %% == Read leases ==
 %%
-%% Not in the thesis.
-%% Off unless `read_lease_ms' is set. A linearizable read is otherwise
-%% ordered by putting a no-op through the log. With leases a leader may
-%% answer from its own state, on the strength of this: nobody else can have
-%% become leader yet.
+%% Read leases are not in the thesis.
 %%
-%% An acceptor that accepts from a leader will not promise any other epoch,
-%% and will not campaign, for the lease duration after. A new leader needs a
-%% phase-one quorum of promises. So while the servers still bound to this
-%% leader are such that the rest of the cluster contains no phase-one quorum,
-%% there is no other leader, and nothing decided that this one does not know
-%% of. That set need not be a majority, nor even a phase-two quorum: with
-%% `{counting, 4, 2}' over five servers the leader and one other will do.
+%% Read leases are off unless `read_lease_ms' is set. Without read leases, a
+%% linearizable read is ordered by deciding a no-op in the log. With read
+%% leases, a leader may answer a read from its own state. This is correct
+%% because no other server can have become the leader yet. The argument is
+%% as follows:
 %%
-%% Every accept carries the leader's clock and the answer returns it, so the
-%% leader measures a lease from when it sent, the acceptor from when it
-%% received, and the leader trusts it for a tenth less than the acceptor
-%% honours it. That tenth is the assumption: clocks that run within ten per
-%% cent of each other. Safety of reads depends on it and on nothing else
-%% here does. A restarted acceptor has forgotten what it was bound by and
-%% honours a full lease from the moment it starts. A leader reads from its
-%% own state only once everything its phase one recovered has been decided
-%% again. This part is not in the TLA+ model, which has no time; the margin
-%% is tested in `peace_core_tests' with clocks a tenth and a quarter apart.
+%% <ul>
+%% <li>An acceptor that accepts from a leader does not promise any other
+%%   epoch and does not campaign for the lease duration after the
+%%   accept.</li>
+%% <li>A new leader needs promises from a phase-one quorum.</li>
+%% <li>Some servers are still bound by a lease to this leader. While the
+%%   servers that are not bound contain no phase-one quorum, there is no
+%%   other leader, and no value has been decided that this leader does not
+%%   know of.</li>
+%% </ul>
+%%
+%% The set of bound servers does not have to be a majority. It does not have
+%% to be a phase-two quorum either. For example, with `{counting, 4, 2}'
+%% over five servers, the leader and one other server are enough.
+%%
+%% Every propose message carries the clock reading of the leader, and the
+%% accept message returns that reading. The lease is measured as follows:
+%%
+%% <ul>
+%% <li>The leader measures a lease from the time it sent the message.</li>
+%% <li>The acceptor measures a lease from the time it received the
+%%   message.</li>
+%% <li>The leader trusts a lease for one tenth less time than the acceptor
+%%   honours it.</li>
+%% </ul>
+%%
+%% That one tenth is the assumption about clocks: the clocks of the servers
+%% run within ten per cent of each other. The safety of reads depends on
+%% this assumption. Nothing else in this module depends on it.
+%%
+%% A restarted acceptor no longer knows which lease it was bound by.
+%% Therefore it honours a full lease from the moment it starts. A leader
+%% reads from its own state only after every entry that its phase one
+%% recovered has been decided again. Read leases are not in the TLA+ model,
+%% because the model has no time. The margin is tested in `peace_core_tests'
+%% with clocks a tenth apart and with clocks a quarter apart.
 %%
 %% == Proposing to a phase-two quorum ==
 %%
-%% Off unless `propose_to' is `quorum'. The thesis, section 4.3.3: "it is
-%% necessary only for the proposer to send propose messages to a phase two
-%% quorum of acceptors, provided the proposer can retry with another phase
-%% two quorum if an acceptor does not respond." Of the two forms it goes on
-%% to sketch, this is the second: "a leader use a small fixed quorum of
-%% acceptors for the phase two. The remaining acceptors would be standbys".
+%% This feature is off unless `propose_to' is `quorum'. The thesis says in
+%% section 4.3.3: "it is necessary only for the proposer to send propose
+%% messages to a phase two quorum of acceptors, provided the proposer can
+%% retry with another phase two quorum if an acceptor does not respond." The
+%% thesis then sketches two forms. This module implements the second form:
+%% "a leader use a small fixed quorum of acceptors for the phase two. The
+%% remaining acceptors would be standbys".
 %%
-%% The leader picks the fewest peers that make a phase-two quorum with
-%% itself, preferring those that have been answering, and sends each new
-%% proposal to them alone. This is where a small phase-two quorum pays in
-%% messages and not only in waiting: `{counting, 4, 2}' over five sends each
-%% proposal to one peer, not four. The retry: a proposal still undecided at
-%% the second heartbeat after it was made goes to everybody, and whenever
-%% the election timer fires the leader picks again from whoever answered.
-%% Safety is untouched, since this only narrows whom a message is sent to.
+%% The leader picks the smallest set of peers that forms a phase-two quorum
+%% together with the leader. The leader prefers peers that have been
+%% answering. The leader sends each new proposal only to the picked peers.
+%% With this feature, a small phase-two quorum reduces the number of
+%% messages as well as the waiting time. For example, `{counting, 4, 2}'
+%% over five servers sends each proposal to one peer instead of four peers.
 %%
-%% One departure. The thesis's standbys hold no copy of the value, which is
-%% where it finds a saving in storage. Every peace server applies the
-%% sequence to its own state machine, so here the standbys learn each
-%% decision a heartbeat later, by asking. peace saves the messages and not
-%% the storage. A leader that takes a snapshot while they are behind sends
-%% them the snapshot.
+%% The retry works as follows:
+%%
+%% <ul>
+%% <li>A proposal that is still undecided at the second heartbeat after it
+%%   was made is sent to every peer.</li>
+%% <li>Each time the election timer fires, the leader picks the peers again
+%%   from the peers that answered.</li>
+%% </ul>
+%%
+%% This feature does not affect safety, because it only reduces the set of
+%% servers that a message is sent to.
+%%
+%% This module departs from the thesis in one way. The standbys in the
+%% thesis hold no copy of the value. That is how the thesis saves storage.
+%% Every peace server applies the sequence to its own state machine.
+%% Therefore the standbys in peace learn each decision one heartbeat later,
+%% by asking for it. peace saves messages. peace does not save storage. If a
+%% leader takes a snapshot while the standbys are behind, the leader sends
+%% the snapshot to the standbys.
 %%
 %% == Membership ==
 %%
-%% Not in the thesis as such. The joint configuration is Raft's. The thesis's
-%% revision B (section 4.2) lets quorums differ between epochs and asks a
-%% phase-one quorum of an epoch to intersect the phase-two quorums of every
-%% earlier one; it does not say how a proposer learns what those were. Here
-%% the log tells it.
+%% This method for changing membership is not in the thesis. The joint
+%% configuration comes from Raft. Revision B of the thesis (section 4.2)
+%% allows quorums to differ between epochs. Revision B requires a phase-one
+%% quorum of an epoch to intersect the phase-two quorums of every earlier
+%% epoch. The thesis does not say how a proposer learns what the quorums of
+%% the earlier epochs were. In peace, the proposer learns them from the log.
 %%
-%% Who the members are and what their quorums are is decided in the log,
-%% as in `formal/Reconfig.tla', and moves from one configuration to another
-%% through a joint one. A leader asked to change it proposes
-%% `joint(Old, New)'; while that is in force a phase-two quorum is one of each.
-%% When the joint entry is decided the leader, whoever it is by then,
-%% proposes `final(New)'. One change at a time.
+%% The members and their quorums are decided in the log, as in
+%% `formal/Reconfig.tla'. The servers move from one configuration to another
+%% configuration through a joint configuration:
 %%
-%% The configuration in force at a server is the latest such entry in its
-%% log, decided or not, and failing any, the one it has applied. That is
-%% what a leader counts acknowledgements against and whom it sends to.
+%% <ol>
+%% <li>A leader that is asked to change the configuration proposes
+%%   `joint(Old, New)'. While the joint configuration is in force, a
+%%   phase-two quorum is a phase-two quorum of `Old' together with a
+%%   phase-two quorum of `New'.</li>
+%% <li>When the joint entry is decided, the leader proposes `final(New)'.
+%%   The leader at that time can be a different server from the leader that
+%%   proposed the joint entry.</li>
+%% </ol>
 %%
-%% A candidate is held to more: a phase-one quorum of every configuration it
-%% has reason to think was in force for the indexes it is asking about. That
-%% is the one it has applied, every one in its own log, and every one in a
-%% configuration entry that a promise reports. So a promise can raise the
-%% bar, and name servers the candidate has yet to ask.
+%% Only one change is in progress at a time.
 %%
-%% A server started outside the configuration takes no initiative, answers
-%% what it is sent, and becomes a member when a configuration naming it
-%% reaches its log. One that finds itself outside a decided final
-%% configuration stops campaigning, and stands down if it was leading.
+%% The configuration in force at a server is the latest configuration entry
+%% in the log of that server, whether that entry is decided or not. If the
+%% log holds no configuration entry, the configuration in force is the
+%% configuration that the server has applied. A leader counts
+%% acknowledgements against the configuration in force and sends messages to
+%% the members of the configuration in force.
+%%
+%% A candidate needs more than the configuration in force. A candidate needs
+%% a phase-one quorum of every configuration that may have been in force for
+%% the indexes that the candidate asks about. Those configurations are:
+%%
+%% <ul>
+%% <li>the configuration that the candidate has applied;</li>
+%% <li>every configuration in the log of the candidate;</li>
+%% <li>every configuration in a configuration entry that a promise
+%%   reports.</li>
+%% </ul>
+%%
+%% Therefore a promise can add a configuration that the candidate needs a
+%% phase-one quorum of. That configuration can name servers that the
+%% candidate has not yet sent a prepare to.
+%%
+%% A server that is started outside the configuration does not start any
+%% action itself. It only replies to the messages that it receives. It
+%% becomes a member when a configuration that names it reaches its log. A
+%% server that is outside a decided final configuration stops campaigning.
+%% If that server was the leader, it steps down.
 %%
 %% == What must be durable ==
 %%
-%% `promised', the log and the snapshot. Every change to either is announced as a
-%% `persist' effect in the same effect list as the reply that depends on it,
-%% and `peace_server' writes before it sends. Role, commit index and machine
-%% state are rebuilt on restart.
+%% Three things must be durable: `promised', the log and the snapshot. Every
+%% change to any of them is announced as a `persist' effect. The `persist'
+%% effect is in the same effect list as the reply that depends on the
+%% change, and `peace_server' writes before it sends. The role, the commit
+%% index and the machine state are rebuilt on restart.
 -module(peace_core).
 
 -include("peace.hrl").
@@ -224,15 +368,19 @@
 
 -export_type([core/0, event/0, effect/0, entry/0, value/0, msg/0, session/0, snapshot/0, config/0, simple/0]).
 
-%% How many entries one `accept' or `learned' message carries at most.
+%% The maximum number of entries that one `propose' message from
+%% `broadcast/2' carries, and the maximum number of entries that one
+%% `learned' message carries.
 -define(MAX_BATCH, 64).
 
-%% Identifies one proposal: the epoch that first proposed it and its index.
-%% A leader answers a waiting client only when the entry applied at the index
-%% carries the tag it proposed, since another leader may have won the index.
+%% A tag identifies one proposal. A tag is the epoch that first proposed the
+%% value and the index of the value. A leader replies to a waiting client
+%% only when the entry applied at the index carries the tag that the leader
+%% proposed. The check is needed because the value of another leader may
+%% have been decided at that index.
 -type tag() :: {peace:epoch(), peace:index()}.
 
-%% Members and how they form quorums.
+%% The members and the specification of their quorums.
 -type simple() :: {[peace:server_id()], peace_quorum:spec()}.
 -type config() :: {final, simple()} | {joint, Old :: simple(), New :: simple()}.
 
@@ -242,14 +390,18 @@
     | {'$ses', tag(), session(), peace_machine:value()}
     | {'$noop', tag()}.
 
-%% One client's one value. See "Sessions" above.
+%% A session identifies one value of one client. See "Sessions" above.
 -type session() :: {ClientId :: term(), Seq :: non_neg_integer()}.
 
-%% Per client: the last sequence number applied, what the machine answered,
-%% and the index, by which the oldest session is evicted.
+%% The session table. For each client it holds:
+%%   - the last sequence number applied;
+%%   - the reply of the machine to that value;
+%%   - the index of that value. Eviction removes the session with the
+%%     lowest index.
 -type sessions() :: #{term() => {non_neg_integer(), term(), peace:index()}}.
 
-%% What a snapshot holds: everything that is a function of the decided log.
+%% The contents of a snapshot. A snapshot holds everything that is a
+%% function of the decided log.
 -type snapshot() :: {peace_machine:state(), sessions(), config()}.
 
 -type entry() :: {peace:epoch() | learned, value()}.
@@ -290,66 +442,78 @@
 
 -record(core, {
     id :: peace:server_id(),
-    %% The configuration as of the commit index, and the configuration
-    %% entries in the log above it, by index. See "Membership".
+    %% `acfg' is the configuration as of the commit index. `cfgs' holds the
+    %% configuration entries in the log above the commit index, keyed by
+    %% index. See "Membership".
     acfg :: config(),
     cfgs = #{} :: #{peace:index() => config()},
-    %% Leader: who asked for the change under way.
+    %% Leader: the caller that asked for the configuration change that is
+    %% in progress.
     reconf :: from() | undefined,
     use_joint = true :: boolean(),
-    %% Candidate: whom it has sent a prepare.
+    %% Candidate: the servers that it has sent a prepare to.
     asked = [] :: [peace:server_id()],
     machine :: peace_machine:machine(),
     mstate :: peace_machine:state(),
     role = follower :: peace:role(),
     leader :: peace:server_id() | undefined,
-    %% Durable: the highest epoch promised. TLA+ `promised'.
+    %% Durable. The highest epoch promised. This field is TLA+ `promised'.
     promised = ?NO_EPOCH :: peace:epoch(),
-    %% The highest epoch seen anywhere, so the next campaign outbids it.
+    %% The highest epoch that this server has seen from any source. The
+    %% next campaign uses an epoch higher than this epoch.
     seen = ?NO_EPOCH :: peace:epoch(),
-    %% Durable: TLA+ `accepted'.
+    %% Durable. This field is TLA+ `accepted'.
     log = #{} :: #{peace:index() => entry()},
     last = 0 :: non_neg_integer(),
-    %% Every index up to here is decided and applied.
+    %% Every index up to and including this index is decided and applied.
     commit = 0 :: non_neg_integer(),
-    %% Durable: the log holds nothing at or below this index.
+    %% Durable. The log holds no entry at or below this index.
     snap = 0 :: non_neg_integer(),
     snapshot_interval :: pos_integer() | infinity,
     sessions = #{} :: sessions(),
     max_sessions :: pos_integer(),
-    %% Candidate and leader: the epoch being run.
+    %% Candidate and leader: the epoch that this server is running.
     epoch :: peace:epoch() | undefined,
-    %% Candidate: the first index asked about, and the answers so far.
+    %% Candidate: `from' is the first index that it asked about. `promises'
+    %% holds the promises received so far.
     from = 1 :: peace:index(),
     promises = #{} :: #{peace:server_id() => list()},
-    %% Follower asking before it campaigns: the epoch it would use and who
-    %% has said they would promise it.
+    %% Follower during a pre-vote: the epoch that it would use, and the
+    %% servers that have answered that they would promise that epoch.
     prevote :: {peace:epoch(), [peace:server_id()]} | undefined,
-    %% Leader: who has answered since the election timer last fired.
+    %% Leader: the servers that have answered since the election timer last
+    %% fired.
     heard = [] :: [peace:server_id()],
-    %% Leader, proposing to a quorum: whom new proposals go to, and the indexes that were
-    %% already waiting at the last heartbeat.
+    %% Leader, when proposing to a quorum: `preferred' holds the peers that
+    %% new proposals are sent to. `waiting' holds the indexes that were
+    %% already undecided at the last heartbeat.
     to_quorum = false :: boolean(),
     preferred = [] :: [peace:server_id()],
     waiting = [] :: [peace:index()],
-    %% Leader: the next free index, who has accepted each undecided index, and
-    %% who is waiting on one.
+    %% Leader: `next' is the next free index. `acks' holds, for each
+    %% undecided index, the servers that have accepted it. `pending' holds,
+    %% for each index, the caller that is waiting for it.
     next = 1 :: peace:index(),
     acks = #{} :: #{peace:index() => [peace:server_id()]},
     pending = #{} :: #{peace:index() => {tag(), from(), kind()}},
-    %% Whether a contradicted leader steps down. Only ever false in tests
-    %% that show what the guard is for.
+    %% Whether a leader steps down when it learns a decided value that
+    %% differs from its own proposal. This field is false only in tests
+    %% that show why the step-down is needed.
     conflict_step_down = true :: boolean(),
-    %% Likewise for a candidate that is behind an acceptor's snapshot.
+    %% Whether a candidate that is behind the snapshot of an acceptor
+    %% abandons its campaign. This field is false only in tests that show
+    %% why the guard is needed.
     snapshot_guard = true :: boolean(),
-    %% The clock, in milliseconds, as of the event being handled.
+    %% The clock reading, in milliseconds, at the event being handled.
     now = 0 :: integer(),
     lease_ms :: pos_integer() | undefined,
-    %% Acceptor: no promise to another epoch and no campaign before this.
+    %% Acceptor: before this time, this server does not promise another
+    %% epoch and does not campaign.
     lease_until = 0 :: integer(),
     lease_fence = true :: boolean(),
-    %% Leader: the latest of its own clock readings each peer has answered,
-    %% and the last index its phase one recovered.
+    %% Leader: `echoes' holds, for each peer, the latest clock reading of
+    %% the leader that the peer has returned. `barrier' is the last index
+    %% that the phase one of this leader recovered.
     echoes = #{} :: #{peace:server_id() => integer()},
     barrier = 0 :: non_neg_integer()
 }).
@@ -360,21 +524,23 @@
 %% API
 %% ---------------------------------------------------------------------------
 
-%% @doc A server's state on start, from its configuration and whatever its
-%% storage recovered. Decided entries are applied again to rebuild the
-%% machine state.
+%% @doc Returns the state of a server on start. The state is built from the
+%% configuration of the server and from the data that its storage recovered.
+%% Decided entries are applied again to rebuild the machine state.
 -spec init(peace:server_config(), peace_storage:stored()) -> {core(), [effect()]}.
 init(Config, Stored) ->
     init(Config, Stored, 0).
 
-%% @doc As `init/2', with the clock, which matters only with read leases.
+%% @doc The same as `init/2', with the clock reading. The clock reading
+%% matters only when read leases are on.
 -spec init(peace:server_config(), peace_storage:stored(), integer()) -> {core(), [effect()]}.
 init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now) ->
     Initial = {final, {lists:usort(Members0), maps:get(quorum, Config, majority)}},
     {Snap, {MState, Sessions, ACfg}} =
         maps:get(snapshot, Stored, {0, {peace_machine:init(Machine), #{}, Initial}}),
-    %% A crash between writing a snapshot and dropping what it covers leaves
-    %% entries no backend is obliged to have cleaned up.
+    %% A crash can happen after a snapshot is written and before the entries
+    %% that the snapshot covers are removed. No storage backend is required
+    %% to have removed those entries, so they are removed here.
     Log = maps:filter(fun(I, _) -> I > Snap end, maps:get(entries, Stored, #{})),
     Promised = maps:get(promised, Stored, ?NO_EPOCH),
     LeaseMs = maps:get(read_lease_ms, Config, undefined),
@@ -405,8 +571,9 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
         snapshot_guard = not ?PLANTED(unsafe_no_snapshot_guard, Config),
         now = Now,
         lease_ms = LeaseMs,
-        %% Whatever lease this server granted before it stopped, it has
-        %% forgotten. The longest it can have left is a whole one.
+        %% This server no longer knows which lease it granted before it
+        %% stopped. The longest time that such a lease can have left is one
+        %% full lease duration.
         lease_until =
             case LeaseMs of
                 undefined -> Now;
@@ -414,23 +581,25 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
             end,
         lease_fence = not ?PLANTED(unsafe_no_lease_fence, Config)
     },
-    %% A follower has nobody waiting and performs no machine effects, so
-    %% replaying the log produces none.
+    %% A follower has no waiting callers and performs no machine effects.
+    %% Therefore replaying the log produces no effects.
     {C1, []} = advance(C0),
     {C1, enter_effects(C1) ++ [{timer, election, reset}]}.
 
-%% @doc As `handle/2', with the clock in milliseconds. Any clock that does
-%% not go backwards; it is compared only with itself and, through the lease
-%% margin, with the rate of other servers' clocks.
+%% @doc The same as `handle/2', with the clock reading in milliseconds. Any
+%% clock that does not go backwards can be used. The clock is compared only
+%% with itself and, through the lease margin, with the rate of the clocks of
+%% other servers.
 -spec handle(event(), integer(), core()) -> {core(), [effect()]}.
 handle(Event, Now, C) ->
     handle(Event, C#core{now = max(Now, C#core.now)}).
 
 -spec handle(event(), core()) -> {core(), [effect()]}.
 handle(Event, C0) ->
-    %% A snapshot is taken of the state an event finds, not the state it
-    %% leaves: every index it covers was written as decided by an earlier
-    %% event, so nothing is ever decided and dropped in one write.
+    %% The snapshot is taken of the state before the event is handled, not
+    %% of the state after the event is handled. Every index that the
+    %% snapshot covers was written as decided by an earlier event. Therefore
+    %% no index is decided and removed in the same write.
     {C1, Snapshot} = maybe_snapshot(C0),
     {C2, Effects} = event(Event, C1),
     {C3, Membership} = membership(C2),
@@ -449,7 +618,8 @@ event(force_election, C) ->
     end;
 event(heartbeat_timeout, C0 = #core{role = leader, acks = Acks, waiting = Waiting}) ->
     Open = maps:keys(Acks),
-    %% An index that has waited a whole heartbeat goes to everybody.
+    %% If an index has been undecided for a whole heartbeat interval, the
+    %% undecided entries are sent to every peer.
     Late = lists:any(fun(I) -> lists:member(I, Waiting) end, Open),
     {C1, Targets} = targets(C0),
     Quiet =
@@ -484,8 +654,9 @@ event({reconfigure, From, New}, C) ->
 event({msg, Peer, _Msg}, C = #core{id = Peer}) ->
     {C, []};
 event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
-    %% Nobody outside the configuration gets to depose its leader. A server
-    %% that was removed and has not heard is exactly who would try.
+    %% A server outside the configuration must not be able to depose the
+    %% leader. A server that was removed and has not learned of its removal
+    %% is the kind of server that sends such a prepare or prevote.
     case lists:member(Peer, members(C)) of
         true -> msg(Msg, Peer, C);
         false -> {C, []}
@@ -502,8 +673,8 @@ role(#core{role = Role}) -> Role.
 -spec leader(core()) -> peace:server_id() | undefined.
 leader(#core{leader = Leader}) -> Leader.
 
-%% @doc Every member of the configuration in force: of both, during a
-%% change.
+%% @doc Returns every member of the configuration in force. During a
+%% configuration change, this is every member of both configurations.
 -spec members(core()) -> [peace:server_id()].
 members(C) ->
     lists:usort(lists:append([Members || {Members, _Spec} <- parts(in_force(C))])).
@@ -524,18 +695,22 @@ last_index(#core{last = Last}) -> Last.
 -spec machine_state(core()) -> peace_machine:state().
 machine_state(#core{mstate = MState}) -> MState.
 
-%% @doc The log as it should be in storage: every entry held, with the epoch
-%% it was accepted in or `learned'.
+%% @doc Returns the log as it should be in storage. The log holds every
+%% entry that this server holds. Each entry has the epoch that it was
+%% accepted in, or `learned'.
 -spec log(core()) -> #{peace:index() => entry()}.
 log(#core{log = Log}) -> Log.
 
-%% @doc Every entry this server knows to be decided and still holds, applied
-%% or not, as the user value or `noop'.
-%% @doc The index of this server's snapshot, below which it has no log. 0 if
-%% it has none.
+%% @doc Returns the index of the snapshot of this server. The server holds
+%% no log entry at or below this index. Returns 0 if the server has no
+%% snapshot.
 -spec snapshot_index(core()) -> non_neg_integer().
 snapshot_index(#core{snap = Snap}) -> Snap.
 
+%% @doc Returns every entry that this server knows to be decided and still
+%% holds, whether the entry is applied or not. Each entry is returned as
+%% `{usr, Value}' for a user value, `{cfg, Config}' for a configuration
+%% entry, or `noop'.
 -spec learned(core()) -> #{peace:index() => {usr, peace_machine:value()} | {cfg, config()} | noop}.
 learned(#core{log = Log}) ->
     maps:filtermap(
@@ -578,7 +753,8 @@ overview(C = #core{}) ->
 %% Phase one
 %% ---------------------------------------------------------------------------
 
-%% Bound by a lease to the leader it last accepted from.
+%% Whether this server is bound by a lease to the leader that it last
+%% accepted from.
 fenced(#core{lease_ms = undefined}) -> false;
 fenced(#core{lease_fence = false}) -> false;
 fenced(#core{now = Now, lease_until = Until}) -> Now < Until.
@@ -591,7 +767,9 @@ holds_lease(#core{role = leader, lease_ms = LeaseMs, commit = Commit, barrier = 
     #core{id = Id, now = Now, echoes = Echoes} = C,
     Trust = LeaseMs - max(1, LeaseMs div 10),
     Bound = [Peer || {Peer, Stamp} <- maps:to_list(Echoes), Now < Stamp + Trust],
-    %% During a change, of each configuration: a rival may know of only one.
+    %% During a configuration change, the check is made for each
+    %% configuration, because a rival candidate may know of only one of
+    %% the two configurations.
     lists:all(
         fun({Members, Spec}) ->
             not peace_quorum:is_phase_one_quorum(Spec, Members, Members -- [Id | Bound])
@@ -601,7 +779,8 @@ holds_lease(#core{role = leader, lease_ms = LeaseMs, commit = Commit, barrier = 
 holds_lease(_C) ->
     false.
 
-%% Not in the model, which lets anybody campaign at any time.
+%% The pre-vote is not in the TLA+ model. The model lets any server campaign
+%% at any time.
 prevote(C = #core{}) ->
     case fenced(C) orelse not is_member(C) of
         true -> {C, [{timer, election, reset}]};
@@ -614,31 +793,38 @@ prevote1(C0 = #core{id = Id, promised = Promised, seen = Seen}) ->
     Peers = peers(C0),
     case q1([Id], C0) of
         true ->
-            %% Nobody to ask.
+            %% This server alone is a phase-one quorum, so there is no peer
+            %% to ask.
             campaign(C0);
         false ->
-            %% Having timed out, this server has no leader, and will say so
-            %% to anybody else who asks.
+            %% This server has timed out, so it has no leader. `leader' is
+            %% cleared, so that this server answers accordingly when another
+            %% server sends it a prevote.
             {C1, Enter} = become(follower, C0#core{
                 leader = undefined, epoch = undefined, promises = #{}, prevote = {Epoch, []}
             }),
             {C1, Enter ++ [{timer, election, reset}] ++ [{send, Peer, {prevote, Epoch}} || Peer <- Peers]}
     end.
 
-%% A leader that a phase-two quorum has stopped answering cannot decide
-%% anything. Better to say so than to hold clients until they time out.
+%% A leader cannot decide any value when no phase-two quorum answers it. In
+%% that case the leader steps down, so that waiting clients receive an error
+%% and do not wait until they time out.
 check_quorum(C = #core{id = Id, heard = Heard}) ->
     case q2([Id | Heard], C) of
         true ->
-            %% Whoever answered is who to count on next.
+            %% The preferred peers are picked again from the peers that
+            %% answered.
             C1 = prefer(C),
             {C1#core{heard = []}, [{timer, election, reset}]};
         false ->
             follow(C, undefined)
     end.
 
-%% Whom a new proposal is sent to: everybody, or with `propose_to => quorum' the preferred
-%% peers, picked again if the configuration has moved under them.
+%% Returns the peers that a new proposal is sent to. By default these are
+%% all peers. With `propose_to => quorum' these are the preferred peers. The
+%% preferred peers are picked again if the configuration has changed so that
+%% they are no longer all peers, or no longer form a phase-two quorum with
+%% this server.
 targets(C = #core{to_quorum = false}) ->
     {C, peers(C)};
 targets(C = #core{id = Id, preferred = Preferred}) ->
@@ -651,12 +837,14 @@ targets(C = #core{id = Id, preferred = Preferred}) ->
             {C1, C1#core.preferred}
     end.
 
-%% The fewest peers that make a phase-two quorum with this server, those that
-%% have answered lately first. Found by trying every set of each size in
-%% turn, because quorum systems that are not a count, like a grid, have
-%% quorums a greedy choice walks past. Beyond a dozen peers that is too
-%% many sets, and any quorum will do: peers are dropped from everybody
-%% for as long as a quorum is left.
+%% Picks the smallest set of peers that forms a phase-two quorum together
+%% with this server. Peers that have answered recently are tried first. The
+%% function tries every set of each size in turn. A greedy choice is not
+%% enough, because a quorum system that is not a count, such as a grid, has
+%% quorums that a greedy choice does not find. With more than twelve peers
+%% there are too many sets to try. In that case any quorum is accepted: the
+%% function starts with all peers and removes peers one at a time for as
+%% long as the remaining peers still form a quorum.
 prefer(C = #core{to_quorum = false}) ->
     C;
 prefer(C = #core{id = Id, heard = Heard}) ->
@@ -670,7 +858,8 @@ prefer(C = #core{id = Id, heard = Heard}) ->
         end,
     C#core{preferred = lists:sort(Decided)}.
 
-%% With no quorum to be had, everybody: the index will wait in any case.
+%% If no set of peers forms a quorum, the result is all peers. The index
+%% stays undecided whichever peers are picked.
 smallest(Size, Order, _Enough) when Size > length(Order) ->
     Order;
 smallest(Size, Order, Enough) ->
@@ -700,10 +889,11 @@ prune([Peer | Rest], Kept, Enough) ->
         false -> prune(Rest, Kept, Enough)
     end.
 
-%% TLA+ Prepare, and the candidate's own Promise: it promises its own epoch.
+%% TLA+ Prepare, together with the Promise of the candidate itself. The
+%% candidate promises its own epoch.
 campaign(C0 = #core{id = Id, promised = Promised, seen = Seen, commit = Commit}) ->
-    %% Everybody in any configuration this server knows of. Promises may
-    %% name more.
+    %% The prepare is sent to every server in any configuration that this
+    %% server knows of. Promises may name more servers.
     Peers = lists:usort(lists:append([M || {M, _} <- bar(C0)])) -- [Id],
     {Round, _} = max(Promised, Seen),
     Epoch = {Round + 1, Id},
@@ -724,7 +914,8 @@ campaign(C0 = #core{id = Id, promised = Promised, seen = Seen, commit = Commit})
             [{send, Peer, {prepare, Epoch, Commit + 1}} || Peer <- Peers],
     maybe_lead(C2, Effects).
 
-%% TLA+ Elected: a phase-one quorum of every configuration in the bar.
+%% TLA+ Elected. The candidate needs a phase-one quorum of every
+%% configuration that `bar/1' returns.
 maybe_lead(C = #core{role = candidate, id = Id, promises = Promises, epoch = Epoch, from = From}, Effects) ->
     Bar = bar(C),
     Promised = [Id | maps:keys(Promises)],
@@ -733,14 +924,18 @@ maybe_lead(C = #core{role = candidate, id = Id, promises = Promises, epoch = Epo
             {C1, Lead} = lead(C),
             {C1, Effects ++ Lead};
         false ->
-            %% A promise may have named servers nobody has asked yet.
+            %% A promise may have named servers that have not been sent a
+            %% prepare yet.
             New = (lists:usort(lists:append([M || {M, _} <- Bar])) -- [Id]) -- C#core.asked,
             {C#core{asked = C#core.asked ++ New}, Effects ++ [{send, Peer, {prepare, Epoch, From}} || Peer <- New]}
     end.
 
-%% TLA+ Bar: every configuration this server has reason to think was in
-%% force for the indexes it is asking about. What it has applied, what is in
-%% its own log, and, as a candidate, what the promises report.
+%% TLA+ Bar. Returns every configuration that may have been in force for the
+%% indexes that this server asks about:
+%%   - the configuration that this server has applied;
+%%   - every configuration in the log of this server;
+%%   - if this server is a candidate, every configuration that the promises
+%%     report.
 bar(C = #core{acfg = ACfg, cfgs = Cfgs, promises = Promises, from = From}) ->
     Reported =
         case C#core.role of
@@ -754,8 +949,9 @@ bar(C = #core{acfg = ACfg, cfgs = Cfgs, promises = Promises, from = From}) ->
 parts({final, Simple}) -> [Simple];
 parts({joint, Old, New}) -> [Old, New].
 
-%% The configuration in force: the latest entry above the commit index, or
-%% what has been applied.
+%% Returns the configuration in force. This is the latest configuration
+%% entry above the commit index. If there is no such entry, it is the
+%% configuration that has been applied.
 in_force(#core{acfg = ACfg, cfgs = Cfgs}) when map_size(Cfgs) =:= 0 ->
     ACfg;
 in_force(#core{cfgs = Cfgs}) ->
@@ -767,14 +963,15 @@ peers(C = #core{id = Id}) ->
 is_member(C = #core{id = Id}) ->
     lists:member(Id, members(C)).
 
-%% During a change, a quorum of each.
+%% During a configuration change, the set must contain a quorum of each
+%% configuration.
 q1(Set, C) ->
     lists:all(fun({Members, Spec}) -> peace_quorum:is_phase_one_quorum(Spec, Members, Set) end, parts(in_force(C))).
 
 q2(Set, C) ->
     lists:all(fun({Members, Spec}) -> peace_quorum:is_phase_two_quorum(Spec, Members, Set) end, parts(in_force(C))).
 
-%% Keeps `cfgs' in step with entries written to the log.
+%% Updates `cfgs' to match the entries that are written to the log.
 note(Entries, C = #core{cfgs = Cfgs0}) ->
     Cfgs = lists:foldl(
         fun
@@ -786,13 +983,15 @@ note(Entries, C = #core{cfgs = Cfgs0}) ->
     ),
     C#core{cfgs = Cfgs}.
 
-%% TLA+ Propose for every index a promise mentioned, plus CatchUp for the ones
-%% reported decided.
+%% TLA+ Propose for every index that a promise mentioned, and CatchUp for
+%% the indexes that were reported as decided.
 lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log = Log0}) ->
-    %% The candidate's own entries are read now, not when it started asking:
-    %% it may have learned decided indexes in between, and must not overwrite
-    %% one with a stale report. What it has applied since it asked needs no
-    %% proposal, and may already be under a snapshot.
+    %% The entries of the candidate itself are read now, not at the time
+    %% the candidate sent the prepare. The candidate may have learned
+    %% decided indexes since that time. The candidate must not overwrite a
+    %% decided index with an older report. The indexes that the candidate
+    %% has applied since it sent the prepare need no proposal. Those indexes
+    %% may already be covered by a snapshot.
     From = max(From0, C0#core.commit + 1),
     Reports = [R || R = {I, _, _} <- lists:append([entries_from(From, Log0) | maps:values(Promises)]), I >= From],
     Best = lists:foldl(fun best/2, #{}, Reports),
@@ -840,7 +1039,8 @@ lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log =
             broadcast(C2, []),
     {C2, Effects}.
 
-%% Highest epoch wins; `learned' outranks every epoch.
+%% Keeps, for each index, the report with the highest epoch. `learned' ranks
+%% above every epoch.
 best({I, Epoch, Value}, Acc) ->
     case Acc of
         #{I := {Held, _}} ->
@@ -862,7 +1062,8 @@ entries_from(From, Log) ->
 %% Phase two
 %% ---------------------------------------------------------------------------
 
-%% TLA+ Propose for a fresh index, and the leader's own Accept.
+%% TLA+ Propose for a new index, together with the Accept of the leader
+%% itself.
 propose(
     From,
     Kind,
@@ -894,8 +1095,9 @@ propose(
         pending = Pending#{I => {Tag, From, Kind}}
     },
     {C2, Settled} = settle(C1),
-    %% Of the configuration in force with this entry in the log: a joint
-    %% entry goes to the servers it adds.
+    %% The targets are taken from the configuration that is in force with
+    %% this entry in the log. Therefore a joint entry is sent to the servers
+    %% that it adds.
     {C3, Targets} = targets(C2),
     Effects =
         [{persist, #{entries => [{I, Entry}]}}] ++
@@ -905,8 +1107,9 @@ propose(
 propose(From, _Kind, _What, C = #core{leader = Leader}) ->
     {C, [{reply, From, {error, {not_leader, Leader}}}]}.
 
-%% The leader's heartbeat: to each peer the commit index and, unless it is
-%% one of `Quiet', the undecided entries it has not acknowledged.
+%% The heartbeat of the leader. The leader sends the commit index to each
+%% peer. To each peer that is not in `Quiet', the leader also sends the
+%% undecided entries that the peer has not acknowledged.
 broadcast(C = #core{epoch = Epoch, commit = Commit, acks = Acks, log = Log, now = Now}, Quiet) ->
     Peers = peers(C),
     Open = lists:sort(maps:to_list(Acks)),
@@ -926,10 +1129,12 @@ broadcast(C = #core{epoch = Epoch, commit = Commit, acks = Acks, log = Log, now 
      || Peer <- Peers
     ].
 
-%% TLA+ LeaderLearn: every index a phase-two quorum has accepted is decided.
+%% TLA+ LeaderLearn. Every index that a phase-two quorum has accepted is
+%% decided.
 settle(C = #core{role = leader, acks = Acks, log = Log}) ->
-    %% Against the configuration in force now, whichever was when the index
-    %% was proposed. See formal/Reconfig.tla, `LeaderLearn'.
+    %% The quorum is checked against the configuration in force now. It
+    %% does not matter which configuration was in force when the index was
+    %% proposed. See formal/Reconfig.tla, `LeaderLearn'.
     Decided = [I || {I, Who} <- lists:sort(maps:to_list(Acks)), q2(Who, C)],
     case Decided of
         [] ->
@@ -950,8 +1155,9 @@ settle(C = #core{role = leader, acks = Acks, log = Log}) ->
 %% TLA+ Promise.
 msg({prepare, Epoch, From}, Peer, C0 = #core{promised = Promised}) when Epoch > Promised ->
     case fenced(C0) of
-        %% Silence, as if the message were lost: a refusal would teach the
-        %% candidate nothing it can use before the lease runs out.
+        %% This server sends no reply, as if the message were lost. A
+        %% refusal would give the candidate no information that it could
+        %% use before the lease expires.
         true -> {C0, []};
         false -> promise(Epoch, From, Peer, C0)
     end;
@@ -967,9 +1173,10 @@ promise(Epoch, From, Peer, C0) ->
     Promise = {promise, Epoch, entries_from(From, C1#core.log), C1#core.snap},
     {C1, [{persist, #{promised => Epoch}}] ++ Follow ++ [{send, Peer, Promise}]}.
 
-%% The acceptor has dropped indexes this candidate asked about, so its report
-%% is silent on them. They are decided; what they hold the candidate can only
-%% find out by catching up, and until it has it must not lead.
+%% The acceptor has removed indexes that this candidate asked about, so the
+%% promise contains nothing about those indexes. Those indexes are decided.
+%% The candidate can learn their values only by catching up. The candidate
+%% must not lead until it has caught up.
 msg1({promise, Epoch, _Entries, Snap}, Peer, C0 = #core{role = candidate, epoch = Epoch, from = From}) when
     Snap >= From, C0#core.snapshot_guard
 ->
@@ -979,16 +1186,18 @@ msg1({promise, Epoch, Entries, _Snap}, Peer, C = #core{role = candidate, epoch =
     maybe_lead(C#core{promises = (C#core.promises)#{Peer => Entries}}, []);
 msg1({promise, _Epoch, _Entries, _Snap}, _Peer, C) ->
     {C, []};
-%% Somebody has promised an epoch above the one being run here, so it cannot
-%% win. Remember the epoch so the next campaign outbids it.
+%% Another server has promised an epoch higher than the epoch that this
+%% server is running, so the epoch of this server cannot win. This server
+%% records the higher epoch, so that its next campaign uses an epoch above
+%% it.
 msg1({nack, Epoch}, _Peer, C = #core{role = Role, epoch = Mine}) when
     Role =/= follower, Epoch > Mine
 ->
     follow(C#core{seen = max(Epoch, C#core.seen)}, undefined);
 msg1({nack, Epoch}, _Peer, C) ->
     {C#core{seen = max(Epoch, C#core.seen)}, []};
-%% Would this server promise `Epoch'? Only if it could, and only if it has
-%% no leader of its own to lose.
+%% A prevote asks whether this server would promise `Epoch'. This server
+%% answers yes only if it could promise `Epoch' and it has no leader.
 msg1({prevote, Epoch}, Peer, C = #core{promised = Promised, leader = undefined, role = Role}) when
     Epoch > Promised, Role =/= leader
 ->
@@ -1013,7 +1222,8 @@ msg1({prevote_ok, Epoch}, Peer, C = #core{prevote = {Epoch, Granted0}, id = Id})
     end;
 msg1({prevote_ok, _Epoch}, _Peer, C) ->
     {C, []};
-%% TLA+ Accept, then FollowerCommit for what the commit index covers.
+%% TLA+ Accept, followed by FollowerCommit for the indexes that the commit
+%% index covers.
 msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #core{promised = Promised}) when
     Epoch >= Promised
 ->
@@ -1023,10 +1233,11 @@ msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #cor
             _ -> follow(C0, Peer)
         end,
     Log0 = C1#core.log,
-    %% A decided entry is never replaced, but it is still acknowledged: a
-    %% leader that has not learned the index is decided needs the answer.
-    %% Nor is anything stored at an index the snapshot covers: it is decided
-    %% too, and only looks empty.
+    %% A decided entry is never replaced. It is still acknowledged, because
+    %% a leader that has not learned that the index is decided needs the
+    %% acknowledgement. No entry is stored at an index that the snapshot
+    %% covers. Such an index is also decided. It has no entry in the log
+    %% only because the snapshot removed the entry.
     Stored = [
         {I, {Epoch, Value}}
      || {I, Value} <- Entries, I > C1#core.snap, not is_learned(I, Log0)
@@ -1036,8 +1247,9 @@ msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #cor
     C2 = (note(Stored, C1))#core{
         promised = Epoch,
         seen = max(Epoch, C1#core.seen),
-        %% From now, by this server's clock: later than the leader counts
-        %% from, which is when it sent.
+        %% The lease runs from now, by the clock of this server. This is
+        %% later than the time that the leader counts from, which is the
+        %% time the leader sent the message.
         lease_until =
             case C1#core.lease_ms of
                 undefined -> C1#core.lease_until;
@@ -1062,11 +1274,14 @@ msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #cor
         [{persist, Batch} || map_size(Batch) > 0] ++
             Follow ++
             Applied ++
-            %% Sent even when there was nothing to accept: it is how the
-            %% leader knows this server still hears it.
+            %% The accept is sent even when there was nothing to accept. The
+            %% leader uses the accept to know that this server still
+            %% receives its messages.
             [{send, Peer, {accept, Epoch, [I || {I, _} <- Entries], Stamp}}] ++
-            %% Indexes the leader has decided that this server cannot decide
-            %% from its own log: missing, or held from an older epoch.
+            %% The catchup is sent when the leader has decided indexes that
+            %% this server cannot mark as decided from its own log. The
+            %% entries at those indexes are missing, or they are from an
+            %% older epoch.
             [{send, Peer, {catchup, C3#core.commit + 1}} || C3#core.commit < LeaderCommit],
     {C3, Effects};
 msg1({propose, _Epoch, _Entries, _Commit, _Stamp}, Peer, C = #core{promised = Promised}) ->
@@ -1087,8 +1302,9 @@ msg1({accept, Epoch, Indexes, Stamp}, Peer, C = #core{role = leader, epoch = Epo
 msg1({accept, _Epoch, _Indexes, _Stamp}, _Peer, C) ->
     {C, []};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, snap = Snap}) when From >= 1, From =< Snap ->
-    %% The entries are gone. The state they led to is not, and the state as
-    %% of the commit index is as good as the state as of the snapshot.
+    %% The entries have been removed. The state that the entries produced
+    %% is still held. The state as of the commit index serves as well as
+    %% the state as of the snapshot.
     {C, [{send, Peer, {install, Commit, {C#core.mstate, C#core.sessions, C#core.acfg}}}]};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, log = Log}) when From >= 1, From =< Commit ->
     To = min(Commit, From + ?MAX_BATCH - 1),
@@ -1099,9 +1315,9 @@ msg1({catchup, _From}, _Peer, C) ->
 msg1({install, Index, _Snapshot}, _Peer, C = #core{commit = Commit}) when Index =< Commit ->
     {C, []};
 msg1({install, Index, {MState, Sessions, ACfg}}, _Peer, C0 = #core{role = Role, log = Log0}) ->
-    %% A leader cannot tell whether its own proposals below `Index' are what
-    %% was decided there. By the argument at `learned' below, it has been
-    %% deposed.
+    %% A leader cannot tell whether its own proposals below `Index' are the
+    %% values that were decided at those indexes. By the argument at
+    %% `learned' below, this leader has been deposed.
     {C1, Follow} =
         case Role of
             leader -> follow(C0, undefined);
@@ -1121,14 +1337,20 @@ msg1({install, Index, {MState, Sessions, ACfg}}, _Peer, C0 = #core{role = Role, 
     {C3, [{persist, #{snapshot => {Index, {MState, Sessions, ACfg}}}}] ++ Follow ++ Applied};
 msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine, snap = Snap}) ->
     New = [{I, {learned, Value}} || {I, Value} <- Entries, I > Snap, not is_learned(I, Log0)],
-    %% TLA+ Conflict. A leader should learn nothing this way that it did not
-    %% propose itself: every undecided index it knows of holds its own
-    %% proposal, and a lower epoch cannot have decided an index beyond those
-    %% without its phase-one quorum having reported it. So an index decided with
-    %% another value, or a decided index it has not proposed in at all, is the
-    %% work of a later epoch. Its commit index must not come to cover such
-    %% an index while followers still take it to mean "the leader's proposal
-    %% was decided", and it must not go on to propose in one. It steps down.
+    %% TLA+ Conflict. A leader should learn no value from this message that
+    %% the leader did not propose itself, for two reasons:
+    %%   - Every undecided index that the leader knows of holds a proposal
+    %%     of the leader.
+    %%   - A lower epoch cannot have decided an index beyond those indexes
+    %%     without the phase-one quorum of the leader having reported it.
+    %% Therefore a later epoch decided the index in both of these cases:
+    %%   - The index is decided with a value that differs from the proposal
+    %%     of the leader.
+    %%   - The index is decided and the leader has not proposed at it.
+    %% The commit index of the leader must not come to cover such an index
+    %% while followers still read the commit index as "the leader's proposal
+    %% was decided". The leader also must not go on to propose at such an
+    %% index. The leader steps down.
     Conflict =
         C0#core.conflict_step_down andalso Role =:= leader andalso
             lists:any(
@@ -1154,9 +1376,11 @@ msg1({learned, Entries}, _Peer, C0 = #core{log = Log0, role = Role, epoch = Mine
     {C3, Applied} = advance(C2),
     {C3, [{persist, #{entries => New}} || New =/= []] ++ Follow ++ Applied}.
 
-%% TLA+ FollowerCommit: from the first uncommitted index, mark decided every
-%% entry the leader's commit index covers that is from the leader's epoch.
-%% Stops at the first index it cannot vouch for.
+%% TLA+ FollowerCommit. Starting from the first uncommitted index, this
+%% function marks as decided every entry that the commit index of the leader
+%% covers and that is from the epoch of the leader. The function stops at
+%% the first index whose entry is not decided and is not from the epoch of
+%% the leader.
 mark(I, LeaderCommit, Epoch, Log, Marked) when I =< LeaderCommit ->
     case Log of
         #{I := {learned, _}} ->
@@ -1174,8 +1398,9 @@ mark(_I, _LeaderCommit, _Epoch, Log, Marked) ->
 %% Roles
 %% ---------------------------------------------------------------------------
 
-%% Back to follower. Whoever was waiting on this server as leader is told the
-%% outcome is unknown: their value may yet be decided by a later leader.
+%% Returns this server to the follower role. Every caller that was waiting
+%% on this server as leader is told that the outcome is unknown. A later
+%% leader may still decide the value of such a caller.
 follow(C0 = #core{role = Role, pending = Pending}, Leader) ->
     Failed =
         [
@@ -1242,10 +1467,12 @@ apply_value(I, {'$usr', Tag, Value}, C = #core{machine = Machine, mstate = MStat
 apply_value(I, {'$ses', Tag, {ClientId, Seq}, Value}, C = #core{sessions = Sessions}) ->
     case Sessions of
         #{ClientId := {Seq, Reply, _At}} ->
-            %% Decided twice, applied once: the answer it got the first time.
+            %% The value was decided more than once. It is applied once. The
+            %% reply is the reply that was recorded the first time.
             resolve(I, Tag, Reply, C);
         #{ClientId := {Later, _Reply, _At}} when Later > Seq ->
-            %% An old copy, arriving after the client moved on.
+            %% This is an old copy. It was decided after the client moved
+            %% to a higher sequence number.
             resolve(I, Tag, {'$error', {session_superseded, Later}}, C);
         _ ->
             #core{machine = Machine, mstate = MState0, role = Role} = C,
@@ -1261,14 +1488,15 @@ apply_value(I, {'$ses', Tag, {ClientId, Seq}, Value}, C = #core{sessions = Sessi
             end
     end;
 apply_value(I, {'$cfg', Tag, Cfg}, C = #core{cfgs = Cfgs}) ->
-    %% Applied, so no longer an entry above the commit index.
+    %% The entry is now applied, so it is no longer a configuration entry
+    %% above the commit index.
     resolve(I, Tag, ok, C#core{acfg = Cfg, cfgs = maps:remove(I, Cfgs)});
 apply_value(I, {'$noop', Tag}, C) ->
     resolve(I, Tag, noop, C).
 
-%% By index, which every server agrees on, so every server evicts the same
-%% client. A client evicted while it still has a value in flight loses
-%% its protection for that value.
+%% Eviction is by index. Every server agrees on the index, so every server
+%% evicts the same client. A client that is evicted while it still has a
+%% value in flight loses the at-most-once protection for that value.
 evict(Sessions, Max) when map_size(Sessions) =< Max ->
     Sessions;
 evict(Sessions, _Max) ->
@@ -1287,8 +1515,8 @@ reconfigure(From, {Members0, Spec}, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs,
         {{final, New}, 0, _} ->
             {C, [{reply, From, {ok, ok, Id}}]};
         {{final, Old}, 0, ok} when UseJoint ->
-            %% TLA+ MayIntroduce, `joint'. Whoever asked is answered when
-            %% the final entry is applied.
+            %% TLA+ MayIntroduce, `joint'. The caller that asked for the
+            %% change is answered when the final entry is applied.
             {C1, Effects} = propose(undefined, silent, {cfg, {joint, Old, New}}, C),
             {C1#core{reconf = From}, Effects};
         {{final, _Old}, 0, ok} ->
@@ -1299,12 +1527,14 @@ reconfigure(From, {Members0, Spec}, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs,
             {C, [{reply, From, {error, reconfiguration_in_progress}}]}
     end.
 
-%% What a leader owes the configuration, looked at after every event.
+%% The actions that a leader must take for the configuration. This function
+%% runs after every event.
 membership(C = #core{role = leader, id = Id, acfg = ACfg, cfgs = Cfgs}) when map_size(Cfgs) =:= 0 ->
     case ACfg of
         {joint, _Old, New} ->
-            %% TLA+ MayIntroduce, `final': the joint entry is decided, and
-            %% nothing has followed it. Whichever leader finds things so.
+            %% TLA+ MayIntroduce, `final'. The joint entry is decided and no
+            %% configuration entry has followed it. Whichever server is the
+            %% leader when this is the case proposes the final entry.
             Kind =
                 case C#core.reconf of
                     undefined -> silent;
@@ -1315,10 +1545,12 @@ membership(C = #core{role = leader, id = Id, acfg = ACfg, cfgs = Cfgs}) when map
         {final, {Members, _Spec}} ->
             case lists:member(Id, Members) of
                 true -> {C, []};
-                %% It has seen its own removal through. Somebody who is
-                %% still a member leads from here, and is told first that
-                %% the change is decided: until one of them knows, they
-                %% cannot elect anybody without the servers they replaced.
+                %% This leader has completed its own removal. A server that
+                %% is still a member becomes the leader after this. The
+                %% members are first told that the change is decided. Until
+                %% one of the members knows that the change is decided, the
+                %% members cannot elect a leader without the servers that
+                %% they replaced.
                 false ->
                     {C1, Follow} = follow(C, undefined),
                     {C1, broadcast(C, []) ++ Follow}
@@ -1339,7 +1571,7 @@ maybe_snapshot(C = #core{commit = Commit, snap = Snap, snapshot_interval = Inter
 maybe_snapshot(C) ->
     {C, []}.
 
-%% Answers whoever is waiting on index I, if anybody is.
+%% Replies to the caller that is waiting on index I, if there is one.
 resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) ->
     case maps:take(I, Pending) of
         {{Tag, From, value}, Pending1} ->
@@ -1362,8 +1594,9 @@ resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) -
                 end,
             {C#core{pending = Pending1}, [{reply, From, Result}]};
         {{_Other, From, _Kind}, Pending1} ->
-            %% Another leader's value took the index. This one's proposal was
-            %% tied to it, so it will never be decided.
+            %% The value of another leader was decided at this index. The
+            %% proposal of this leader was tied to this index, so the
+            %% proposal will never be decided.
             {C#core{pending = Pending1}, [{reply, From, {error, leadership_lost}}]};
         error ->
             {C, []}

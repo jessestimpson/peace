@@ -1,5 +1,6 @@
-%% A machine for tests: a key-value map that also remembers the order
-%% values were applied in, so two replicas can be compared exactly.
+%% A machine for tests. The machine state is a key-value map and a history.
+%% The history records the order in which values were applied, so that two
+%% replicas can be compared exactly.
 -module(peace_test_machine).
 
 -behaviour(peace_machine).

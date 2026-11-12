@@ -1,5 +1,6 @@
-%% A planted bug: `peace_storage_dets' behind a layer that loses promises.
-%% It shows that `disk_recovers' in `peace_dst' can fail.
+%% This module is a planted bug. The module wraps `peace_storage_dets' in a
+%% layer that does not write promises. The planted bug shows that
+%% `disk_recovers' in `peace_dst' can fail.
 -module(peace_dst_lossy_disk).
 
 -behaviour(peace_storage).

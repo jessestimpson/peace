@@ -1,45 +1,63 @@
 ------------------------------ MODULE Reconfig ------------------------------
 (***************************************************************************)
-(* Membership change for peace: Flexible Paxos in which the members and    *)
-(* the quorum system are themselves decided in the log, and move from one  *)
-(* configuration to the next through a joint one.                          *)
+(* Membership change for peace. This module is Flexible Paxos in which the *)
+(* members and the quorum system are decided in the log. A change from one *)
+(* configuration to the next configuration goes through a joint            *)
+(* configuration.                                                          *)
 (*                                                                         *)
-(* This is in the direction of revision B of Howard's thesis               *)
-(* (UCAM-CL-TR-935, section 4.2), which lets the quorums differ between    *)
-(* epochs and asks a phase-one quorum of epoch e to intersect the phase-two*)
-(* quorums of every earlier epoch.  The thesis leaves open how a proposer  *)
-(* knows what those earlier quorums were.  Here the log tells it.          *)
+(* The design is related to revision B of Howard's thesis (UCAM-CL-TR-935, *)
+(* section 4.2). Revision B allows the quorums to differ between epochs.   *)
+(* Revision B requires a phase-one quorum of epoch e to intersect the      *)
+(* phase-two quorums of every earlier epoch. The thesis does not specify   *)
+(* how a proposer learns the quorums of earlier epochs. In this module the *)
+(* proposer learns them from the log.                                      *)
 (*                                                                         *)
 (* The scheme                                                              *)
-(*   - A configuration is a set of members with its two quorum systems.    *)
-(*   - A leader changes it with two log entries.  `joint(Old, New)` puts   *)
-(*     both in force: a phase-two quorum is one of each.  Once that entry  *)
-(*     is decided the leader proposes `final(New)`, after which New alone  *)
-(*     is in force.  One change at a time.                                 *)
-(*   - A leader's configuration is the latest such entry in its log,       *)
-(*     decided or not, and failing any, the configuration as of what it    *)
-(*     had applied when it campaigned.                                     *)
-(*   - A candidate needs a phase-one quorum of every configuration it has  *)
-(*     reason to think was in force for the indexes it asks about: the one *)
-(*     it has applied, and every one named by a configuration entry in     *)
-(*     the promises it receives (`UseClosure`).  A promise can therefore   *)
-(*     raise the bar.                                                      *)
+(*   - A configuration is a set of members with two quorum systems.        *)
+(*   - A leader changes the configuration with two log entries:            *)
+(*       1. `joint(Old, New)` puts both configurations in force. A         *)
+(*          phase-two quorum then consists of a phase-two quorum of Old    *)
+(*          and a phase-two quorum of New.                                 *)
+(*       2. When the joint entry is decided, the leader proposes           *)
+(*          `final(New)`. After `final(New)`, only New is in force.        *)
+(*     Only one change is in progress at a time.                           *)
+(*   - The configuration of a leader is the latest configuration entry     *)
+(*     that the leader has proposed in its epoch, whether that entry is    *)
+(*     decided or not. If the leader has proposed no configuration entry,  *)
+(*     the configuration of the leader is the configuration that the       *)
+(*     leader had applied when it started its campaign.                    *)
+(*   - A candidate needs a phase-one quorum of every configuration that    *)
+(*     the candidate has reason to believe was in force for the indexes it *)
+(*     asks about. These are the configuration the candidate has applied,  *)
+(*     and every configuration named by a configuration entry in the       *)
+(*     promises the candidate receives (`UseClosure`). A promise can       *)
+(*     therefore add a configuration from which the candidate needs a      *)
+(*     phase-one quorum.                                                   *)
 (*                                                                         *)
-(* Why that is enough, informally.  A joint entry is decided under Old, so *)
-(* any later candidate still on Old meets it in a promise and is then      *)
-(* held to New as well.  Everything decided while the joint configuration  *)
-(* is in force has a phase-two quorum of Old in it.  And `final(New)` is   *)
-(* proposed only once the joint entry is decided, by which time no         *)
-(* candidate can avoid needing a phase-one quorum of New.                  *)
+(* Informal safety argument                                                *)
+(*   - A joint entry is decided under Old. Any later candidate that is     *)
+(*     still on Old therefore receives the joint entry in a promise. That  *)
+(*     candidate then also needs a phase-one quorum of New.                *)
+(*   - Every value decided while the joint configuration is in force was   *)
+(*     accepted by a phase-two quorum of Old.                              *)
+(*   - `final(New)` is proposed only after the joint entry is decided.     *)
+(*     From that time, every candidate needs a phase-one quorum of New.    *)
 (*                                                                         *)
-(* One thing from FlexiblePaxos.tla is kept because this depends on it:    *)
-(* a leader that learns an index was decided against its own proposal stops*)
-(* (`Conflict`).  Without it a deposed leader whose joint entry lost could *)
-(* take the index being decided for its entry being decided, and go on to  *)
-(* `final`.  TLC finds that in nineteen steps.                             *)
+(* This module keeps one rule from FlexiblePaxos.tla, because membership   *)
+(* change depends on the rule. A leader stops when it learns that an index *)
+(* was decided with a value different from its own proposal (`Conflict`).  *)
+(* Without the rule, this sequence is possible:                            *)
+(*   1. A deposed leader proposes a joint entry, and a different value is  *)
+(*      decided at that index.                                             *)
+(*   2. The leader learns that the index is decided and treats its own     *)
+(*      joint entry as decided.                                            *)
+(*   3. The leader proposes `final`.                                       *)
+(* TLC finds this sequence in nineteen steps.                              *)
 (*                                                                         *)
-(* What is left out is the rest of what FlexiblePaxos.tla covers: the      *)
-(* commit index and snapshots.  Learning is one abstract action here.      *)
+(* What is not modelled                                                    *)
+(*   - The commit index and snapshots. FlexiblePaxos.tla models them.      *)
+(*   - The separate ways of learning. Learning is one abstract action in   *)
+(*     this module.                                                        *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -47,31 +65,38 @@ CONSTANTS
     Acceptors,
     Ordinary,           \* values that are not configuration entries
     Configs,        \* configuration names
-    InitConfig,     \* the one every acceptor starts in
+    InitConfig,     \* the configuration that every acceptor starts in
     Q1(_),          \* Q1(c): the phase-one quorums of configuration c
-    Q2(_),          \* Q2(c): its phase-two quorums
+    Q2(_),          \* Q2(c): the phase-two quorums of configuration c
     MaxEpoch,
     MaxIndex,
     None,
-    UseJoint,       \* FALSE: a leader goes straight to `final`.  A mutation;
-                    \* see ReconfigNoJoint.cfg.
+    UseJoint,       \* FALSE: a leader proposes `final` without a joint
+                    \* entry.  FALSE is a mutation; see ReconfigNoJoint.cfg.
     UseClosure,     \* FALSE: a candidate asks only the configuration it has
-                    \* applied.  A mutation; see ReconfigNoClosure.cfg.
-    CoLocated       \* TRUE: a proposer is also an acceptor and acts as one at
-                    \* once (thesis section 3.7), as a peace server does: a
-                    \* candidate promises its own epoch when it starts it, a
-                    \* leader accepts its own proposal when it makes it, and
-                    \* a server that has promised a later epoch no longer
-                    \* proposes in an earlier one.  FALSE leaves all three to
-                    \* happen in any order or not at all, which is more than
-                    \* peace can do and costs states; see
+                    \* applied.  FALSE is a mutation; see
+                    \* ReconfigNoClosure.cfg.
+    CoLocated       \* TRUE: a proposer is also an acceptor, and takes the
+                    \* acceptor step in the same action as the proposer step
+                    \* (thesis section 3.7).  A peace server does this:
+                    \* - A candidate promises its own epoch when it starts
+                    \*   the epoch.
+                    \* - A leader accepts its own proposal when it makes the
+                    \*   proposal.
+                    \* - A server that has promised a later epoch no longer
+                    \*   proposes in an earlier epoch.
+                    \* With FALSE, these three things can happen in any order
+                    \* or not happen.  FALSE allows more than peace can do
+                    \* and has a larger state space; see
                     \* ReconfigThreeIndexes.cfg.
 
 VARIABLES
     promised,       \* promised[a]
-    accepted,       \* accepted[a][s]: the proposal a last accepted for index s
-    owner,          \* owner[b]: who started epoch b
-    camp,           \* camp[b]: what its owner knew when it started
+    accepted,       \* accepted[a][s]: the proposal that a last accepted for
+                    \* index s
+    owner,          \* owner[b]: the acceptor that started epoch b
+    camp,           \* camp[b]: what the owner of epoch b knew when it started
+                    \* epoch b
     msgs
 
 vars == <<promised, accepted, owner, camp, msgs>>
@@ -87,8 +112,8 @@ Values          == Ordinary \cup ConfigEntries
 
 NoVote == [epoch |-> -1, val |-> None]
 
-\* The configuration state: the set of configurations in force.  One, or
-\* two while a change is under way.
+\* The configuration state is the set of configurations in force.  The set
+\* has one configuration, or two configurations while a change is in progress.
 InForce(e) == IF e.type = "joint" THEN {e.old, e.new} ELSE {e.new}
 
 Init ==
@@ -104,7 +129,8 @@ Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 IsLearned(a, s) == accepted[a][s].epoch = Learned
 
-\* The first index a has not applied: decided indexes are applied in order.
+\* The first index that a has not applied.  Decided indexes are applied in
+\* order.
 FirstOpen(a) ==
     IF \A s \in Indexes : IsLearned(a, s) THEN MaxIndex + 1
     ELSE CHOOSE s \in Indexes : ~ IsLearned(a, s) /\ \A t \in 1..(s - 1) : IsLearned(a, t)
@@ -116,8 +142,8 @@ Applied(a, upto) ==
         ELSE InForce(accepted[a][Max(cfgIndexes)].val)
 
 -----------------------------------------------------------------------------
-(* peace: a candidate asks from its first unapplied index, and remembers   *)
-(* the configuration it had applied.                                       *)
+(* In peace, a candidate asks from its first unapplied index. The          *)
+(* candidate remembers the configuration it had applied.                   *)
 Prepare(a, b) ==
     /\ owner[b] = None
     /\ owner' = [owner EXCEPT ![b] = a]
@@ -140,23 +166,28 @@ Promise(a, b) ==
 
 Proposals(b) == {m \in msgs : m.type = "propose" /\ m.epoch = b}
 
-\* What the leader of b has in force: the latest configuration entry it has
-\* proposed, or what it started with.
+\* The configurations that the leader of b has in force.  They are the
+\* configurations of the latest configuration entry that the leader has
+\* proposed.  If the leader has proposed no configuration entry, they are the
+\* configurations that the leader had applied when it started epoch b.
 LeaderConfig(b) ==
     LET cfgs == {m \in Proposals(b) : m.val \in ConfigEntries}
     IN  IF cfgs = {} THEN camp[b].base
         ELSE LET last == CHOOSE m \in cfgs : \A n \in cfgs : n.index <= m.index
              IN  InForce(last.val)
 
-\* peace_core steps down at this point: the leader of b holds an index decided
-\* with a value other than the one it proposed there.
+\* Conflict(b) holds when the leader of b holds an index as decided with a
+\* value different from the value the leader proposed at that index.
+\* peace_core steps down when this happens.
 Conflict(b) ==
     \E m \in Proposals(b) :
         /\ accepted[owner[b]][m.index].epoch = Learned
         /\ accepted[owner[b]][m.index].val # m.val
 
-\* Every configuration a set of promises gives the candidate reason to
-\* respect, for the indexes it asked about.
+\* Every configuration from which the candidate of epoch b needs a phase-one
+\* quorum, given a set of promises.  The set contains the configurations the
+\* candidate had applied, and the configurations named by the promises for
+\* the indexes the candidate asked about.
 Bar(b, reports) ==
     camp[b].base \cup
         (IF UseClosure
@@ -166,16 +197,19 @@ Bar(b, reports) ==
                                             /\ m.votes[s].val \in ConfigEntries}}
             ELSE {})
 
-\* The promises of P are enough to lead epoch b.
+\* The promises from the acceptors in P are sufficient to lead epoch b.
 Elected(b, P) ==
     LET reports == {m \in msgs : m.type = "promise" /\ m.epoch = b /\ m.acc \in P}
     IN  /\ \A a \in P : \E m \in reports : m.acc = a
         /\ \A c \in Bar(b, reports) : \E Q \in Q1(c) : Q \subseteq P
 
-\* Whether the leader of b may introduce v, a value of its own, at index s.
-\* Ordinary values always.  A configuration entry only when the last change is
-\* over: `joint` from a settled configuration, `final` once the leader
-\* knows the joint entry is decided.
+\* Whether the leader of b may propose v at index s, when v is a value that
+\* the leader chose and not a value that a promise reported.
+\* - The leader may always propose an ordinary value.
+\* - The leader may propose a configuration entry only when the previous
+\*   change is complete.  The leader may propose `joint` when one settled
+\*   configuration is in force.  The leader may propose `final` when the
+\*   leader knows that the joint entry is decided.
 MayIntroduce(b, s, v) ==
     LET a    == owner[b]
         cfgs == {m \in Proposals(b) : m.val \in ConfigEntries /\ m.index < s}
@@ -202,8 +236,9 @@ MayIntroduce(b, s, v) ==
            /\ Cardinality(now) = 1
            /\ v.new \notin now
 
-(* peace: the leader proposes index by index from where it asked.  An index*)
-(* somebody reported is re-proposed with the value of the highest epoch.   *)
+(* In peace, the leader proposes one index at a time, starting from the    *)
+(* first index it asked about. At an index for which any promise reported  *)
+(* a proposal, the leader proposes again the value of the highest epoch.   *)
 Propose(b, s, v) ==
     /\ owner[b] # None
     /\ ~ Conflict(b)
@@ -242,8 +277,9 @@ Accept(a, b, s) ==
     /\ Send([type |-> "accept", epoch |-> b, index |-> s, acc |-> a])
     /\ UNCHANGED <<owner, camp>>
 
-(* peace: the leader counts acknowledgements against what it has in force  *)
-(* now: a phase-two quorum of each configuration.                          *)
+(* In peace, the leader counts acknowledgements against the configurations *)
+(* it has in force at that time. The leader needs a phase-two quorum of    *)
+(* each configuration.                                                     *)
 LeaderLearn(b, s) ==
     LET a == owner[b]
         acks == {x \in Acceptors : [type |-> "accept", epoch |-> b, index |-> s, acc |-> x] \in msgs}
@@ -257,7 +293,8 @@ LeaderLearn(b, s) ==
               /\ accepted' = [accepted EXCEPT ![a][s] = [epoch |-> Learned, val |-> m.val]]
         /\ UNCHANGED <<promised, owner, camp, msgs>>
 
-(* peace: every way a server learns an index from one that has decided it. *)
+(* In peace, a server can learn an index in several ways from a server     *)
+(* that holds the index as decided. This action represents all of them.    *)
 Learn(a, from, s) ==
     /\ IsLearned(from, s)
     /\ ~ IsLearned(a, s)
@@ -275,25 +312,27 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-\* No two servers decide an index differently.
+\* No two servers hold different decided values at the same index.
 LearnedAgree ==
     \A a1, a2 \in Acceptors, s \in Indexes :
         (IsLearned(a1, s) /\ IsLearned(a2, s)) => accepted[a1][s].val = accepted[a2][s].val
 
-\* Reachability: each is meant to FAIL.
+\* Reachability.  Each invariant below must FAIL.
 
 \* No change ever completes.
 NeverFinal == \A a \in Acceptors, s \in Indexes :
     ~ (IsLearned(a, s) /\ accepted[a][s].val \in ConfigEntries /\ accepted[a][s].val.type = "final")
 
-\* No ordinary value is ever decided after a change has completed.  Needs
-\* three indexes: joint, final, and the value.
+\* No ordinary value is ever decided after a change has completed.  A
+\* violation needs three indexes: one for the joint entry, one for the final
+\* entry, and one for the ordinary value.
 NeverAfterFinal == \A a \in Acceptors, s \in Indexes, t \in Indexes :
     ~ (/\ s < t
        /\ IsLearned(a, s) /\ accepted[a][s].val \in ConfigEntries /\ accepted[a][s].val.type = "final"
        /\ IsLearned(a, t) /\ accepted[a][t].val \in Ordinary)
 
-\* No promise ever raises the bar.
+\* No promise ever adds a configuration from which a candidate needs a
+\* phase-one quorum.
 NeverRaised == \A b \in Epochs :
     \A P \in SUBSET Acceptors :
         LET reports == {m \in msgs : m.type = "promise" /\ m.epoch = b /\ m.acc \in P}
