@@ -18,7 +18,7 @@ Section numbers refer to Heidi Howard's thesis,
 | Command | What it runs | Time |
 |---|---|---|
 | `./check_all.sh quick` | Small configs, mutations and reachability checks | a few minutes |
-| `./check_all.sh long` | Configs with millions of states | about 3 hours |
+| `./check_all.sh long` | Configs with millions of states | about 2 hours |
 | `./check_all.sh soak` | The three-index membership config | about 8 hours |
 | `./check.sh <Config> pass` | One config that must hold | |
 | `./check.sh <Config> fail` | One config that must violate an invariant | |
@@ -163,15 +163,17 @@ hold only because the model does very little.
 | `FPaxosGrid` | 4 | 2 × 2 grid (§4.1.3) | 2 × 1 | 13.0 million | 4 minutes |
 | `FPaxosFiveAcceptors` | 5 | 3 / 3 | 2 × 1 | 6.4 million | 27 minutes |
 | `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 8.2 million | 6 minutes |
-| `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | run in progress | |
+| `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | 67.9 million | 59 minutes |
 
 These results are from 2026-11-11, after the model correction described in
 the next section. The correction removes behaviours, so the counts are lower
-than before it. For these runs TLC estimates the probability that a
-fingerprint collision hid a state at less than 0.00001.
+than before it. `FPaxosMajorityTwoIndexes` had 116.9 million states and took
+80 minutes before the correction.
 
-`FPaxosMajorityTwoIndexes` has not finished on the corrected model. Before
-the correction it had 116.9 million states and took 80 minutes.
+TLC estimates the probability that a fingerprint collision hid a state. For
+`FPaxosMajorityTwoIndexes` the estimate is 0.00014 from the observed
+fingerprints and 0.0023 from its conservative formula. For the other four
+runs it is less than 0.00001.
 
 ### Model correction of 2026-11-11
 
@@ -265,7 +267,7 @@ checks that every behaviour of `FlexiblePaxosInd.tla` is a behaviour of
 
 | Constants | Acceptors, quorums | Epochs × indexes | `step` time | TLC on the same bounds |
 |---|---|---|---|---|
-| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 seconds | `FPaxosMajorityTwoIndexes`: 80 minutes before the correction |
+| `C3E2I2` | 3, 2 / 2 | 2 × 2 | 25 seconds | `FPaxosMajorityTwoIndexes`: 59 minutes |
 | `C3E3I1` | 3, 2 / 2 | 3 × 1 | 19 seconds | `FPaxosThreeEpochs`: 2 minutes |
 | `C5E2I1` | 5, 4 / 2 | 2 × 1 | 26 seconds | not run |
 | `C3E3I3` | 3, 2 / 2 | 3 × 3 | 2 minutes | too large to finish |

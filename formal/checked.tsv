@@ -3,7 +3,7 @@ FPaxosEvenNodes	pass	64311cdeabcd3528	2026-11-11	258955 distinct states, 12s
 FPaxosFiveAcceptors	pass	9ed4d943aceec4be	2026-11-11	6404845 distinct states, 27min 29s
 FPaxosGrid	pass	158b8f27fba307cf	2026-11-11	13026025 distinct states, 04min 21s
 FPaxosMajority	pass	bee4f5f1b2edc587	2026-11-11	29249 distinct states, 01s
-FPaxosMajorityTwoIndexes	pass	5fdfc2b1cba618f1	2026-11-10	116.9 million distinct states, from the run recorded in README.md
+FPaxosMajorityTwoIndexes	pass	913e5b4c9c99eb7d	2026-11-11	67941821 distinct states, 58min 57s
 FPaxosNoConflictStepDown	fail	397e10c058628a1e	2026-11-11	509628 distinct states, 38s
 FPaxosNoFence	fail	af6745983b4db6d4	2026-11-11	6056 distinct states, 00s
 FPaxosNoSnapshotGuard	fail	76798168636a9986	2026-11-11	29652 distinct states, 00s
