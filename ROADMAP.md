@@ -67,8 +67,6 @@ Status: done on 2026-11-12. The results are in
 
 Remaining limitations:
 
-- The simulated disk is `eta_disk`, on the `simulated-disk` branch of eta.
-  `make dst` needs that branch until it is merged.
 - The simulation does not make storage operations fail. Those faults are
   covered by unit tests.
 - A checkpoint rewrites the whole machine state. See milestone 4.

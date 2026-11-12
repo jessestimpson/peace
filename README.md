@@ -299,8 +299,6 @@ Limitations:
   The unit tests cover real dets.
 - The simulation does not make storage operations fail. Failed writes,
   failed syncs and damaged records are covered by unit tests.
-- The write-ahead log workload needs `eta_disk`, which is on the
-  `simulated-disk` branch of eta and is not yet on `main`.
 
 ### Trace validation
 
