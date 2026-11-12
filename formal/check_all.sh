@@ -19,7 +19,7 @@ QUICK_PASS="FPaxosMajority FPaxosSingleton FPaxosAllAboard FPaxosEvenNodes FPaxo
 QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown FPaxosNoSnapshotGuard ReconfigNoJoint ReconfigCoLocatedNoJoint ReconfigCoLocatedNoClosure"
 # Reachability: each must reach the state its invariant denies.
 QUICK_REACH="FPaxosReachableDecided FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict FPaxosReachableSnapshot ReconfigCoLocatedReachableFinal ReconfigCoLocatedReachableRaised ReconfigReachableAfterFinal"
-LONG_PASS="FPaxosThreeEpochs FPaxosGrid FPaxosSingletonTwoIndexes FPaxosMajorityTwoIndexes Reconfig"
+LONG_PASS="FPaxosThreeEpochs FPaxosGrid FPaxosFiveAcceptors FPaxosSingletonTwoIndexes FPaxosMajorityTwoIndexes Reconfig"
 # Membership change with separate roles: a mutation and two reachability
 # checks that take minutes.
 LONG_FAIL="ReconfigNoClosure ReconfigReachableFinal ReconfigReachableRaised"

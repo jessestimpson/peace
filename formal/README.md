@@ -31,6 +31,12 @@ implements, for a config to substitute.
   its own proposal. If it went on advertising a commit index over that index,
   a follower holding the old proposal would take it as decided.
   `ConflictStepDown` is the guard; peace steps down at that moment.
+  The same leader may also learn an index it has proposed nothing in. It
+  must not then propose there: it could advertise a commit index over the
+  index first and put its own value under it afterwards. The model's
+  `Propose` refuses an index its leader already holds decided, under the
+  same switch. Until 2026-11-11 it did not, and see "A hole in the model"
+  below.
 - **Snapshots.** An acceptor may drop a decided index, after which its
   promise says only that the index is dropped, not what it held. A proposer
   that read that as "free" could get a second value decided, so it does not
@@ -115,8 +121,12 @@ able to reach for the properties above to mean anything, so each must fail.
 |---|---|---|---|---|
 | `FPaxosThreeEpochs` | 3 | 2 / 2 | 3 × 1 | 13.0 million |
 | `FPaxosGrid` | 4 | 2 × 2 grid (§4.1.3) | 2 × 1 | 16.0 million |
+| `FPaxosFiveAcceptors` | 5 | 3 / 3 | 2 × 1 | 6.4 million |
 | `FPaxosSingletonTwoIndexes` | 3 | 3 / 1 | 2 × 2 | 21.9 million |
 | `FPaxosMajorityTwoIndexes` | 3 | 2 / 2 | 2 × 2 | 116.9 million |
+
+`FPaxosFiveAcceptors` was run on 2026-11-11 with the fix described below.
+The other four counts are from before that fix and are being run again.
 
 Last run in full on 2026-11-10, after the models took the thesis's terms; the
 counts are the same as before the renaming, as they should be. The first
@@ -125,6 +135,33 @@ five each. `FPaxosMajorityTwoIndexes` took 1 hour 20 minutes: 1.27 billion
 states generated, depth 35. At that size
 TLC's own estimate of the chance that a fingerprint collision hid a state is
 between 0.002 and 0.007, where for the others it is negligible.
+
+## A hole in the model
+
+Until 2026-11-11 `FlexiblePaxos.tla` had the first half of the stale-leader
+guard and not the second, and with every safeguard on it violated
+`LearnedSound`. Five acceptors are the fewest that can show it, and TLC does
+in nineteen states: epoch 1 collects its promises; epoch 2 decides a value
+at index 1 without it; epoch 1's leader, not knowing it is deposed, learns
+the index by catching up, sends a commit index covering it, and only then
+proposes there, which its phase one allows because its promises saw the
+index empty; a fifth acceptor accepts that proposal, sees the commit index,
+and holds as decided a value that was not.
+
+Every config that was meant to hold had three or four acceptors, where the
+deposed leader has no such follower. Five had only been run with the guard
+off. `FPaxosFiveAcceptors` is the config that would have caught it, and is
+now in the long set.
+
+The code was never wrong in this way. The simulation's churn workload found
+the same sequence in the code well before, `peace_core` was changed to step
+down on learning an index it had not proposed in, and
+`deposed_leader_steps_down_on_unproposed_index_test` has held it since. The
+fix did not go back into the model, and nothing checked that it had. Trace
+validation would not have caught it either: it checks that the code does
+only what the model allows, and the model allowed too much. It was found
+while writing an inductive invariant, whose clause for commit messages could
+not be made true.
 
 ## Membership change
 

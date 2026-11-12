@@ -183,8 +183,23 @@ Promise(a, b) ==
 (* peace: on a phase-one quorum of promises the new leader re-proposes, for*)
 (* every index anybody reported, the value reported at the highest epoch,  *)
 (* and is free to propose anything where nobody reported a proposal.       *)
+(*                                                                         *)
+(* It does not propose in an index it already knows is decided.  Without   *)
+(* that the commit index is unsound in a way `Conflict` below does not     *)
+(* cover: a leader that has been deposed without hearing of it can learn   *)
+(* an index a later epoch decided, advertise a commit index over it having *)
+(* proposed nothing there, and only then propose there, freely, since its  *)
+(* own phase one saw the index empty.  A follower holding that proposal    *)
+(* takes it as decided.  Five acceptors are the fewest that can do it, and *)
+(* TLC finds it in nineteen states (FPaxosFiveAcceptors.cfg, before this   *)
+(* conjunct).  peace_core never proposes in an index it holds decided, and *)
+(* steps down on learning one it has not proposed in: the simulation found *)
+(* that case in the code long before the model was asked about it, and it  *)
+(* is deposed_leader_steps_down_on_unproposed_index_test.                  *)
 Propose(b, s, v) ==
     /\ ~ \E m \in msgs : m.type = "propose" /\ m.epoch = b /\ m.index = s
+    /\ owner[b] # None    \* implied by the promises below; here so the next line is defined
+    /\ ConflictStepDown => accepted[owner[b]][s].epoch # Learned
     /\ \E Q \in Quorum1 :
           LET reports == {m \in msgs : m.type = "promise" /\ m.epoch = b /\ m.acc \in Q}
               votes   == {m.votes[s] : m \in reports}
