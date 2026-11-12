@@ -85,13 +85,21 @@ separate Erlang nodes with real faults.
       checks the simulation's own linearizability check. Done on
       2026-11-12: `make porcupine` checks 160 runs and 8,042 operations, and
       rejects three planted bugs.
-- [ ] Write a [Jepsen](https://github.com/jepsen-io/jepsen) test for the
-      key-value state machine. Use the Jepsen test in
-      [ra-kv-store](https://github.com/rabbitmq/ra-kv-store) as the starting
-      point.
-- [ ] Cover network partitions, process kills, process pauses and clock
-      skew.
-- [ ] Cover membership change during faults.
+- [x] Write a [Jepsen](https://github.com/jepsen-io/jepsen) test for the
+      key-value state machine. Done on 2026-11-12. See
+      [jepsen/README.md](jepsen/README.md). The test was written for peace
+      and does not reuse the code of
+      [ra-kv-store](https://github.com/rabbitmq/ra-kv-store).
+- [x] Cover network partitions, process kills and process pauses. Done on
+      2026-11-12 for `majority`, `{counting, 4, 2}`, `{counting, 2, 4}` and
+      a two-by-two grid. Each run lasted 180 seconds and was linearizable.
+- [ ] Cover clock skew. The containers of the test share one clock, so the
+      Jepsen clock nemesis cannot be used. The test needs separate virtual
+      machines or libfaketime.
+- [x] Cover membership change during faults. Done on 2026-11-12 with
+      majority quorums: one run of 300 seconds, linearizable.
+- [ ] Cover membership change with a counting or grid quorum system.
+- [ ] Cover a custom quorum module.
 - [ ] Run a soak test of at least 24 hours.
 
 Done when: the Jepsen test passes for every quorum system in

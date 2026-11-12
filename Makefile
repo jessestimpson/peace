@@ -1,4 +1,4 @@
-.PHONY: all compile test dst trace porcupine tlc tlc-long tlc-soak ind check bench
+.PHONY: all compile test dst trace porcupine jepsen tlc tlc-long tlc-soak ind check bench
 
 all: compile
 
@@ -36,6 +36,11 @@ trace:
 # dst/peace_dst_porcupine_tests.erl. This target needs eta and Go.
 porcupine:
 	ERL_FLAGS="+S 1" rebar3 as dst eunit --module=peace_dst_porcupine_tests
+
+# The Jepsen test. See jepsen/README.md. This target needs Docker and the
+# containers that jepsen/up.sh starts.
+jepsen:
+	jepsen/run.sh
 
 # Model checking with TLC. See formal/README.md. A config is skipped if its
 # model has not changed since the config was last checked. FORCE=1 runs the

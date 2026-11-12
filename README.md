@@ -206,7 +206,7 @@ reduces messages. It does not reduce storage.
 
 ## Verification
 
-peace is verified at five levels.
+peace is verified at six levels.
 
 | Level | What it checks | Command | Time |
 |---|---|---|---|
@@ -214,9 +214,12 @@ peace is verified at five levels.
 | Deterministic simulation | The real server processes under faults | `make dst` | about 8 minutes |
 | Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 4 minutes |
 | Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 2 minutes |
+| Jepsen test | A key-value store on five Docker nodes under partitions, kills, pauses and membership changes | `make jepsen` | minutes per run |
 | Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
-Details of the models are in [formal/README.md](formal/README.md).
+Details of the models are in [formal/README.md](formal/README.md). Details
+of the Jepsen test, its results and its limitations are in
+[jepsen/README.md](jepsen/README.md).
 
 ### Model checking
 

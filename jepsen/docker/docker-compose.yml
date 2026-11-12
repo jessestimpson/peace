@@ -1,0 +1,51 @@
+# Five nodes and one control node for the Jepsen test. See ../README.md.
+#
+# The nodes are privileged, because the nemeses change packet filter rules.
+# ./secret holds the SSH key pair that ../up.sh generates.
+version: "3.7"
+
+x-node: &node
+  build: ./node
+  privileged: true
+  volumes:
+    - ./secret/id_rsa.pub:/root/.ssh/authorized_keys:ro
+  networks:
+    - jepsen
+
+services:
+  n1:
+    <<: *node
+    hostname: n1
+    container_name: peace-jepsen-n1
+  n2:
+    <<: *node
+    hostname: n2
+    container_name: peace-jepsen-n2
+  n3:
+    <<: *node
+    hostname: n3
+    container_name: peace-jepsen-n3
+  n4:
+    <<: *node
+    hostname: n4
+    container_name: peace-jepsen-n4
+  n5:
+    <<: *node
+    hostname: n5
+    container_name: peace-jepsen-n5
+  control:
+    build: ./control
+    hostname: control
+    container_name: peace-jepsen-control
+    volumes:
+      - ..:/jepsen
+      - ./secret:/root/.ssh-jepsen:ro
+      - m2:/root/.m2
+    networks:
+      - jepsen
+
+volumes:
+  m2:
+
+networks:
+  jepsen:
