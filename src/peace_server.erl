@@ -5,24 +5,22 @@
 %% module:
 %%
 %% <ul>
-%% <li>owns the storage handle, the timers and the mailbox,</li>
+%% <li>owns the timers and the mailbox, and starts the storage process
+%%   `peace_writer', which owns the storage handle,</li>
 %% <li>converts calls, casts and timeouts into `peace_core' events, and</li>
 %% <li>performs the effects that `peace_core' returns.</li>
 %% </ul>
 %%
-%% The important rule in this module is about ordering. This module writes
-%% everything that `peace_core' asked to persist before it performs any
-%% other effect. Paxos does not tolerate the failure in which a promise or
-%% an acceptance reaches a peer and is then lost in a restart.
-%%
-%% The rule has one exception. When no effect other than an `accept'
-%% message depends on the write, this module performs the other effects
-%% before the write. A leader then sends its `propose' messages while it
-%% writes, and answers a client without waiting for a write that the answer
-%% does not depend on. See `perform/2'.
+%% The important rule in this module is about ordering. This module
+%% performs an effect only after every storage write that the effect
+%% depends on has returned. Paxos does not tolerate the failure in which a
+%% promise or an acceptance reaches a peer and is then lost in a restart.
+%% `perform/2' states which effects depend on which writes.
 %%
 %% This module handles the events that are in the mailbox as a group and
-%% performs one storage write for the group. See `event/2'.
+%% sends one storage write for the group to `peace_writer'. See `event/2'.
+%% This module does not wait for the write, except for a write that
+%% contains a promise or a snapshot.
 %%
 %% If the storage backend fails to open or to write, the server stops and
 %% is not restarted. See `persist/2'.
@@ -32,7 +30,7 @@
 
 -include("peace.hrl").
 -include("peace_eta.hrl").
--eta_observe({state, [core]}).
+-eta_observe({state, [core, inflight]}).
 
 -export([start_link/1, start/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -54,7 +52,16 @@ log_event({value, _From, _Value, _Session}) -> value;
 log_event({query, _From, _Fun}) -> query;
 log_event({reconfigure, _From, _New}) -> reconfigure;
 log_event(Event) -> Event.
+%% A simulated run reads the state that a server published when its last
+%% callback returned. `await/1' waits inside a callback while the storage
+%% process writes. This macro publishes the state before the wait, so that
+%% a check that runs during the wait compares the disk with the state that
+%% the write belongs to.
+-define(PUBLISH(State),
+    put(eta_observe:key(), #{core => State#state.core, inflight => State#state.inflight})
+).
 -else.
+-define(PUBLISH(State), ok).
 -define(TRACE(Event, Core), ok).
 -endif.
 
@@ -65,13 +72,26 @@ log_event(Event) -> Event.
     core :: peace_core:core(),
     %% The rate of this server's clock, as a fraction. See `clock_rate/1'.
     clock = {1, 1} :: {pos_integer(), pos_integer()},
-    storage_mod :: module(),
-    storage :: term(),
+    %% The storage process. See `peace_writer'.
+    writer :: pid(),
+    %% `seq' is the sequence number of the last write that was sent to the
+    %% storage process. `done' is the sequence number of the last write
+    %% that has returned. `inflight' holds the writes between the two, in
+    %% order.
+    seq = 0 :: non_neg_integer(),
+    done = 0 :: non_neg_integer(),
+    inflight = [] :: [{pos_integer(), peace_storage:batch()}],
+    %% The `accept' messages that wait for a write. Each element holds the
+    %% sequence number of the write and the effects, in order.
+    held = [] :: [{pos_integer(), [peace_core:effect()]}],
     election_ms :: pos_integer(),
     heartbeat_ms :: pos_integer(),
     timers = #{} :: #{election | heartbeat => reference()},
     %% The nodes to which a connection attempt is in progress. See `send/3'.
     connecting = #{} :: #{node() => reference()},
+    %% The `stored' events of the writes that have returned and that
+    %% `peace_core' has not yet handled. See `event/2'.
+    stored = [] :: [peace_core:event()],
     %% A function that is called with every step of `peace_core'. It is set
     %% only in a test build. See `tracer/1'.
     tracer :: undefined | fun((step()) -> term())
@@ -83,11 +103,12 @@ log_event(Event) -> Event.
 %%   - the event (`init' on start),
 %%   - the core state before the event (`undefined' on start),
 %%   - the core state after the event, and
-%%   - the effects. All of the effects have been performed.
+%%   - the effects. The step is reported before the effects are performed.
 -type step() ::
     {peace:server_id(), init | peace_core:event(), undefined | peace_core:core(), peace_core:core(), [
         peace_core:effect()
-    ]}.
+    ]}
+    | {performed, peace:server_id()}.
 
 %% ---------------------------------------------------------------------------
 %% API
@@ -112,8 +133,8 @@ init(Config = #{id := Id, members := Members}) ->
     case check_quorum(Config, Members) of
         ok ->
             {StorageMod, StorageArgs} = maps:get(storage, Config, default_storage()),
-            case peace_storage:open(StorageMod, Id, StorageArgs) of
-                {ok, Storage, Stored} -> init(Config, StorageMod, Storage, Stored);
+            case peace_writer:start_link(Id, StorageMod, StorageArgs) of
+                {ok, Writer, Stored} -> init(Config, Writer, Stored);
                 {error, Reason} -> {stop, {storage_failed, Reason}}
             end;
         {error, Reason} ->
@@ -125,7 +146,7 @@ init(Config = #{id := Id, members := Members}) ->
 default_storage() ->
     {peace_storage_wal, #{dir => application:get_env(peace, data_dir, "peace_data")}}.
 
-init(Config = #{id := Id}, StorageMod, Storage, Stored) ->
+init(Config = #{id := Id}, Writer, Stored) ->
     Clock = clock_rate(Config),
     {Core, Effects} = peace_core:init(Config, Stored, now_ms(Clock)),
     ElectionMs = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
@@ -133,8 +154,7 @@ init(Config = #{id := Id}, StorageMod, Storage, Stored) ->
         core = Core,
         tracer = tracer(Config),
         clock = Clock,
-        storage_mod = StorageMod,
-        storage = Storage,
+        writer = Writer,
         election_ms = ElectionMs,
         heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
     },
@@ -187,13 +207,15 @@ handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
     end;
 handle_info({peace_msg, Peer, Msg}, State) ->
     {noreply, event({msg, Peer, Msg}, State)};
+handle_info({written, Writer, Seq}, State = #state{writer = Writer}) ->
+    {noreply, handle_stored(written(Seq, State))};
 handle_info({'DOWN', Ref, process, _Pid, _Reason}, State = #state{connecting = Connecting}) ->
     {noreply, State#state{connecting = maps:filter(fun(_Node, R) -> R =/= Ref end, Connecting)}};
 handle_info(_Other, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{storage_mod = Mod, storage = Storage}) ->
-    _ = peace_storage:close(Mod, Storage),
+terminate(_Reason, #state{writer = Writer}) ->
+    _ = (catch peace_writer:stop(Writer)),
     ok.
 
 %% ---------------------------------------------------------------------------
@@ -225,23 +247,36 @@ check_quorum1(Config, Members) ->
 
 %% Handles one event, and then every event that is already in the mailbox,
 %% up to `?MAX_GROUP' events. The effects of all of these events are
-%% performed together: one storage write, and then every other effect in
-%% order. This is group commit. One storage write serves every event that
-%% arrived while the previous write was in progress.
+%% performed together, with one storage write. See `perform/2'.
 %%
 %% `peace_core' handles a later event of the group before the effects of an
 %% earlier event are performed. This is safe because `peace_core' is a pure
-%% function, and no effect of the group is visible outside this process
-%% until the write has returned.
+%% function.
 event(Event, State) ->
-    flush(drain(?MAX_GROUP - 1, step(Event, State, []))).
+    handle_stored(flush(drain(?MAX_GROUP - 1, step(Event, State, [])))).
+
+%% Each write that returned produced `stored' events. `peace_core' handles
+%% them before any message that arrives later.
+handle_stored(State = #state{stored = []}) ->
+    State;
+handle_stored(State = #state{stored = [Event | Stored]}) ->
+    event(Event, State#state{stored = Stored}).
 
 %% Performs the effects of the steps of a group. `Steps' is in reverse
 %% order.
+%%
+%% A server with a tracer reports the steps before it performs their
+%% effects. Such a server waits for the write of the group before any other
+%% effect. See `perform/2'. If the server is killed during the wait, the
+%% trace holds steps whose write may not have happened and whose other
+%% effects were not performed. `peace_dst_trace' removes those steps. The
+%% server reports `{performed, Id}' after the effects of a group, so that
+%% only the steps of an unfinished group can be removed.
 flush({State0, Steps}) ->
     Ordered = lists:reverse(Steps),
+    lists:foreach(fun(Step) -> ok = trace(State0, Step) end, Ordered),
     State = perform(lists:append([Effects || {_Id, _Event, _Core0, _Core, Effects} <- Ordered]), State0),
-    lists:foreach(fun(Step) -> ok = trace(State, Step) end, Ordered),
+    ok = trace(State, {performed, peace_core:id(State#state.core)}),
     State.
 
 %% Handles one event and adds the step to the group.
@@ -281,7 +316,9 @@ drain(N, {State, Steps}) ->
         {'$gen_call', From, {consistent_query, Fun}} ->
             drain(N - 1, step({query, From, Fun}, State, Steps));
         {'$gen_cast', {value, Value}} ->
-            drain(N - 1, step({value, undefined, Value}, State, Steps))
+            drain(N - 1, step({value, undefined, Value}, State, Steps));
+        {written, Writer, Seq} when Writer =:= State#state.writer ->
+            drain(N, {written(Seq, State), Steps})
     after 0 ->
         {State, Steps}
     end.
@@ -303,82 +340,120 @@ tracer(_Config) -> undefined.
 trace(_State, _Step) -> ok.
 -endif.
 
-%% Performs the persist effects in one write. Then performs every other
-%% effect in the order given.
+%% Performs the effects of a group.
 %%
-%% == Proposals are sent before the write ==
+%% The persist effects of the group are merged into one write, which is
+%% sent to the storage process. Each other effect is performed as soon as
+%% every write that the effect depends on has returned.
 %%
-%% A `propose' message is the message of a proposer. A promise or an
-%% acceptance is the statement of an acceptor, and the acceptor must store
-%% it before the acceptor sends it. A proposal has no such requirement. The
-%% leader is also an acceptor, and the write stores the acceptance of the
-%% leader of its own proposal. The leader sends the proposal first, so that
-%% the write of the leader and the writes of the followers run at the same
-%% time. This is the optimisation of section 10.2.1 of the Raft
-%% dissertation (Ongaro, 2014), "Writing to the leader's disk in parallel".
-%% It is not in the thesis.
+%% == A write of entries ==
 %%
-%% If the leader stops after it has sent a proposal and before the write
-%% returns, the leader restarts without its own acceptance. This is the
-%% same as a leader that never accepted its own proposal. The following
-%% holds:
+%% Most writes contain only entries: the proposals of this server as
+%% leader, the proposals that this server accepts as a follower, and
+%% `learned' entries. This module does not wait for such a write. While the
+%% write is in progress, this module handles further events.
+%%
+%% The only effect that depends on such a write is the `accept' message,
+%% which states that this server has stored a proposal. An `accept' message
+%% is held until every write that was sent before it has returned. Every
+%% other effect is performed at once:
 %%
 %% <ul>
-%% <li>The leader has not counted its own acceptance in any decision. A
-%%   decision needs an acceptance from a follower, unless the leader alone
-%%   is a phase-two quorum. The acceptance of a follower arrives in a later
-%%   group, after the write of this group has returned.</li>
-%% <li>The leader does not propose a second value in the same epoch. The
-%%   promise of the leader for its epoch was written by an earlier
-%%   group.</li>
-%% </ul>
-%%
-%% `merge_batches/1' reports the two cases in which this argument does not
-%% hold. In those cases this function writes first:
-%%
-%% <ul>
-%% <li>The write contains `promised' or a snapshot.</li>
-%% <li>The write contains an index both as a proposal and as decided. The
-%%   index was then decided on the acceptance of the leader alone, and a
-%%   `propose' message of the group may carry a commit index that covers
-%%   it.</li>
-%% </ul>
-%%
-%% == Other effects are performed before the write ==
-%%
-%% In every other case, the write contains only entries: the proposals of
-%% this server as leader, the proposals that this server accepts as a
-%% follower, and `learned' entries. The only effect that depends on such a
-%% write is the `accept' message, which states that this server has stored
-%% a proposal. Every other effect is performed before the write:
-%%
-%% <ul>
-%% <li>A reply to a client and a machine effect depend on a decision. By
-%%   the argument above, the decisions of this group do not depend on the
-%%   write of this group.</li>
+%% <li>A `propose' message is the message of a proposer. A proposer does
+%%   not have to store its proposal before it sends it. The leader therefore
+%%   writes at the same time as the followers. This is the optimisation of
+%%   section 10.2.1 of the Raft dissertation (Ongaro, 2014), "Writing to the
+%%   leader's disk in parallel". It is not in the thesis. If the leader
+%%   stops before its write returns, the leader restarts without its own
+%%   acceptance, which is the same as a leader that never accepted its own
+%%   proposal. The leader does not propose a second value in the same
+%%   epoch, because the promise of the leader for its epoch was written
+%%   before the leader sent its `prepare' messages.</li>
+%% <li>A reply to a client, a machine effect and the commit index in a
+%%   `propose' message depend on a decision. `peace_core' counts the
+%%   acceptance of the leader only after the `stored' event, which this
+%%   module sends after the write has returned. A decision therefore
+%%   depends only on acceptances that are stored. See "The acceptance of
+%%   the leader" in `peace_core'.</li>
 %% <li>`learned' and `install' messages carry decided values.</li>
 %% <li>`nack', `prevote', `prevote_ok' and `catchup' messages state nothing
 %%   that the sender must store.</li>
-%% <li>`prepare' and `promise' messages occur only in a group whose write
-%%   contains `promised', which is written first.</li>
 %% </ul>
 %%
-%% A leader under load therefore answers the client of a decided value
-%% without waiting for the write of the proposals that arrived later.
+%% == A write with a promise or a snapshot ==
+%%
+%% This module waits for a write that contains `promised' or a snapshot,
+%% and then performs the effects of the group. `prepare' and `promise'
+%% messages occur only in such a group. The storage process performs writes
+%% in order, so every earlier write has also returned. A `promise' message
+%% reports the entries that this server has accepted, and every one of
+%% those entries is then stored.
+%%
+%% == A server with a tracer ==
+%%
+%% A server that has a tracer waits for every write. Trace validation
+%% compares each step with the TLA+ model, in which a server holds an entry
+%% from the moment the server accepts it. A server that does not wait holds
+%% an accepted entry in memory before the entry is stored, and loses the
+%% entry if the server is killed before the write returns. That is safe,
+%% because the `accept' message for the entry was not sent, but it is not a
+%% behaviour of the model. With a tracer, the only steps that can be lost
+%% are the steps of the group that the server was waiting for when it was
+%% killed, and none of their effects was performed. Trace validation
+%% therefore does not cover writes that are in progress. The simulation
+%% and the Jepsen test cover them.
 perform(Effects, State0) ->
     {Batches, Rest0} = lists:partition(fun(E) -> element(1, E) =:= persist end, Effects),
     Rest = coalesce(Rest0),
-    case merge_batches([Batch || {persist, Batch} <- Batches]) of
+    {Batch, Entries} = merge_batches([Batch0 || {persist, Batch0} <- Batches]),
+    case {Batch, Entries andalso State0#state.tracer =:= undefined} of
         {Batch, true} ->
             {Accepts, Others} = lists:partition(fun is_accept/1, Rest),
-            State1 = lists:foldl(fun effect/2, State0, Others),
-            lists:foldl(fun effect/2, persist(Batch, State1), Accepts);
+            State1 = lists:foldl(fun effect/2, submit(Batch, State0), Others),
+            hold(Accepts, State1);
         {Batch, false} ->
-            lists:foldl(fun effect/2, persist(Batch, State0), Rest)
+            lists:foldl(fun effect/2, await(submit(Batch, State0)), Rest)
     end.
 
 is_accept({send, _Peer, {accept, _Epoch, _Indexes, _Stamp}}) -> true;
 is_accept(_Effect) -> false.
+
+%% Sends a write to the storage process.
+submit(Batch, State) when map_size(Batch) =:= 0 ->
+    State;
+submit(Batch, State = #state{writer = Writer, seq = Seq0, inflight = Inflight}) ->
+    Seq = Seq0 + 1,
+    ok = peace_writer:write(Writer, Seq, Batch),
+    State#state{seq = Seq, inflight = Inflight ++ [{Seq, Batch}]}.
+
+%% Performs `accept' messages now if no write is in progress. Otherwise the
+%% messages wait for the last write that was sent.
+hold([], State) ->
+    State;
+hold(Accepts, State = #state{seq = Seq, done = Seq}) ->
+    lists:foldl(fun effect/2, State, Accepts);
+hold(Accepts, State = #state{seq = Seq, held = Held}) ->
+    State#state{held = Held ++ [{Seq, Accepts}]}.
+
+%% Waits until every write that was sent has returned. If the storage
+%% process fails, it exits, and the link stops this process.
+await(State = #state{seq = Seq, done = Seq}) ->
+    State;
+await(State = #state{writer = Writer}) ->
+    _ = ?PUBLISH(State),
+    receive
+        {written, Writer, Seq} -> await(written(Seq, State))
+    end.
+
+%% The storage process reports that every write up to `Seq' has returned.
+%% This function performs the `accept' messages that waited for those
+%% writes, and records the `stored' events of those writes.
+written(Seq, State = #state{core = Core, inflight = Inflight0, held = Held0, stored = Stored}) ->
+    {Returned, Inflight} = lists:splitwith(fun({S, _Batch}) -> S =< Seq end, Inflight0),
+    {Ready, Held} = lists:splitwith(fun({S, _Accepts}) -> S =< Seq end, Held0),
+    Events = [E || {_S, Batch} <- Returned, E <- peace_core:stored_events(peace_core:id(Core), Batch)],
+    State1 = State#state{done = Seq, inflight = Inflight, held = Held, stored = Stored ++ Events},
+    lists:foldl(fun effect/2, State1, lists:append([Accepts || {_S, Accepts} <- Ready])).
 
 %% Reduces the effects of a group to fewer effects with the same result.
 %%
@@ -439,59 +514,30 @@ close(Peer, Open, Out) ->
             Out
     end.
 
-persist(Batch, State) when map_size(Batch) =:= 0 ->
-    State;
-persist(Batch, State = #state{storage_mod = Mod, storage = Storage0}) ->
-    %% A failed write stops the server before the server sends anything
-    %% that depends on the write. The exit reason is a `shutdown' reason, so
-    %% `peace_sup' does not restart the server. After a failed write or a
-    %% failed sync, the contents of the file are not known, and a restart
-    %% could recover data that is not durable.
-    try peace_storage:write(Mod, Batch, Storage0) of
-        {ok, Storage} -> State#state{storage = Storage};
-        {error, Reason} -> exit({shutdown, {storage_failed, Reason}})
-    catch
-        Class:Reason:Stack -> exit({shutdown, {storage_failed, {Class, Reason, Stack}}})
-    end.
-
 %% Merges the batches of a group into one write.
 %%   - A later batch overrides an earlier batch. For entries, the later
 %%     batch overrides the earlier batch index by index.
 %%   - A snapshot removes from the write every entry that the snapshot
 %%     covers.
 %%
-%% The second element of the result states whether `propose' messages may
-%% be sent before the write. See `perform/2'.
+%% The second element of the result is false if the write contains
+%% `promised' or a snapshot. See `perform/2'.
 %%
 %% A write that contains only `learned' entries has `sync => false'. A
 %% `learned' entry records that an index is decided. The decision itself is
 %% already durable, because a phase-two quorum has stored its acceptances.
 %% If the `learned' entry is lost in a restart, the server holds the index
-%% as accepted and learns again that it is decided. A leader therefore
-%% answers a client after one synced write on a phase-two quorum, and does
-%% not wait for a second sync.
-%%
-%% The write is synced if an index was proposed and decided in the same
-%% group. That index was decided on the acceptance of this server alone,
-%% and the `learned' entry is the only stored record of that acceptance.
+%% as accepted and learns again that it is decided.
 -spec merge_batches([peace_storage:batch()]) -> {peace_storage:batch(), boolean()}.
 merge_batches(Batches) ->
-    %% `Early' becomes false when an index that this group wrote as a
-    %% proposal is written as decided.
-    {Fields, Entries, Early} = lists:foldl(
-        fun(Batch, Acc0) ->
-            lists:foldl(
-                fun
-                    ({I, Entry = {learned, _}}, {F, E, Ok}) ->
-                        {F, E#{I => Entry}, Ok andalso not is_map_key(I, E)};
-                    ({I, Entry}, {F, E, Ok}) ->
-                        {F, E#{I => Entry}, Ok}
-                end,
-                setelement(1, Acc0, maps:merge(element(1, Acc0), maps:with([promised, snapshot], Batch))),
-                maps:get(entries, Batch, [])
-            )
+    {Fields, Entries} = lists:foldl(
+        fun(Batch, {Fields0, Entries0}) ->
+            {
+                maps:merge(Fields0, maps:with([promised, snapshot], Batch)),
+                lists:foldl(fun({I, Entry}, Acc) -> Acc#{I => Entry} end, Entries0, maps:get(entries, Batch, []))
+            }
         end,
-        {#{}, #{}, true},
+        {#{}, #{}},
         Batches
     ),
     Floor =
@@ -503,7 +549,7 @@ merge_batches(Batches) ->
         case lists:sort([E || E = {I, _} <- maps:to_list(Entries), I > Floor]) of
             [] ->
                 Fields;
-            Kept when map_size(Fields) =:= 0, Early ->
+            Kept when map_size(Fields) =:= 0 ->
                 case lists:all(fun({_I, Entry}) -> element(1, Entry) =:= learned end, Kept) of
                     true -> #{entries => Kept, sync => false};
                     false -> #{entries => Kept}
@@ -511,7 +557,7 @@ merge_batches(Batches) ->
             Kept ->
                 Fields#{entries => Kept}
         end,
-    {Merged, Early andalso map_size(Fields) =:= 0}.
+    {Merged, map_size(Fields) =:= 0}.
 
 effect({send, To, Msg}, State = #state{core = Core}) ->
     send(To, {peace_msg, peace_core:id(Core), Msg}, State);

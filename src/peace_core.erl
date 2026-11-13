@@ -338,19 +338,34 @@
 %% server that is outside a decided final configuration stops campaigning.
 %% If that server was the leader, it steps down.
 %%
+%% == The acceptance of the leader ==
+%%
+%% A leader is also an acceptor. A leader writes each of its proposals to
+%% its own log, which is the acceptance of the leader. The leader does not
+%% count that acceptance towards a phase-two quorum until the entry is
+%% stored. `peace_server' reports this with the event
+%% `{stored, Epoch, Indexes}', after the storage write that contains the
+%% entries has returned. `stored_events/2' derives the events from a write.
+%%
+%% Every decision therefore counts only acceptances that are stored. As a
+%% result, `peace_server' may send a proposal, and may perform the effects
+%% of a decision, while the write of the leader is still in progress. In
+%% the TLA+ model the leader accepts when it proposes. The implementation
+%% decides later than the model allows, and never earlier.
+%%
 %% == What must be durable ==
 %%
 %% Three things must be durable: `promised', the log and the snapshot. Every
 %% change to any of them is announced as a `persist' effect. The `persist'
 %% effect is in the same effect list as the reply that depends on the
-%% change, and `peace_server' writes before it sends. The one exception is
-%% the `propose' message of a leader. See `perform/2' in `peace_server'.
-%% The role, the commit index and the machine state are rebuilt on restart.
+%% change. `peace_server' performs an effect only after every write that the
+%% effect depends on has returned. See `perform/2' in `peace_server'. The
+%% role, the commit index and the machine state are rebuilt on restart.
 -module(peace_core).
 
 -include("peace.hrl").
 
--export([init/2, init/3, handle/2, handle/3]).
+-export([init/2, init/3, handle/2, handle/3, stored_events/2]).
 -export([
     id/1,
     role/1,
@@ -432,6 +447,7 @@
     | {value, from(), peace_machine:value(), session() | undefined}
     | {query, from(), fun((peace_machine:state()) -> term())}
     | {reconfigure, from(), simple()}
+    | {stored, peace:epoch(), [peace:index()]}
     | {msg, peace:server_id(), msg()}.
 
 -type effect() ::
@@ -652,6 +668,23 @@ event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
     end;
 event({reconfigure, From, New}, C) ->
     reconfigure(From, New, C);
+%% The acceptance of the leader of its own proposals. See "The acceptance of
+%% the leader". The event is ignored if this server is no longer the leader
+%% of `Epoch', because the proposals of that epoch are no longer open.
+event({stored, Epoch, Indexes}, C = #core{role = leader, epoch = Epoch, id = Id, acks = Acks0}) ->
+    Acks = lists:foldl(
+        fun(I, A) ->
+            case A of
+                #{I := Who} -> A#{I := lists:usort([Id | Who])};
+                _ -> A
+            end
+        end,
+        Acks0,
+        Indexes
+    ),
+    settle(Indexes, C#core{acks = Acks});
+event({stored, _Epoch, _Indexes}, C) ->
+    {C, []};
 event({msg, Peer, _Msg}, C = #core{id = Peer}) ->
     {C, []};
 event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
@@ -984,6 +1017,23 @@ note(Entries, C = #core{cfgs = Cfgs0}) ->
     ),
     C#core{cfgs = Cfgs}.
 
+%% Returns the `stored' events for a storage write that has returned. The
+%% write of a server contains a proposal of that server exactly when the
+%% epoch of the entry names the server.
+-spec stored_events(peace:server_id(), peace_storage:batch()) -> [event()].
+stored_events(Id, Batch) ->
+    ByEpoch = lists:foldl(
+        fun
+            ({I, {Epoch = {_Round, Owner}, _Value}}, Acc) when Owner =:= Id ->
+                maps:update_with(Epoch, fun(Is) -> [I | Is] end, [I], Acc);
+            (_Entry, Acc) ->
+                Acc
+        end,
+        #{},
+        maps:get(entries, Batch, [])
+    ),
+    [{stored, Epoch, lists:reverse(Is)} || {Epoch, Is} <- lists:sort(maps:to_list(ByEpoch))].
+
 %% TLA+ Propose for every index that a promise mentioned, and CatchUp for
 %% the indexes that were reported as decided.
 lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log = Log0}) ->
@@ -1008,10 +1058,10 @@ lead(C0 = #core{id = Id, epoch = Epoch, from = From0, promises = Promises, log =
                     end;
                 {_Epoch, Value} ->
                     Entry = {Epoch, Value},
-                    {L#{I => Entry}, A#{I => [Id]}, [{I, Entry} | Ch]};
+                    {L#{I => Entry}, A#{I => []}, [{I, Entry} | Ch]};
                 none ->
                     Entry = {Epoch, {'$noop', {Epoch, I}}},
-                    {L#{I => Entry}, A#{I => [Id]}, [{I, Entry} | Ch]}
+                    {L#{I => Entry}, A#{I => []}, [{I, Entry} | Ch]}
             end
         end,
         {Log0, #{}, []},
@@ -1064,14 +1114,14 @@ entries_from(From, Log) ->
 %% ---------------------------------------------------------------------------
 
 %% TLA+ Propose for a new index, together with the Accept of the leader
-%% itself.
+%% itself. The leader holds the entry in its log from this point. The
+%% leader counts its own acceptance only after the `stored' event.
 propose(
     From,
     Kind,
     What,
     C0 = #core{
         role = leader,
-        id = Id,
         epoch = Epoch,
         next = I,
         log = Log,
@@ -1092,7 +1142,7 @@ propose(
         log = Log#{I => Entry},
         last = I,
         next = I + 1,
-        acks = Acks#{I => [Id]},
+        acks = Acks#{I => []},
         pending = Pending#{I => {Tag, From, Kind}}
     },
     %% A configuration entry changes the configuration in force, and with it

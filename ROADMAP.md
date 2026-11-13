@@ -138,10 +138,11 @@ scope depends on the results of milestone 1.
       client before a write that the answer does not depend on. With the
       write-ahead log and 1 client, the median latency fell from 0.49 ms to
       0.35 ms.
-- [ ] Move storage writes to a process that is separate from the server
+- [x] Move storage writes to a process that is separate from the server
       process, so that a leader handles `accept` messages while it syncs.
-      With the write-ahead log, the median latency is 0.35 ms with 1 client
-      and 1.29 ms with 16 clients.
+      Done on 2026-11-12, with `peace_writer`. With the write-ahead log and
+      16 clients, the median latency fell from 1.29 ms to 0.92 ms. With the
+      in-memory backend and 256 clients, throughput fell by 11%.
 - [ ] Investigate the tail latency with the write-ahead log. The maximum
       latency is up to 318 ms. A probable cause is the checkpoint that is
       written for each snapshot.
@@ -149,7 +150,8 @@ scope depends on the results of milestone 1.
       is 9,929 requests/s with 64 clients. 3 servers get 25,249.
 - [ ] Allow a client to have more than one value in flight.
 - [ ] Add backpressure. Bound the leader's queue of pending proposals and
-      reject or delay proposals when it is full.
+      the writes that wait in the mailbox of the storage process, and
+      reject or delay proposals when a bound is reached.
 - [ ] Transfer and store snapshots in chunks. A snapshot is currently one
       term in one message, which blocks the distribution channel while it is
       sent.
@@ -203,6 +205,10 @@ Done when: version 1.0.0 is published.
 This work improves confidence in the existing implementation. It does not
 block the milestones above and can be done at any time.
 
+- [ ] Extend trace validation to writes that are in progress. A server
+      with a tracer waits for every write, because the TLA+ model has no
+      state for an entry that a server holds in memory and has not stored.
+      The model needs a separate action for "the acceptance is stored".
 - [ ] Add trace validation for the membership model, `Reconfig.tla`.
 - [ ] Add an inductive invariant for the membership model.
 - [ ] Model read leases. They are currently covered only by simulation and

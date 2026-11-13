@@ -2,11 +2,14 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Heartbeat ms | Values missed | Transferred as | Caught up ms |
 |---|---|---|---|
-| 200 | 100 | log entries | 261.1 |
-| 200 | 1000 | log entries | 233.6 |
-| 200 | 3000 | log entries | 353.2 |
-| 200 | 10000 | snapshot | 281.9 |
-| 20 | 100 | log entries | 5.86 |
-| 20 | 1000 | log entries | 9.24 |
-| 20 | 3000 | log entries | 25.8 |
-| 20 | 10000 | snapshot | 27.7 |
+| 200 | 100 | log entries | 273.4 |
+=WARNING REPORT==== 12-Nov-2026::21:32:41.172893 ===
+'global' at 'peace_bench_3@MacBook-Air' failed to connect to 'peace_bench_1@MacBook-Air'
+
+| 200 | 1000 | log entries | 205.3 |
+| 200 | 3000 | log entries | 388.8 |
+| 200 | 10000 | snapshot | 310.0 |
+| 20 | 100 | log entries | 15.3 |
+| 20 | 1000 | log entries | 13.8 |
+| 20 | 3000 | log entries | 29.3 |
+| 20 | 10000 | snapshot | 22.5 |

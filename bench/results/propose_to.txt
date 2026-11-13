@@ -2,11 +2,11 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
 |---|---|---|---|---|---|---|---|
-| 5 servers, mem, majority, propose_to all | 16 | 70100 | 0.20 | 0.44 | 0.53 | 0.86 | 0 |
-| 5 servers, mem, majority, propose_to quorum | 16 | 76495 | 0.16 | 0.45 | 0.57 | 1.02 | 0 |
-| 5 servers, mem, {counting,4,2}, propose_to all | 16 | 67897 | 0.20 | 0.46 | 0.55 | 0.83 | 0 |
-| 5 servers, mem, {counting,4,2}, propose_to quorum | 16 | 93242 | 0.13 | 0.41 | 0.52 | 1.12 | 0 |
-| 5 servers, wal, majority, propose_to all | 16 | 7661 | 1.94 | 2.79 | 8.77 | 28.8 | 0 |
-| 5 servers, wal, majority, propose_to quorum | 16 | 9193 | 1.55 | 2.49 | 7.00 | 75.6 | 0 |
-| 5 servers, wal, {counting,4,2}, propose_to all | 16 | 8516 | 1.72 | 2.66 | 8.82 | 33.3 | 0 |
-| 5 servers, wal, {counting,4,2}, propose_to quorum | 16 | 15599 | 0.94 | 1.40 | 3.42 | 24.3 | 0 |
+| 5 servers, mem, majority, propose_to all | 16 | 64280 | 0.21 | 0.47 | 0.57 | 0.94 | 0 |
+| 5 servers, mem, majority, propose_to quorum | 16 | 74706 | 0.17 | 0.46 | 0.58 | 9.44 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to all | 16 | 61677 | 0.23 | 0.50 | 0.59 | 0.88 | 0 |
+| 5 servers, mem, {counting,4,2}, propose_to quorum | 16 | 89789 | 0.14 | 0.42 | 0.52 | 1.08 | 0 |
+| 5 servers, wal, majority, propose_to all | 16 | 10017 | 1.43 | 2.05 | 7.61 | 27.4 | 0 |
+| 5 servers, wal, majority, propose_to quorum | 16 | 12629 | 1.13 | 1.75 | 4.96 | 27.7 | 0 |
+| 5 servers, wal, {counting,4,2}, propose_to all | 16 | 9657 | 1.27 | 2.27 | 8.80 | 276.2 | 0 |
+| 5 servers, wal, {counting,4,2}, propose_to quorum | 16 | 16829 | 0.74 | 1.48 | 4.13 | 280.6 | 0 |

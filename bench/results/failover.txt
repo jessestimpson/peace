@@ -2,7 +2,7 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Trials | Min ms | Median ms | Max ms |
 |---|---|---|---|---|
-| 3 servers, election timeout 1000 ms | 10 | 1184.1 | 1554.1 | 1893.5 |
-| 3 servers, election timeout 100 ms | 10 | 120.7 | 144.6 | 205.6 |
-| 5 servers, election timeout 1000 ms | 10 | 1113.2 | 1424.8 | 1818.8 |
-| 5 servers, election timeout 100 ms | 10 | 114.1 | 142.9 | 167.1 |
+| 3 servers, election timeout 1000 ms | 10 | 1275.1 | 1632.9 | 1884.9 |
+| 3 servers, election timeout 100 ms | 10 | 108.3 | 157.3 | 198.5 |
+| 5 servers, election timeout 1000 ms | 10 | 1213.0 | 1395.1 | 1872.4 |
+| 5 servers, election timeout 100 ms | 10 | 130.0 | 153.9 | 193.0 |

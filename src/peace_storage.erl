@@ -63,7 +63,11 @@
 %% `write/2' returns. The batch must become durable no later than the next
 %% batch that is written without `sync => false'. A backend may ignore the
 %% key and make every batch durable. `peace_server' sets the key for a batch
-%% that contains only `learned' entries. See `perform/2' in `peace_server'.
+%% that contains only `learned' entries. See `merge_batches/1' in
+%% `peace_server'.
+%%
+%% `peace_writer' calls the backend. It may merge several batches into one
+%% call.
 -type batch() :: #{
     promised => peace:epoch(),
     entries => [{peace:index(), peace_core:entry()}],

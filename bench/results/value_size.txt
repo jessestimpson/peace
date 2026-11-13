@@ -2,15 +2,15 @@ OTP 28, 10 schedulers on the controller, default emulator flags on the server no
 
 | Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
 |---|---|---|---|---|---|---|---|
-| 3 servers, mem, 100-byte values | 16 | 92343 | 0.14 | 0.38 | 0.47 | 0.89 | 0 |
-| 3 servers, mem, 1000-byte values | 16 | 76693 | 0.18 | 0.40 | 0.49 | 0.81 | 0 |
-| 3 servers, mem, 10000-byte values | 16 | 43208 | 0.35 | 0.57 | 0.67 | 1.05 | 0 |
-| 3 servers, mem, 100000-byte values | 16 | 22204 | 0.70 | 1.02 | 1.32 | 1.88 | 0 |
-| 3 servers, dets, 100-byte values | 16 | 3957 | 3.33 | 4.11 | 18.5 | 98.7 | 0 |
-| 3 servers, dets, 1000-byte values | 16 | 3326 | 3.92 | 5.24 | 22.2 | 112.9 | 0 |
-| 3 servers, dets, 10000-byte values | 16 | 2638 | 4.25 | 6.41 | 41.4 | 250.5 | 0 |
-| 3 servers, dets, 100000-byte values | 16 | 850 | 10.3 | 23.1 | 301.8 | 495.8 | 0 |
-| 3 servers, wal, 100-byte values | 16 | 11590 | 1.27 | 2.03 | 4.82 | 20.1 | 0 |
-| 3 servers, wal, 1000-byte values | 16 | 6760 | 1.57 | 6.18 | 9.86 | 367.4 | 0 |
-| 3 servers, wal, 10000-byte values | 16 | 6709 | 1.71 | 3.92 | 12.9 | 336.0 | 0 |
-| 3 servers, wal, 100000-byte values | 16 | 1487 | 6.21 | 17.2 | 175.8 | 451.5 | 0 |
+| 3 servers, mem, 100-byte values | 16 | 86800 | 0.15 | 0.40 | 0.48 | 0.81 | 0 |
+| 3 servers, mem, 1000-byte values | 16 | 72258 | 0.19 | 0.42 | 0.51 | 1.02 | 0 |
+| 3 servers, mem, 10000-byte values | 16 | 38083 | 0.41 | 0.62 | 0.72 | 1.21 | 0 |
+| 3 servers, mem, 100000-byte values | 16 | 20236 | 0.78 | 1.13 | 1.40 | 1.95 | 0 |
+| 3 servers, dets, 100-byte values | 16 | 3505 | 3.67 | 4.95 | 25.4 | 101.5 | 0 |
+| 3 servers, dets, 1000-byte values | 16 | 3299 | 3.86 | 5.39 | 24.8 | 119.5 | 0 |
+| 3 servers, dets, 10000-byte values | 16 | 2305 | 4.18 | 14.7 | 57.1 | 198.6 | 0 |
+| 3 servers, dets, 100000-byte values | 16 | 859 | 11.0 | 34.2 | 265.5 | 497.8 | 0 |
+| 3 servers, wal, 100-byte values | 16 | 15316 | 0.93 | 1.34 | 4.13 | 166.1 | 0 |
+| 3 servers, wal, 1000-byte values | 16 | 6496 | 1.22 | 5.95 | 7.64 | 300.1 | 0 |
+| 3 servers, wal, 10000-byte values | 16 | 7536 | 1.35 | 4.57 | 11.7 | 288.7 | 0 |
+| 3 servers, wal, 100000-byte values | 16 | 2087 | 3.93 | 9.80 | 179.7 | 276.3 | 0 |

@@ -19,7 +19,12 @@ opts(Seed, Config) ->
         %% When no process is runnable, the run lets time pass more often
         %% than not. Elections and retransmissions happen only when timers
         %% on the clock fire.
-        op_p => 0.15,
+        %%
+        %% `op_p' is the probability that a step injects an operation. A
+        %% server and its storage process take about three steps for each
+        %% event, so a low value is needed for a run to cover enough time
+        %% for elections.
+        op_p => 0.06,
         quiet_p => 0.8,
         preload => [peace],
         net => #{policy => #{drop_p => 0.03, delay_p => 0.2, max_delay => 5}}

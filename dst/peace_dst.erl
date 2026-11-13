@@ -53,11 +53,11 @@
 %% <ul>
 %% <li>`storage_matches_memory' - the promise, the accepted entries and the
 %%   snapshot index that a server holds in memory are equal to the promise,
-%%   the entries and the snapshot index on the disk of that server. A step
-%%   ends when the server is back in its receive loop, and by then the
-%%   server has sent every message of that step. This invariant therefore
-%%   checks, from outside the server, the rule that a server persists its
-%%   state before the server replies.</li>
+%%   the entries and the snapshot index on the disk of that server, after
+%%   the writes that the server has sent to its storage process and that
+%%   have not returned are applied to the disk. This invariant checks, from
+%%   outside the server, that the server has sent a write for every change
+%%   to its durable state.</li>
 %% <li>`promise_never_regresses' - the durable promise of a server never
 %%   decreases.</li>
 %% <li>`agreement' - no index is decided with two different values, by any
@@ -256,20 +256,21 @@ init(_Seed, Config) ->
     ]),
     ok = clear_leftovers(N),
     ok = clear_disk(),
-    Pids = [start(maps:get(I, Configs)) || I <- lists:seq(1, N)],
-    ok = await_idle(Pids, 1000),
-    %% The harness places every process that sends or receives messages in
-    %% the run on a simulated node. Each server has its own node, as in a
-    %% deployment. Placement defines the effect of each fault:
+    %% No server is started here. The first operation of every run is
+    %% `boot', which starts every server. See `generate/2'. A server starts its
+    %% storage process from `init/1'. A start from this function would wait
+    %% on that child process, which the scheduler does not release before
+    %% the run begins.
+    %%
+    %% Each server has its own simulated node, as in a deployment. The
+    %% restarter process of a server is placed on the node, and the server
+    %% and its storage process inherit the node. Placement defines the
+    %% effect of each fault:
     %%   - A cut is between nodes, so a cut stays in place when a server
     %%     restarts.
     %%   - A kill stops every process on the node.
-    %%   - A restarted server inherits the node of the process that started
-    %%     the server.
-    lists:foreach(
-        fun({I, Pid}) -> ok = eta_net:place(node_name(I), [Pid]) end,
-        lists:zip(lists:seq(1, N), Pids)
-    ),
+    %% Placing no process on a node creates the node.
+    [ok = eta_net:place(node_name(I), []) || I <- lists:seq(1, N)],
     %% All server nodes are connected to each other at the start, as the
     %% nodes of a cluster are immediately after boot.
     [
@@ -301,6 +302,8 @@ init(_Seed, Config) ->
         %% stays alive for as long as the server that the restarter started.
         %% The restarter is linked to that server, as a supervisor is.
         sups => [],
+        %% Whether the run has started the servers. See `generate/2'.
+        booted => false,
         clients => 0
     }}.
 
@@ -313,6 +316,10 @@ processes(#{n := N, ops := Ops, sups := Sups}) ->
     [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)] ++
         [Pid || Pid <- Ops ++ Sups, is_process_alive(Pid)].
 
+%% The first operation of a run starts every server at the same time. The
+%% operation makes no random draw.
+generate(#{booted := false}, Rand) ->
+    {boot, Rand};
 generate(S = #{reconfigure := true}, Rand0) ->
     %% A run with `reconfigure' on makes one more random draw per operation
     %% than a run with `reconfigure' off. The extra draw is made only in
@@ -436,6 +443,8 @@ execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
             %% cuts that exist now were made.
             spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, From, {learned, Latest}) end, S)
     end;
+execute(boot, S = #{n := N}) ->
+    lists:foldl(fun(I, Acc) -> execute({restart, I}, Acc) end, S#{booted := true}, lists:seq(1, N));
 execute({restart, I}, S = #{configs := Configs}) ->
     case server_pid(I) of
         undefined ->
@@ -453,6 +462,10 @@ execute({restart, I}, S = #{configs := Configs}) ->
 check(#{tab := Tab, ids := Ids}) ->
     Views = [{Id, view(Id)} || Id <- Ids],
     Disks = [{Id, stored_promised(Tab, Id), peace_dst_storage:entries(Tab, Id)} || Id <- Ids],
+    %% A server acts on a decision before the write of the `learned' entry
+    %% has returned. The entries of the writes that are in progress are
+    %% added to the record of decided values here.
+    _ = [ok = peace_dst_storage:decided(Tab, Id, Batch) || Id <- Ids, Batch <- inflight(Id)],
     Record = decided_record(Tab),
     ok = note_leaders(Views),
     first_violation([
@@ -566,23 +579,59 @@ disk_recovers(Tab) ->
         Differ -> violation(disk_recovers, #{servers => [{Id, #{recovered => D, wrote => W}} || [Id, D, W] <- Differ]})
     end.
 
+%% A server sends its writes to its storage process and does not wait for
+%% them. The disk is therefore compared with the memory of the server after
+%% the writes that are in progress have been applied to the contents of the
+%% disk. A write that has returned and that the server has not yet been told
+%% of is applied twice, which changes nothing.
 storage_matches_memory(Tab, Views, Disks) ->
     Wrong = [
         {Id, #{
             promised => {peace_core:promised(Core), Promised},
-            snapshot => {peace_core:snapshot_index(Core), peace_dst_storage:snapshot_index(Tab, Id)},
+            snapshot => {peace_core:snapshot_index(Core), Snap},
             only_in_memory => maps:without(maps:keys(Stored), Log),
             only_on_disk => maps:without(maps:keys(Log), Stored),
             differ => [I || {I, E} <- maps:to_list(Log), maps:get(I, Stored, E) =/= E]
         }}
-     || {{Id, {live, Core}}, {Id, Promised, Stored}} <- lists:zip(Views, Disks),
+     || {{Id, {live, Core}}, {Id, Promised0, Stored0}} <- lists:zip(Views, Disks),
         Log <- [peace_core:log(Core)],
+        {Promised, Stored, Snap} <- [
+            lists:foldl(
+                fun apply_batch/2,
+                {Promised0, Stored0, peace_dst_storage:snapshot_index(Tab, Id)},
+                inflight(Id)
+            )
+        ],
         peace_core:promised(Core) =/= Promised orelse Log =/= Stored orelse
-            peace_core:snapshot_index(Core) =/= peace_dst_storage:snapshot_index(Tab, Id)
+            peace_core:snapshot_index(Core) =/= Snap
     ],
     case Wrong of
         [] -> ok;
         _ -> violation(storage_matches_memory, #{servers => Wrong})
+    end.
+
+%% Applies a write to the contents of a disk.
+apply_batch(Batch, {Promised0, Entries0, Snap0}) ->
+    Promised = maps:get(promised, Batch, Promised0),
+    Snap =
+        case Batch of
+            #{snapshot := {Index, _}} -> Index;
+            _ -> Snap0
+        end,
+    Entries = maps:merge(Entries0, maps:from_list(maps:get(entries, Batch, []))),
+    {Promised, maps:filter(fun(I, _) -> I > Snap end, Entries), Snap}.
+
+%% Returns the writes that a server has sent to its storage process and
+%% that have not returned, in order.
+inflight({Name, Node}) ->
+    case server_pid(Name, Node) of
+        undefined ->
+            [];
+        Pid ->
+            case eta_observe:read(Pid) of
+                #{inflight := Inflight} -> [Batch || {_Seq, Batch} <- Inflight];
+                _ -> []
+            end
     end.
 
 promise_never_regresses(Tab, Disks) ->
@@ -807,13 +856,17 @@ server_config(I, Id, Founders, Mode, Tab, Config) ->
         %% exists after the run.
         #{trace := Trace} ->
             Server#{
-                test_tracer => fun({_, Event, Before, After, Effects}) ->
-                    N = ets:update_counter(Trace, seq, 1, {seq, 0}),
-                    ets:insert(
-                        Trace,
-                        {N, Id, peace_dst_trace:event(Event), peace_dst_trace:view(Before),
-                            peace_dst_trace:view(After), peace_dst_trace:sends(Effects)}
-                    )
+                test_tracer => fun
+                    ({performed, _}) ->
+                        N = ets:update_counter(Trace, seq, 1, {seq, 0}),
+                        ets:insert(Trace, {N, Id, performed});
+                    ({_, Event, Before, After, Effects}) ->
+                        N = ets:update_counter(Trace, seq, 1, {seq, 0}),
+                        ets:insert(
+                            Trace,
+                            {N, Id, peace_dst_trace:event(Event), peace_dst_trace:view(Before),
+                                peace_dst_trace:view(After), peace_dst_trace:sends(Effects)}
+                        )
                 end
             };
         _ ->
@@ -888,42 +941,12 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
             Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}
     end.
 
-%% This function runs before the eta scheduler exists, so the start is an
-%% ordinary start on the real scheduler. The clock is already virtual. The
-%% election timer that `init/1' arms is the first event that the run
-%% advances the clock to.
-start(Config) ->
-    {ok, Pid} = peace_server:start(Config),
-    Pid.
-
 %% A server that was starting when the previous run was torn down dies with
 %% its restarter. The server may have registered its name before the server
 %% died.
 clear_leftovers(N) ->
     ok = kill([Pid || I <- lists:seq(1, N), Pid <- [whereis(name(I))], is_pid(Pid)]),
     await_unregistered(N, 1000).
-
-%% The harness hands the system to the eta scheduler idle: every server is in
-%% its receive loop with an empty message queue. No event from the real
-%% scheduler then remains to take effect at a point that the seed did not
-%% choose.
-await_idle(_Pids, 0) ->
-    error(servers_not_idle);
-await_idle(Pids, Attempts) ->
-    Busy = [
-        Pid
-     || Pid <- Pids,
-        {status, Status} <- [process_info(Pid, status)],
-        {message_queue_len, Len} <- [process_info(Pid, message_queue_len)],
-        Status =/= waiting orelse Len > 0
-    ],
-    case Busy of
-        [] ->
-            ok;
-        _ ->
-            timer:sleep(1),
-            await_idle(Pids, Attempts - 1)
-    end.
 
 await_unregistered(_N, 0) ->
     error(servers_not_stopped);

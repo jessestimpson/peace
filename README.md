@@ -119,24 +119,37 @@ A backend implements the [peace_storage](src/peace_storage.erl) behaviour,
 which has three callbacks.
 
 A server handles the events that are waiting in its mailbox as a group and
-performs one storage write for the group. A backend that syncs once per
-write therefore performs group commit.
+sends one storage write for the group to its storage process,
+[peace_writer](src/peace_writer.erl). The storage process merges the writes
+that are waiting in its mailbox into one call to the backend. A backend
+that syncs once per call therefore performs group commit. The server
+handles further events while a write is in progress.
 
 Both durable backends sync every write that contains a promise, a proposal
 or a snapshot. A write that contains only `learned` entries is not synced.
 A `learned` entry records that an index is decided. The decision is already
 durable, because a phase-two quorum has stored its acceptances.
 
-A server performs the storage write before every effect that depends on the
-write. A leader sends its proposals and answers its clients before the
-write when they do not depend on it. A client that writes to a durable
-cluster therefore waits for one sync on a phase-two quorum. This order is
-the optimisation of section 10.2.1 of the Raft dissertation (Ongaro, 2014).
-It is not in the thesis. See `perform/2` in
-[peace_server](src/peace_server.erl).
+A server performs an effect only after every storage write that the effect
+depends on has returned:
 
-If a storage write fails, the server stops before it sends any message that
-depends on the write. The server is not restarted. If the write-ahead log
+- An `accept` message waits for the write that stores the proposal.
+- A server waits for a write that contains a promise or a snapshot before
+  it does anything else.
+- A leader sends a proposal without waiting for its own write. The leader
+  counts its own acceptance towards a phase-two quorum only after that
+  write has returned.
+- A leader answers a client when a phase-two quorum has stored the value.
+
+A client that writes to a durable cluster therefore waits for one sync on a
+phase-two quorum. Sending a proposal before the write of the leader is the
+optimisation of section 10.2.1 of the Raft dissertation (Ongaro, 2014). It
+is not in the thesis. See `perform/2` in
+[peace_server](src/peace_server.erl) and "The acceptance of the leader" in
+[peace_core](src/peace_core.erl).
+
+If a storage write fails, the storage process and the server stop before
+the server sends any message that depends on the write. The server is not restarted. If the write-ahead log
 finds a damaged record that is not a torn write at the end of the log, the
 server does not start. In both cases an operator must decide what to do
 with the member.
@@ -348,6 +361,10 @@ Limitations:
 - The model's message set contains every message sent. An action passes if
   the messages that justify it were sent, even if the server had not yet
   received them.
+- It does not cover storage writes that are in progress. A server in a
+  traced run waits for every write. The model has no state for an entry
+  that a server holds in memory and has not stored. The simulation and the
+  Jepsen test cover such writes.
 
 ### Linearizability checking
 

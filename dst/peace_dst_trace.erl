@@ -134,7 +134,7 @@ sends(Effects) ->
 
 %% Returns the steps that a run recorded in its trace table, in order.
 steps(Table) ->
-    lists:sort([Step || Step <- ets:tab2list(Table), is_integer(element(1, Step))]).
+    lists:keysort(1, [Step || Step <- ets:tab2list(Table), is_integer(element(1, Step))]).
 
 %% ---------------------------------------------------------------------------
 %% Deriving the model's actions
@@ -161,8 +161,48 @@ actions(Steps, Ids) ->
         promises => #{},
         acc => []
     },
-    St = lists:foldl(fun step/2, St0, Steps),
+    St = lists:foldl(fun step/2, St0, performed(Steps)),
     lists:reverse(maps:get(acc, St)).
+
+%% Removes the steps that a server reported and did not perform.
+%%
+%% A server reports the steps of a group, then waits for the storage write
+%% of the group, then performs the other effects of the group, and then
+%% reports `performed'. A server that is killed during the wait has
+%% performed none of those effects, and the write may not have happened.
+%% When the server starts again, its `init' step holds the state that the
+%% server recovered. If that state differs from the state after the last
+%% step that the server reported, the write did not happen. This function
+%% then removes the steps that the server reported after its last
+%% `performed'. The write of a group is atomic, so either all of those steps
+%% are removed or none.
+performed(Steps) ->
+    {Kept, _Open} = lists:foldl(
+        fun
+            ({_N, Id, performed}, {Acc, Open}) ->
+                {Acc, Open#{Id => []}};
+            (Step = {_N, Id, init, _Before, After, _Sends}, {Acc, Open}) ->
+                Lost =
+                    case maps:get(Id, Open, []) of
+                        [{_, _, _, _, Last, _} | _] = Unfinished ->
+                            case durable(Last) =:= durable(After) of
+                                true -> [];
+                                false -> Unfinished
+                            end;
+                        [] ->
+                            []
+                    end,
+                {[Step | Acc -- Lost], Open#{Id => []}};
+            (Step = {_N, Id, _Event, _Before, _After, _Sends}, {Acc, Open}) ->
+                {[Step | Acc], Open#{Id => [Step | maps:get(Id, Open, [])]}}
+        end,
+        {[], #{}},
+        Steps
+    ),
+    lists:reverse(Kept).
+
+durable(View) ->
+    maps:with([promised, log, snap], View).
 
 step({N, Id, Event, Before, After, Sends}, St0) ->
     #{promised := Promised, log := Log, snap := Snap, epoch := Epoch1} = After,

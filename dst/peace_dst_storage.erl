@@ -27,7 +27,7 @@
 -behaviour(peace_storage).
 
 -export([open/2, write/2, close/1]).
--export([promised/2, entries/2, snapshot_index/2]).
+-export([promised/2, entries/2, snapshot_index/2, decided/3]).
 
 open(Id, Args = #{tab := Tab}) ->
     case maps:get(amnesia, Args, false) of
@@ -77,23 +77,7 @@ write(Batch, State = {Tab, Id, none}) ->
     %% at the write. The record is not read from the disks between steps,
     %% because a server may decide an index and drop that index under a
     %% snapshot within one step.
-    lists:foreach(
-        fun
-            ({I, {learned, Value}}) ->
-                case ets:insert_new(Tab, {{decided, I}, Value}) of
-                    true ->
-                        ok;
-                    false ->
-                        case ets:lookup_element(Tab, {decided, I}, 2) of
-                            Value -> ok;
-                            Earlier -> ets:insert(Tab, {{conflict, I, Id}, Value, Earlier})
-                        end
-                end;
-            (_) ->
-                ok
-        end,
-        maps:get(entries, Batch, [])
-    ),
+    ok = decided(Tab, Id, Batch),
     case Batch of
         #{snapshot := Snapshot = {Index, _}} ->
             true = ets:insert(Tab, {{Id, snapshot}, Snapshot}),
@@ -145,6 +129,28 @@ revert_unsynced(Tab, Id, Recovered) ->
             end
         end,
         ets:match(Tab, {{unsynced, Id, '$1'}, '$2'})
+    ).
+
+%% Adds the `learned' entries of a batch to the record that the harness
+%% keeps of decided values. If the record already holds another value for
+%% an index, the conflict is recorded for `agreement' to report.
+decided(Tab, Id, Batch) ->
+    lists:foreach(
+        fun
+            ({I, {learned, Value}}) ->
+                case ets:insert_new(Tab, {{decided, I}, Value}) of
+                    true ->
+                        ok;
+                    false ->
+                        case ets:lookup_element(Tab, {decided, I}, 2) of
+                            Value -> ok;
+                            Earlier -> ets:insert(Tab, {{conflict, I, Id}, Value, Earlier})
+                        end
+                end;
+            (_) ->
+                ok
+        end,
+        maps:get(entries, Batch, [])
     ).
 
 close({_Tab, _Id, {Mod, Disk, Node}}) ->

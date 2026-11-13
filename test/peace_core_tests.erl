@@ -728,7 +728,11 @@ ev(Id, Event, S = #{cores := Cores}) ->
     {Num, Den} = maps:get(Id, maps:get(rates, S, #{}), {1, 1}),
     {Core, Effects} = peace_core:handle(Event, maps:get(now, S, 0) * Num div Den, maps:get(Id, Cores)),
     ok = persist_precedes_what_depends_on_it(Effects),
-    lists:foldl(fun(E, Acc) -> effect(Id, E, Acc) end, S#{cores := Cores#{Id := Core}}, Effects).
+    S1 = lists:foldl(fun(E, Acc) -> effect(Id, E, Acc) end, S#{cores := Cores#{Id := Core}}, Effects),
+    %% Every write returns at once in this harness. The server then learns
+    %% that its own proposals in the write are stored.
+    Stored = [E || {persist, Batch} <- Effects, E <- peace_core:stored_events(Id, Batch)],
+    lists:foldl(fun(E, Acc) -> ev(Id, E, Acc) end, S1, Stored).
 
 effect(Id, {send, To, Msg}, S0 = #{net := Net, blocked := Blocked}) ->
     %% `sent' holds every message sent, whether or not the message is

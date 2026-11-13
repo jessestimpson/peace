@@ -94,12 +94,12 @@ merge_learned_only_test() ->
     ),
     ?assertEqual({#{}, true}, peace_server:merge_batches([])).
 
-%% An index that is proposed and decided in the same group was decided on
-%% the acceptance of this server alone. The write is performed first and is
-%% synced.
+%% `peace_core' decides an index only on acceptances that are stored. A
+%% `learned' entry that replaces a proposal of the same group is therefore
+%% written like any other `learned' entry.
 merge_proposed_and_decided_test() ->
     Batches = [#{entries => [{1, {?E, x}}]}, #{entries => [{1, {learned, x}}]}],
     ?assertEqual(
-        {#{entries => [{1, {learned, x}}]}, false},
+        {#{entries => [{1, {learned, x}}], sync => false}, true},
         peace_server:merge_batches(Batches)
     ).
