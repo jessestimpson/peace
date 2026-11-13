@@ -73,12 +73,12 @@ merge_overrides_test() ->
         peace_server:merge_batches(Batches)
     ).
 
-%% A snapshot removes the entries that it covers. A write with a snapshot or
-%% with `promised' is performed before every other effect.
+%% A snapshot removes the entries that it covers. A write with `promised'
+%% is performed before every other effect.
 merge_snapshot_test() ->
     Batches = [#{snapshot => {2, snap}}, #{entries => [{2, {learned, y}}, {3, {?E, z}}]}],
     ?assertEqual(
-        {#{snapshot => {2, snap}, entries => [{3, {?E, z}}]}, false},
+        {#{snapshot => {2, snap}, entries => [{3, {?E, z}}]}, true},
         peace_server:merge_batches(Batches)
     ),
     ?assertEqual(

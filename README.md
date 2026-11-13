@@ -126,7 +126,7 @@ that syncs once per call therefore performs group commit. The server
 handles further events while a write is in progress.
 
 Both durable backends sync every write that contains a promise, a proposal
-or a snapshot. A write that contains only `learned` entries is not synced.
+or a snapshot. A server does not wait for the write of a snapshot. A write that contains only `learned` entries is not synced.
 A `learned` entry records that an index is decided. The decision is already
 durable, because a phase-two quorum has stored its acceptances.
 
@@ -134,8 +134,8 @@ A server performs an effect only after every storage write that the effect
 depends on has returned:
 
 - An `accept` message waits for the write that stores the proposal.
-- A server waits for a write that contains a promise or a snapshot before
-  it does anything else.
+- A server waits for a write that contains a promise before it does
+  anything else.
 - A leader sends a proposal without waiting for its own write. The leader
   counts its own acceptance towards a phase-two quorum only after that
   write has returned.

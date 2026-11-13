@@ -1,0 +1,12 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Configuration | Clients | Requests/s | p50 ms | p95 ms | p99 ms | Max ms | Errors |
+|---|---|---|---|---|---|---|---|
+| 3 servers, wal, slow disk: none | 1 | 2515 | 0.33 | 0.69 | 0.92 | 15.7 | 0 |
+| 3 servers, wal, slow disk: none | 16 | 15396 | 0.94 | 1.45 | 2.77 | 26.0 | 0 |
+| 3 servers, wal, slow disk: follower | 1 | 3067 | 0.28 | 0.51 | 0.61 | 14.3 | 0 |
+| 3 servers, wal, slow disk: follower | 16 | 17243 | 0.76 | 1.45 | 4.10 | 294.2 | 0 |
+| 3 servers, wal, slow disk: leader | 1 | 3172 | 0.27 | 0.51 | 0.61 | 14.3 | 0 |
+| 3 servers, wal, slow disk: leader | 16 | 18378 | 0.79 | 1.20 | 2.11 | 24.7 | 0 |
+| 3 servers, wal, slow disk: all | 1 | 42 | 22.0 | 41.7 | 43.4 | 51.7 | 0 |
+| 3 servers, wal, slow disk: all | 16 | 392 | 42.5 | 46.6 | 55.2 | 141.7 | 0 |

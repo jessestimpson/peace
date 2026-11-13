@@ -14,10 +14,12 @@
 %%
 %% A write is a cast `{write, Seq, Batch}'. `Seq' is a sequence number that
 %% the server assigns. When this process takes a write from its mailbox, it
-%% also takes every other write that is already in the mailbox, up to
-%% `?MAX_WRITES' writes. It merges the batches and calls the backend once.
-%% One sync therefore serves every write that arrived during the previous
-%% sync. After the call returns, this process sends
+%% also takes every other write that is already in the mailbox. It merges
+%% the batches and calls the backend once. One sync therefore serves every
+%% write that arrived during the previous sync, and the number of writes
+%% that wait is bounded by the number that arrive during one sync. A limit
+%% on the number of writes in one call would let the writes that wait grow
+%% without bound when the disk is slow. After the call returns, this process sends
 %% `{written, self(), Seq}' to the server, where `Seq' is the highest
 %% sequence number in the merged write.
 %%
@@ -44,10 +46,6 @@
 
 -export([start_link/3, write/3, stop/1, name/1, merge/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
-
-%% The maximum number of writes that are merged into one call to the
-%% backend.
--define(MAX_WRITES, 64).
 
 %% The time to wait for the storage process of an earlier server process
 %% to stop.
@@ -123,7 +121,7 @@ handle_call(_Other, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
 handle_cast({write, Seq, Batch}, State) ->
-    write_groups(drain(?MAX_WRITES - 1, [{Seq, [Batch]}]), State);
+    write_groups(drain([{Seq, [Batch]}]), State);
 handle_cast(_Other, State) ->
     {noreply, State}.
 
@@ -166,16 +164,16 @@ write_groups([{Last, Batches} | Groups], State = #state{server = Server, mod = M
 %% that every index under a snapshot was written as decided by an earlier
 %% write. A merge of the snapshot with the earlier write would remove those
 %% entries from the write.
-drain(N, Groups) ->
+drain(Groups) ->
     receive
-        {'$gen_cast', {write, Seq, Batch}} when N > 0 ->
+        {'$gen_cast', {write, Seq, Batch}} ->
             case {Batch, Groups} of
                 {#{snapshot := _}, _} ->
-                    drain(N - 1, [{Seq, [Batch]} | Groups]);
+                    drain([{Seq, [Batch]} | Groups]);
                 {_, [{_Last, [#{snapshot := _}]} | _]} ->
-                    drain(N - 1, [{Seq, [Batch]} | Groups]);
+                    drain([{Seq, [Batch]} | Groups]);
                 {_, [{_Last, Batches} | Rest]} ->
-                    drain(N - 1, [{Seq, [Batch | Batches]} | Rest])
+                    drain([{Seq, [Batch | Batches]} | Rest])
             end
     after 0 ->
         lists:reverse([{Last, lists:reverse(Batches)} || {Last, Batches} <- Groups])

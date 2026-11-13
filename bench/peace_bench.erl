@@ -48,6 +48,29 @@ suite(smoke) ->
 %% Writes to 3 servers with the in-memory backend and the write-ahead log.
 %% This suite is a short version of `throughput', for use during
 %% development.
+%% Writes to 3 servers with the write-ahead log, where every sync on one
+%% server takes 20 ms longer. The slow server is a follower, or the leader.
+suite(slow_disk) ->
+    header(load),
+    [
+        with_cluster(#{servers => 3, storage => slow_wal}, fun(C = #{ids := Ids}) ->
+            Leader = await_leader(C),
+            Slow =
+                case Which of
+                    none -> [];
+                    follower -> [hd(Ids -- [Leader])];
+                    leader -> [Leader];
+                    all -> Ids
+                end,
+            [ok = erpc:call(Node, peace_bench_slow_io, set, [20]) || {_Name, Node} <- Slow],
+            [
+                run_load(io_lib:format("3 servers, wal, slow disk: ~s", [Which]), C, #{clients => Clients})
+             || Clients <- [1, 16]
+            ]
+        end)
+     || Which <- [none, follower, leader, all]
+    ],
+    ok;
 suite(quick) ->
     header(load),
     [
@@ -174,7 +197,8 @@ start_cluster(Spec = #{servers := N, storage := StorageKind}) ->
         case StorageKind of
             mem -> {peace_storage_mem, #{}};
             dets -> {peace_storage_dets, #{dir => filename:absname(Dir)}};
-            wal -> {peace_storage_wal, #{dir => filename:absname(Dir)}}
+            wal -> {peace_storage_wal, #{dir => filename:absname(Dir)}};
+            slow_wal -> {peace_storage_wal, #{dir => filename:absname(Dir), io => peace_bench_slow_io}}
         end,
     Names = [list_to_atom("peace_bench_" ++ integer_to_list(I)) || I <- lists:seq(1, N)],
     Peers = maps:from_list([start_node(Name) || Name <- Names]),

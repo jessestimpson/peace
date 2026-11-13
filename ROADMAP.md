@@ -141,13 +141,29 @@ scope depends on the results of milestone 1.
 - [x] Move storage writes to a process that is separate from the server
       process, so that a leader handles `accept` messages while it syncs.
       Done on 2026-11-12, with `peace_writer`. With the write-ahead log and
-      16 clients, the median latency fell from 1.29 ms to 0.92 ms. With the
-      in-memory backend and 256 clients, throughput fell by 11%.
-- [ ] Investigate the tail latency with the write-ahead log. The maximum
-      latency is up to 318 ms. A probable cause is the checkpoint that is
-      written for each snapshot.
-- [ ] Investigate the throughput of 5 servers with the write-ahead log. It
-      is 9,929 requests/s with 64 clients. 3 servers get 25,249.
+      16 clients, the median latency fell from 1.29 ms to 0.91 ms. With the
+      in-memory backend and 256 clients, throughput fell by 9%.
+- [x] Investigate the tail latency with the write-ahead log. Done on
+      2026-11-12. The disk of the benchmark machine stops for 50 ms to
+      300 ms a few times in 10 seconds, and every node shares that disk.
+      The cause of the stops is not known. The checkpoint is not the cause.
+      See [bench/README.md](bench/README.md), "One shared disk".
+- [x] Investigate the throughput of 5 servers with the write-ahead log. Done
+      on 2026-11-12. The disk performs a fixed number of syncs per second
+      in total, so 5 servers on one disk get fewer syncs each than 3
+      servers.
+- [x] Keep latency low when one server has a slow disk. Done on 2026-11-12.
+      The storage process merges every write that waits, and a server does
+      not wait for the write of a snapshot. With a sync that is 20 ms slower
+      on the leader, 16 clients get 18,378 requests/s with a maximum latency
+      of 24.7 ms. See [bench/README.md](bench/README.md), "One slow disk".
+- [ ] Repeat the benchmark with each server on its own disk, or on its own
+      machine. The benchmark on one disk cannot measure the throughput of
+      5 servers or the tail latency.
+- [ ] Take snapshots at different indexes on different servers. All
+      servers now write a checkpoint at the same index. With a large
+      machine state, every member of a phase-two quorum is then busy with a
+      checkpoint at the same time.
 - [ ] Allow a client to have more than one value in flight.
 - [ ] Add backpressure. Bound the leader's queue of pending proposals and
       the writes that wait in the mailbox of the storage process, and

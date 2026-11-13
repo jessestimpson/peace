@@ -20,7 +20,7 @@
 %% This module handles the events that are in the mailbox as a group and
 %% sends one storage write for the group to `peace_writer'. See `event/2'.
 %% This module does not wait for the write, except for a write that
-%% contains a promise or a snapshot.
+%% contains a promise.
 %%
 %% If the storage backend fails to open or to write, the server stops and
 %% is not restarted. See `persist/2'.
@@ -346,12 +346,18 @@ trace(_State, _Step) -> ok.
 %% sent to the storage process. Each other effect is performed as soon as
 %% every write that the effect depends on has returned.
 %%
-%% == A write of entries ==
+%% == A write without a promise ==
 %%
 %% Most writes contain only entries: the proposals of this server as
 %% leader, the proposals that this server accepts as a follower, and
-%% `learned' entries. This module does not wait for such a write. While the
-%% write is in progress, this module handles further events.
+%% `learned' entries. Some writes also contain a snapshot. This module does
+%% not wait for such a write. While the write is in progress, this module
+%% handles further events.
+%%
+%% A snapshot replaces decided entries with the state that they produce. No
+%% effect depends on the write of a snapshot. If the server stops before
+%% the write returns, the server restarts from the earlier snapshot and the
+%% entries above it, which the storage still holds.
 %%
 %% The only effect that depends on such a write is the `accept' message,
 %% which states that this server has stored a proposal. An `accept' message
@@ -380,10 +386,10 @@ trace(_State, _Step) -> ok.
 %%   that the sender must store.</li>
 %% </ul>
 %%
-%% == A write with a promise or a snapshot ==
+%% == A write with a promise ==
 %%
-%% This module waits for a write that contains `promised' or a snapshot,
-%% and then performs the effects of the group. `prepare' and `promise'
+%% This module waits for a write that contains `promised', and then
+%% performs the effects of the group. `prepare' and `promise'
 %% messages occur only in such a group. The storage process performs writes
 %% in order, so every earlier write has also returned. A `promise' message
 %% reports the entries that this server has accepted, and every one of
@@ -521,7 +527,7 @@ close(Peer, Open, Out) ->
 %%     covers.
 %%
 %% The second element of the result is false if the write contains
-%% `promised' or a snapshot. See `perform/2'.
+%% `promised'. See `perform/2'.
 %%
 %% A write that contains only `learned' entries has `sync => false'. A
 %% `learned' entry records that an index is decided. The decision itself is
@@ -557,7 +563,7 @@ merge_batches(Batches) ->
             Kept ->
                 Fields#{entries => Kept}
         end,
-    {Merged, map_size(Fields) =:= 0}.
+    {Merged, not is_map_key(promised, Fields)}.
 
 effect({send, To, Msg}, State = #state{core = Core}) ->
     send(To, {peace_msg, peace_core:id(Core), Msg}, State);
