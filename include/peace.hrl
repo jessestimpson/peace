@@ -11,6 +11,7 @@
 -define(DEFAULT_MAX_PENDING, 8192).
 -define(DEFAULT_SNAPSHOT_CHUNK_BYTES, 262144).
 -define(DEFAULT_MAX_SESSIONS, 10000).
+-define(DEFAULT_SESSION_WINDOW, 64).
 
 %% Planted bugs. A test build can switch off a safeguard, to show that the
 %% check that depends on the safeguard can fail. Every other build does not

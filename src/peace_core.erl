@@ -166,13 +166,44 @@
 %% the leader is lost) cannot know whether its value was decided. If the
 %% client retries, the value can enter the log twice. A value submitted with
 %% a session, `{ClientId, Seq}', is applied at most once, however many times
-%% it is decided. Each server records, for each client, the highest sequence
-%% number that the server has applied and the reply to that value. When a
-%% later copy with the same sequence number is decided, the server returns
-%% the recorded reply and does not apply the value to the machine. The
-%% session table is a function of the decided log, as the machine state is.
-%% Therefore every server has the same session table. A client uses one
-%% sequence number at a time, and its sequence numbers increase.
+%% it is decided.
+%%
+%% The sequence numbers of a client start at 1 and increase by 1. A client
+%% may have several values undecided at the same time. The values of one
+%% client are applied in the order of their sequence numbers.
+%%
+%% Each server records, for each client, the highest sequence number that
+%% the server has applied (`Last'), and the replies to the last
+%% `session_window' values of the client. When a value with sequence number
+%% `Seq' is decided, a server does one of four things:
+%%
+%% <ul>
+%% <li>`Seq' is `Last + 1'. The server applies the value and records the
+%%   reply.</li>
+%% <li>`Seq' is at most `Last' and the server holds the reply to `Seq'. The
+%%   value is a copy of a value that was applied. The server does not apply
+%%   the value. The reply is the recorded reply.</li>
+%% <li>`Seq' is at most `Last' and the server no longer holds the reply. The
+%%   server does not apply the value. The reply is
+%%   `{error, {session_superseded, Last}}'.</li>
+%% <li>`Seq' is above `Last + 1'. A value of the client with a lower
+%%   sequence number is not yet applied. The server does not apply the
+%%   value. The reply is `{error, {session_gap, Last}}'. The client submits
+%%   the values from `Last + 1' again.</li>
+%% </ul>
+%%
+%% The session table is a function of the decided log, as the machine state
+%% is. Therefore every server has the same session table. `session_window'
+%% affects only the replies. A value is applied if and only if `Seq' is
+%% `Last + 1', for every `session_window'.
+%%
+%% A client that has used sequence number `Seq' must not need the reply to
+%% a sequence number at or below `Seq - session_window'. `peace_session' is
+%% a client that follows these rules.
+%%
+%% A server has no record of a client whose session was evicted (see
+%% `max_sessions'). `Last' is then 0. A value of that client with a
+%% sequence number above 1 is answered `{error, {session_gap, 0}}'.
 %%
 %% == Snapshots ==
 %%
@@ -418,14 +449,15 @@
     | {'$noop', tag()}.
 
 %% A session identifies one value of one client. See "Sessions" above.
--type session() :: {ClientId :: term(), Seq :: non_neg_integer()}.
+-type session() :: {ClientId :: term(), Seq :: pos_integer()}.
 
 %% The session table. For each client it holds:
 %%   - the last sequence number applied;
-%%   - the reply of the machine to that value;
-%%   - the index of that value. Eviction removes the session with the
-%%     lowest index.
--type sessions() :: #{term() => {non_neg_integer(), term(), peace:index()}}.
+%%   - the replies of the machine to the last `session_window' values, by
+%%     sequence number;
+%%   - the index of the last value applied. Eviction removes the session
+%%     with the lowest index.
+-type sessions() :: #{term() => {window, pos_integer(), #{pos_integer() => term()}, peace:index()}}.
 
 %% The contents of a snapshot. A snapshot holds everything that is a
 %% function of the decided log.
@@ -479,6 +511,7 @@
     %% in progress.
     reconf :: from() | undefined,
     use_joint = true :: boolean(),
+    session_order = true :: boolean(),
     %% Candidate: the servers that it has sent a prepare to.
     asked = [] :: [peace:server_id()],
     machine :: peace_machine:machine(),
@@ -505,6 +538,7 @@
     max_pending :: pos_integer() | infinity,
     sessions = #{} :: sessions(),
     max_sessions :: pos_integer(),
+    session_window :: pos_integer(),
     %% Candidate and leader: the epoch that this server is running.
     epoch :: peace:epoch() | undefined,
     %% Candidate: `from' is the first index that it asked about. `promises'
@@ -588,11 +622,13 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
             Log
         ),
         use_joint = not ?PLANTED(unsafe_no_joint, Config),
+        session_order = not ?PLANTED(unsafe_no_session_order, Config),
         to_quorum = maps:get(propose_to, Config, all) =:= quorum,
         machine = Machine,
         mstate = MState,
-        sessions = Sessions,
+        sessions = sessions_in(Sessions),
         max_sessions = maps:get(max_sessions, Config, ?DEFAULT_MAX_SESSIONS),
+        session_window = maps:get(session_window, Config, ?DEFAULT_SESSION_WINDOW),
         snap = Snap,
         commit = Snap,
         snapshot_interval = maps:get(snapshot_interval, Config, ?DEFAULT_SNAPSHOT_INTERVAL),
@@ -674,7 +710,7 @@ event({value, From, Value}, C) ->
     propose(From, value, {usr, Value}, C);
 event({value, From, Value, undefined}, C) ->
     propose(From, value, {usr, Value}, C);
-event({value, From, Value, Session = {_ClientId, Seq}}, C) when is_integer(Seq), Seq >= 0 ->
+event({value, From, Value, Session = {_ClientId, Seq}}, C) when is_integer(Seq), Seq >= 1 ->
     propose(From, value, {ses, Session, Value}, C);
 event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
     case holds_lease(C) of
@@ -1576,27 +1612,38 @@ apply_value(I, {'$usr', Tag, Value}, C = #core{machine = Machine, mstate = MStat
         _ -> {C1, Replies}
     end;
 apply_value(I, {'$ses', Tag, {ClientId, Seq}, Value}, C = #core{sessions = Sessions}) ->
-    case Sessions of
-        #{ClientId := {Seq, Reply, _At}} ->
+    {Last, Replies} =
+        case Sessions of
+            #{ClientId := {window, Last0, Replies0, _At}} -> {Last0, Replies0};
+            _ -> {0, #{}}
+        end,
+    case Replies of
+        _ when Seq =:= Last + 1; Seq > Last, not C#core.session_order ->
+            #core{machine = Machine, mstate = MState0, role = Role, session_window = Window} = C,
+            {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Value, MState0),
+            Replies1 = maps:remove(Seq - Window, Replies#{Seq => Reply}),
+            C1 = C#core{
+                mstate = MState,
+                sessions = evict(Sessions#{ClientId => {window, Seq, Replies1, I}}, C#core.max_sessions)
+            },
+            {C2, Answers} = resolve(I, Tag, Reply, C1),
+            case Role of
+                leader -> {C2, Answers ++ machine_effects(Effects)};
+                _ -> {C2, Answers}
+            end;
+        #{Seq := Reply} ->
             %% The value was decided more than once. It is applied once. The
             %% reply is the reply that was recorded the first time.
             resolve(I, Tag, Reply, C);
-        #{ClientId := {Later, _Reply, _At}} when Later > Seq ->
-            %% This is an old copy. It was decided after the client moved
-            %% to a higher sequence number.
-            resolve(I, Tag, {'$error', {session_superseded, Later}}, C);
+        _ when Seq > Last ->
+            %% A value of this client with a lower sequence number is not
+            %% yet applied. Applying this value would apply the values of
+            %% the client out of order.
+            resolve(I, Tag, {'$error', {session_gap, Last}}, C);
         _ ->
-            #core{machine = Machine, mstate = MState0, role = Role} = C,
-            {MState, Reply, Effects} = peace_machine:apply(Machine, #{index => I}, Value, MState0),
-            C1 = C#core{
-                mstate = MState,
-                sessions = evict(Sessions#{ClientId => {Seq, Reply, I}}, C#core.max_sessions)
-            },
-            {C2, Replies} = resolve(I, Tag, Reply, C1),
-            case Role of
-                leader -> {C2, Replies ++ machine_effects(Effects)};
-                _ -> {C2, Replies}
-            end
+            %% This is a copy of a value that was applied. The reply is no
+            %% longer recorded.
+            resolve(I, Tag, {'$error', {session_superseded, Last}}, C)
     end;
 apply_value(I, {'$cfg', Tag, Cfg}, C = #core{cfgs = Cfgs}) ->
     %% The entry is now applied, so it is no longer a configuration entry
@@ -1611,8 +1658,19 @@ apply_value(I, {'$noop', Tag}, C) ->
 evict(Sessions, Max) when map_size(Sessions) =< Max ->
     Sessions;
 evict(Sessions, _Max) ->
-    {_At, Oldest} = lists:min([{At, ClientId} || {ClientId, {_Seq, _Reply, At}} <- maps:to_list(Sessions)]),
+    {_At, Oldest} = lists:min([{At, ClientId} || {ClientId, {window, _Last, _Replies, At}} <- maps:to_list(Sessions)]),
     maps:remove(Oldest, Sessions).
+
+%% Converts a session table that was stored by a version of peace that
+%% recorded one reply per client. That version stored `{Seq, Reply, At}'.
+sessions_in(Sessions) ->
+    maps:map(
+        fun
+            (_ClientId, {Seq, Reply, At}) -> {window, Seq, #{Seq => Reply}, At};
+            (_ClientId, Session) -> Session
+        end,
+        Sessions
+    ).
 
 %% ---------------------------------------------------------------------------
 %% Membership

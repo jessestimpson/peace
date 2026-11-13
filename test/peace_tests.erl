@@ -13,6 +13,9 @@ peace_test_() ->
         fun flexible_quorum_survives_what_majority_cannot/1,
         fun durable_restart/1,
         fun sessions_snapshots_and_leases/1,
+        fun session_process_keeps_order_across_leaders/1,
+        fun session_process_and_overloaded_leader/1,
+        fun session_process_eviction/1,
         fun snapshot_in_chunks/1,
         fun change_members/1,
         fun machine_effects/1,
@@ -146,8 +149,11 @@ sessions_snapshots_and_leases(Ids0) ->
             %% A retry of the last value changes no state and is answered.
             {ok, ok, Leader} = Put(7),
             %% A late copy of an earlier value also changes no state. The
-            %% late copy is refused.
-            {error, {session_superseded, 7}} = Put(2),
+            %% reply is the reply to the earlier value.
+            {ok, ok, Leader} = Put(2),
+            %% A value that is not the next value of the session is not
+            %% applied.
+            {error, {session_gap, 7}} = Put(9),
             #{snapshot_index := Snapshot, sessions := 1} = peace:overview(Leader),
             ?assert(Snapshot >= 6),
             %% A read under a lease uses no index.
@@ -172,6 +178,71 @@ sessions_snapshots_and_leases(Ids0) ->
             {ok, ok, NewLeader} = Put(7),
             {ok, 7, NewLeader} = peace:propose(NewLeader, {get, 7})
         end)}.
+
+%% A session process has 8 values undecided at a time. The leader is
+%% stopped while values are undecided. Every value is applied once, in the
+%% order of submission.
+session_process_keeps_order_across_leaders(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, ?FAST),
+        Leader = await_leader(Ids),
+        {ok, S} = peace:open_session(Ids, #{window => 8, retry_ms => 200}),
+        First = [peace:cast(S, {put, k, N}) || N <- lists:seq(1, 40)],
+        ok = peace:stop_server(Leader),
+        Second = [peace:cast(S, {put, k, N}) || N <- lists:seq(41, 100)],
+        ?assertEqual([{ok, ok}], lists:usort(session_results(First ++ Second))),
+        {ok, 100} = peace:call(S, {get, k}),
+        {ok, Puts, _} = peace:consistent_query(
+            Ids -- [Leader], fun(#{history := H}) -> [N || {_I, {put, k, N}} <- lists:reverse(H)] end
+        ),
+        ?assertEqual(lists:seq(1, 100), Puts),
+        ok = peace:close_session(S)
+    end).
+
+%% The leader holds at most 2 undecided values and refuses the others. The
+%% session process submits the refused values again.
+session_process_and_overloaded_leader(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, (fast())#{max_pending => 2}),
+        _ = await_leader(Ids),
+        {ok, S} = peace:open_session(Ids, #{window => 16}),
+        Refs = [peace:cast(S, {put, k, N}) || N <- lists:seq(1, 60)],
+        ?assertEqual([{ok, ok}], lists:usort(session_results(Refs))),
+        {ok, Puts, _} = peace:consistent_query(
+            Ids, fun(#{history := H}) -> [N || {_I, {put, k, N}} <- lists:reverse(H)] end
+        ),
+        ?assertEqual(lists:seq(1, 60), Puts),
+        ok = peace:close_session(S)
+    end).
+
+%% The cluster remembers one session. A value of a second session evicts
+%% the first session.
+session_process_eviction(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, (fast())#{max_sessions => 1}),
+        _ = await_leader(Ids),
+        {ok, S1} = peace:open_session(Ids),
+        {ok, S2} = peace:open_session(Ids),
+        {ok, ok} = peace:call(S1, {put, a, 1}),
+        {ok, ok} = peace:call(S2, {put, b, 1}),
+        {error, session_evicted} = peace:call(S1, {put, a, 2}),
+        {ok, ok} = peace:call(S1, {put, a, 3}),
+        {ok, 3} = peace:call(S1, {get, a}),
+        ok = peace:close_session(S1),
+        ok = peace:close_session(S2)
+    end).
+
+session_results(Refs) ->
+    [
+        receive
+            {peace_reply, Ref, Result} -> Result
+        after 10000 -> error({no_reply, Ref})
+        end
+     || Ref <- Refs
+    ].
 
 %% A server that restarts without data receives a snapshot. The snapshot
 %% is larger than one chunk.

@@ -51,6 +51,12 @@
     propose/2,
     propose/3,
     propose_async/2,
+    open_session/1,
+    open_session/2,
+    close_session/1,
+    call/2,
+    call/3,
+    cast/2,
     consistent_query/2,
     consistent_query/3,
     local_query/2,
@@ -109,6 +115,10 @@
     %% The number of client sessions that are remembered. The value must be
     %% the same on every member. The default is 10000.
     max_sessions => pos_integer(),
+    %% The number of replies that are remembered for each client session.
+    %% A session can have this many values undecided at one time. The
+    %% default is 64. See "Sessions" in `peace_core'.
+    session_window => pos_integer(),
     %% The number of values that a leader holds undecided at one time. A
     %% leader that holds this many answers a further value or consistent
     %% query with `{error, overloaded}' and does not propose it. The default
@@ -139,6 +149,7 @@
     heartbeat_ms => pos_integer(),
     snapshot_interval => pos_integer() | infinity,
     max_sessions => pos_integer(),
+    session_window => pos_integer(),
     read_lease_ms => pos_integer(),
     propose_to => all | quorum,
     %% The `unsafe_' keys are for tests that plant a bug, to show that a
@@ -149,6 +160,7 @@
     unsafe_no_snapshot_guard => boolean(),
     unsafe_no_lease_fence => boolean(),
     unsafe_no_joint => boolean(),
+    unsafe_no_session_order => boolean(),
     %% The rate of this server's clock, as `{Num, Den}'. This key is read
     %% only in a test build.
     test_clock_rate => {pos_integer(), pos_integer()},
@@ -160,7 +172,7 @@
 %% The `session' option makes the value safe to retry. See `propose/3'.
 -type propose_opts() :: #{
     timeout => timeout(),
-    session => {ClientId :: term(), Seq :: non_neg_integer()}
+    session => {ClientId :: term(), Seq :: pos_integer()}
 }.
 
 -type propose_ret() ::
@@ -280,25 +292,39 @@ propose(ServerOrServers, Value) ->
 %% applied at most once. The retry is answered with the reply that the first
 %% application produced.
 %%
-%% A client that uses sessions must:
+%% A client that uses the `session' option must:
 %%
 %% <ul>
-%% <li>choose a `ClientId' that no other client uses,</li>
-%% <li>have one value in flight at a time, and</li>
-%% <li>give each new value a higher `Seq' than the previous value.</li>
+%% <li>choose a `ClientId' that no other client uses or has used,</li>
+%% <li>give its first value the `Seq' 1, and</li>
+%% <li>give each new value the `Seq' of the previous value plus 1.</li>
 %% </ul>
 %%
-%% A copy of an older value, submitted after the client has moved to a higher
-%% `Seq', is not applied. The copy is answered
-%% `{error, {session_superseded, Seq}}'. Without a session, a retried value
-%% may be applied twice.
+%% The values of one client are applied in the order of `Seq'. A client may
+%% submit a value before the previous value has a reply. Three replies are
+%% specific to sessions:
+%%
+%% <ul>
+%% <li>`{error, {session_gap, Last}}': the value was not applied, because
+%%   the value with the previous `Seq' is not applied. `Last' is the highest
+%%   `Seq' that is applied. The client submits the values from `Last + 1'
+%%   again, in order.</li>
+%% <li>`{error, {session_superseded, Last}}': the value is a copy of a value
+%%   that was applied. The cluster no longer holds the reply. The cluster
+%%   holds the last `session_window' replies of a client.</li>
+%% <li>`{error, {session_gap, 0}}' for a client that has received a reply:
+%%   the cluster evicted the session. See `max_sessions'.</li>
+%% </ul>
+%%
+%% `open_session/2' starts a process that follows these rules. Without a
+%% session, a retried value may be applied twice.
 -spec propose(server_id() | [server_id()], peace_machine:value(), timeout() | propose_opts()) ->
     propose_ret().
 propose(ServerOrServers, Value, Opts) when is_map(Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_CALL_TIMEOUT_MS),
     Request =
         case Opts of
-            #{session := Session = {_ClientId, Seq}} when is_integer(Seq), Seq >= 0 ->
+            #{session := Session = {_ClientId, Seq}} when is_integer(Seq), Seq >= 1 ->
                 {value, Value, Session};
             #{session := Bad} ->
                 error({badarg, {session, Bad}});
@@ -318,6 +344,78 @@ propose(ServerOrServers, Value, Timeout) ->
 -spec propose_async(server_id(), peace_machine:value()) -> ok.
 propose_async(Server, Value) ->
     gen_server:cast(Server, {value, Value}).
+
+%% @equiv open_session(ServerOrServers, #{})
+-spec open_session(server_id() | [server_id()]) -> {ok, pid()} | {error, term()}.
+open_session(ServerOrServers) ->
+    open_session(ServerOrServers, #{}).
+
+%% @doc Starts a session process and links it to the caller. Sessions are
+%% not in the thesis.
+%%
+%% A session process submits values with `call/3' and `cast/2'. The values
+%% of one session process are applied in the order in which the session
+%% process received them, each at most once. The session process:
+%%
+%% <ul>
+%% <li>has up to `window' values undecided at one time (the default is 64,
+%%   and the value must be at most the `session_window' of the cluster),</li>
+%% <li>finds the leader, and</li>
+%% <li>submits a value again until the value has a reply.</li>
+%% </ul>
+%%
+%% Several processes can use one session process. See `peace_session' for
+%% the options and the limitations.
+-spec open_session(server_id() | [server_id()], peace_session:opts()) -> {ok, pid()} | {error, term()}.
+open_session(ServerOrServers, Opts) ->
+    peace_session:start_link(servers(ServerOrServers), Opts).
+
+%% @doc Stops a session process. Every value of the session that has no
+%% reply is answered `{error, session_closed}'. The outcome of such a value
+%% is unknown.
+-spec close_session(pid()) -> ok.
+close_session(Session) ->
+    peace_session:stop(Session).
+
+%% @equiv call(Session, Value, 5000)
+-spec call(pid(), peace_machine:value()) -> peace_session:result() | {timeout, pid()}.
+call(Session, Value) ->
+    call(Session, Value, ?DEFAULT_CALL_TIMEOUT_MS).
+
+%% @doc Submits a value through a session process and waits for the reply.
+%% `call' and `cast' are not thesis terms. The names are the `gen_server'
+%% names for the same two forms of request.
+%%
+%% The return values are:
+%%
+%% <ul>
+%% <li>`{ok, Reply}': the value was decided and applied once. `Reply' is the
+%%   term that the machine returned.</li>
+%% <li>`{timeout, Session}': the outcome is unknown. The value stays in the
+%%   session. The session process continues to submit the value, and later
+%%   values of the session wait for it.</li>
+%% <li>`{error, session_evicted}' and `{error, session_closed}': the outcome
+%%   is unknown.</li>
+%% <li>`{error, {session_superseded, Seq}}': the value was applied once. The
+%%   cluster no longer holds the reply.</li>
+%% </ul>
+%%
+%% While `window' values have no reply, the call waits.
+-spec call(pid(), peace_machine:value(), timeout()) -> peace_session:result() | {timeout, pid()}.
+call(Session, Value, Timeout) ->
+    peace_session:call(Session, Value, Timeout).
+
+%% @doc Submits a value through a session process without waiting for the
+%% reply. The calling process later receives `{peace_reply, Ref, Result}'.
+%% `Ref' is the return value of this function. `Result' is one of the
+%% return values of `call/3', except the timeout.
+%%
+%% While `window' values have no reply, this function waits. The function
+%% returns when the session process has given the value its place in the
+%% order.
+-spec cast(pid(), peace_machine:value()) -> reference().
+cast(Session, Value) ->
+    peace_session:cast(Session, Value).
 
 %% @equiv consistent_query(ServerOrServers, Fun, 5000)
 -spec consistent_query(server_id() | [server_id()], fun((peace_machine:state()) -> Result)) ->
@@ -348,7 +446,7 @@ local_query(Server, Fun) ->
 -spec local_query(server_id(), fun((peace_machine:state()) -> Result), timeout()) ->
     {ok, Result, Leader :: server_id() | undefined} | {error, term()} | {timeout, server_id()}.
 local_query(Server, Fun, Timeout) when is_function(Fun, 1) ->
-    call(Server, {local_query, Fun}, Timeout).
+    server_call(Server, {local_query, Fun}, Timeout).
 
 %% @equiv members(Server, 5000)
 -spec members(server_id()) ->
@@ -361,7 +459,7 @@ members(Server) ->
 -spec members(server_id(), timeout()) ->
     {ok, [server_id()], Leader :: server_id() | undefined} | {error, term()} | {timeout, server_id()}.
 members(Server, Timeout) ->
-    call(Server, members, Timeout).
+    server_call(Server, members, Timeout).
 
 %% @equiv change_members(ServerOrServers, Members, Quorum, 5000)
 -spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec()) -> propose_ret().
@@ -413,7 +511,7 @@ change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) 
 %% is intended for people and for tests.
 -spec overview(server_id()) -> map() | {error, term()} | {timeout, server_id()}.
 overview(Server) ->
-    call(Server, overview, ?DEFAULT_CALL_TIMEOUT_MS).
+    server_call(Server, overview, ?DEFAULT_CALL_TIMEOUT_MS).
 
 %% @doc Makes `Server' campaign immediately, without waiting for its
 %% election timeout to expire.
@@ -439,7 +537,7 @@ leader_call([], _Request, _Timeout, _Hops, LastError) ->
 leader_call(_Servers, _Request, _Timeout, 0, _LastError) ->
     {error, too_many_redirects};
 leader_call([Server | Rest], Request, Timeout, Hops, _LastError) ->
-    case call(Server, Request, Timeout) of
+    case server_call(Server, Request, Timeout) of
         {error, {not_leader, undefined}} ->
             leader_call(Rest, Request, Timeout, Hops, no_leader);
         {error, {not_leader, Leader}} ->
@@ -450,7 +548,7 @@ leader_call([Server | Rest], Request, Timeout, Hops, _LastError) ->
             Other
     end.
 
-call(Server, Request, Timeout) ->
+server_call(Server, Request, Timeout) ->
     try
         gen_server:call(Server, Request, Timeout)
     catch

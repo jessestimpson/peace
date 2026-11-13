@@ -80,6 +80,8 @@
         [:-peace_kv_node "snapshot_interval" (str (:snapshot-interval test))])
       (when (:chunk-bytes test)
         [:-peace_kv_node "chunk_bytes" (str (:chunk-bytes test))])
+      (when (:sessions test)
+        [:-peace_kv_node "sessions" "true"])
       (when (pos? spread)
         [:-peace_kv_node "clock_rate"
          (str (+ 1000 (- (rand-int (inc (* 10 spread))) (* 5 spread))) "/1000")]))))
@@ -382,6 +384,8 @@
     :parse-fn parse-long]
    [nil "--chunk-bytes BYTES" "The size of a chunk of a snapshot, in a transfer and in the write-ahead log."
     :parse-fn parse-long]
+   [nil "--sessions" "Each node submits writes through one session process."
+    :default false]
    [nil "--clock-rate-spread PERCENT" "The width of the range of the clock rates of the nodes, in percent."
     :default  0
     :parse-fn parse-long]

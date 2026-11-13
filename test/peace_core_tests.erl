@@ -263,13 +263,74 @@ session_applies_once_test() ->
     %% The next value of the session is a new value.
     S4 = run(ev(a, {value, c4, {put, k, 4}, {me, 2}}, S3)),
     ?assertEqual(#{k => 4}, kv(a, S4)),
-    %% A copy of the old value of the session arrives late and is refused.
+    %% A copy of the first value of the session arrives late. The copy is
+    %% not applied. The reply is the reply to the first value.
     S5 = run(ev(a, {value, c5, {put, k, 1}, {me, 1}}, S4)),
-    ?assertEqual({error, {session_superseded, 2}}, proplists:get_value(c5, replies(S5))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(c5, replies(S5))),
     ?assertEqual(#{k => 4}, kv(a, S5)),
     %% The followers reach the same state in the same way.
     S6 = run(ev(a, heartbeat_timeout, S5)),
     ?assertEqual([#{k => 4}, #{k => 4}], [kv(I, S6) || I <- [b, c]]).
+
+%% A client has several values undecided. The values are applied in the
+%% order of their sequence numbers. A value that is decided before the value
+%% with the previous sequence number is not applied.
+session_values_apply_in_order_test() ->
+    S0 = run(ev(a, force_election, new([a, b, c], majority))),
+    %% The value with sequence number 1 was lost. The values 2 and 3 are
+    %% decided first.
+    S1 = run(ev(a, {value, c2, {put, k, 2}, {me, 2}}, S0)),
+    S2 = run(ev(a, {value, c3, {put, k, 3}, {me, 3}}, S1)),
+    ?assertEqual({error, {session_gap, 0}}, proplists:get_value(c2, replies(S2))),
+    ?assertEqual({error, {session_gap, 0}}, proplists:get_value(c3, replies(S2))),
+    ?assertEqual(#{}, kv(a, S2)),
+    ?assertEqual(2, commit(a, S2)),
+    %% The client submits the three values again, in order.
+    S3 = lists:foldl(
+        fun(N, S) -> run(ev(a, {value, {again, N}, {put, k, N}, {me, N}}, S)) end, S2, [1, 2, 3]
+    ),
+    ?assertEqual([{ok, ok, a}], lists:usort([proplists:get_value({again, N}, replies(S3)) || N <- [1, 2, 3]])),
+    ?assertEqual(#{k => 3}, kv(a, S3)),
+    %% A value two above the last value leaves a gap again.
+    S4 = run(ev(a, {value, c5, {put, k, 5}, {me, 5}}, S3)),
+    ?assertEqual({error, {session_gap, 3}}, proplists:get_value(c5, replies(S4))),
+    ?assertEqual(#{k => 3}, kv(a, S4)),
+    S5 = run(ev(a, heartbeat_timeout, S4)),
+    ?assertEqual([#{k => 3}, #{k => 3}], [kv(I, S5) || I <- [b, c]]).
+
+%% A server holds the replies to the last `session_window' values of a
+%% client. A copy of an older value is not applied and has no reply.
+session_window_test() ->
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{session_window => 2}))),
+    S1 = lists:foldl(
+        fun(N, S) -> run(ev(a, {value, N, {get, N}, {me, N}}, run(ev(a, {value, {put, N}, {put, N, N}}, S)))) end,
+        S0,
+        [1, 2, 3]
+    ),
+    ?assertEqual([{ok, N, a} || N <- [1, 2, 3]], [proplists:get_value(N, replies(S1)) || N <- [1, 2, 3]]),
+    S2 = lists:foldl(
+        fun(N, S) -> run(ev(a, {value, {copy, N}, {get, N}, {me, N}}, S)) end, S1, [1, 2, 3]
+    ),
+    ?assertEqual(
+        [{error, {session_superseded, 3}}, {ok, 2, a}, {ok, 3, a}],
+        [proplists:get_value({copy, N}, replies(S2)) || N <- [1, 2, 3]]
+    ).
+
+%% A session table that an earlier version of peace stored holds one reply
+%% per client.
+session_table_of_earlier_version_test() ->
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2, snapshot_offset => 0}))),
+    S1 = lists:foldl(
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}, {me, N}}, S)) end, S0, [1, 2]
+    ),
+    #{snapshot := {2, {MState, #{me := {window, 2, #{2 := ok}, 2}}, ACfg}}} = Stored = stored(a, S1),
+    Old = Stored#{snapshot := {2, {MState, #{me => {2, ok, 2}}, ACfg}}},
+    S2 = run(ev(a, force_election, restart(a, S1#{store := (maps:get(store, S1))#{a := Old}}))),
+    %% A copy of the last value is not applied. The next value is applied.
+    S3 = run(ev(a, {value, copy, {put, 2, copy}, {me, 2}}, S2)),
+    S4 = run(ev(a, {value, next, {put, 3, 3}, {me, 3}}, S3)),
+    ?assertEqual({ok, ok, a}, proplists:get_value(copy, replies(S4))),
+    ?assertEqual(#{1 => 1, 2 => 2, 3 => 3}, kv(a, S4)).
 
 %% Sessions are evicted in order of index, with the oldest index first.
 %% Every server evicts the same sessions.

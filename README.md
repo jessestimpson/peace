@@ -161,14 +161,46 @@ with the member.
 ### Sessions
 
 A client whose request times out does not know whether its value was
-decided. If the client submits the value with `#{session => {ClientId, Seq}}`,
-peace applies it at most once regardless of how many times it is retried.
-Each retry returns the reply from the first application. A client can have
-one value in flight at a time, and `Seq` must increase.
+decided. A value that is submitted under a session is applied at most once,
+regardless of how many times the client submits it.
+
+A session process submits values under one session:
 
 ```erlang
-{ok, Reply, _} = peace:propose(Ids, Value, #{session => {my_id, 17}, timeout => 2000}).
+{ok, S} = peace:open_session(Ids, #{window => 64}),
+
+%% Waits for the reply. Several processes can use S.
+{ok, Reply} = peace:call(S, Value),
+
+%% Does not wait for the reply. The reply arrives as a message.
+Ref = peace:cast(S, Value),
+receive {peace_reply, Ref, Result} -> Result end,
+
+ok = peace:close_session(S).
 ```
+
+- The values of one session process are applied in the order in which the
+  session process received them.
+- A session process has up to `window` values undecided at one time
+  (default 64). While `window` values have no reply, `call` and `cast`
+  wait.
+- A session process finds the leader, and submits a value again until the
+  value has a reply. A call that times out leaves its value in the session.
+- The servers keep the last `session_window` replies of each session
+  (default 64). `window` must be at most `session_window`.
+
+A client can also assign the sequence numbers itself, with
+`peace:propose(Ids, Value, #{session => {ClientId, Seq}})`. `Seq` starts at
+1 and increases by 1. The servers answer three errors:
+
+| Reply | Meaning |
+|---|---|
+| `{error, {session_gap, Last}}` | The value was not applied, because the value with the previous `Seq` is not applied. `Last` is the highest `Seq` applied. The client submits the values from `Last + 1` again. |
+| `{error, {session_superseded, Last}}` | The value is a copy of a value that was applied. The servers no longer hold the reply. |
+| `{error, {session_gap, 0}}`, for a client that has received a reply | The cluster evicted the session. See `max_sessions`. |
+
+The rules are in "Sessions" in [peace_core](src/peace_core.erl). The session
+process is [peace_session](src/peace_session.erl).
 
 ### Snapshots
 
@@ -341,11 +373,17 @@ stores a snapshot in at least two steps, so faults and other writes occur
 between the chunks of a snapshot. Read leases are also tested with two of three servers
 running clocks six per cent fast.
 
-Eight invariants are checked after every step. They include agreement across
-the whole run, that a server's memory never holds state its disk does not,
-and that a linearizable read returns every value acknowledged before it.
+Three further tests replace the client. Each client starts a session
+process and submits three values that are undecided at the same time. The
+tests run the faults workload, the faults workload with a leader that holds
+at most two undecided values, and the churn workload.
 
-Ten planted bugs confirm that the suite can fail:
+Nine invariants are checked after every step. They include agreement across
+the whole run, that a server's memory never holds state its disk does not,
+that a linearizable read returns every value acknowledged before it, and
+that the values of a session process are applied in the order of submission.
+
+Eleven planted bugs confirm that the suite can fail:
 
 - quorums that do not intersect
 - a disk that loses its contents on restart
@@ -357,6 +395,8 @@ Ten planted bugs confirm that the suite can fail:
 - clocks that differ in rate by a factor of ten
 - membership change without a joint configuration
 - clients that retry without a session
+- servers that apply a value of a session before the previous value of
+  that session
 
 Limitations:
 
@@ -469,6 +509,10 @@ The tests in [test/](test/) cover:
   two chunks, and a stop during the checkpoint
 - the transfer of a snapshot in chunks: a lost request, a repeated chunk, a
   damaged chunk and a transfer that replaces another transfer
+- the session rules: values decided out of order, copies inside and outside
+  the reply window, and a session table stored by an earlier version
+- the session process: a full window, a gap, a change of leader, a server
+  that does not answer, an eviction and a refusing leader
 - a server whose storage write fails: the server stops, sends nothing and is
   not restarted
 
@@ -513,6 +557,7 @@ Requirements:
 | [src/peace_server.erl](src/peace_server.erl) | The `gen_server` that performs the effects: storage writes, timers and sends |
 | [src/peace_writer.erl](src/peace_writer.erl) | The storage process of a server. It calls the storage backend. |
 | [src/peace_transfer.erl](src/peace_transfer.erl) | The transfer of a snapshot between two servers, in chunks |
+| [src/peace_session.erl](src/peace_session.erl) | The client process that submits values under one session |
 | [src/peace_quorum.erl](src/peace_quorum.erl) | Quorum systems and their validation |
 | [src/peace_machine.erl](src/peace_machine.erl) | The state machine behaviour |
 | [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The three backends are in separate modules. |
@@ -546,7 +591,19 @@ work required.
   starts to send it or to store it, and was not measured.
 - **Sessions do not expire by time.** The session table is bounded by
   `max_sessions`. When it is full, the session with the oldest index is
-  evicted.
+  evicted. A session process answers the values that have no reply at that
+  time with `{error, session_evicted}`. A copy of the first value of an
+  evicted session that is decided later is applied again.
+- **A value of a session cannot be withdrawn.** A session process submits a
+  value until the value has a reply, and the later values of the session
+  wait for it.
+- **A session does not survive its session process.** A client that must
+  continue a session after a restart assigns and stores the sequence
+  numbers itself.
+- **The throughput of a session process was not measured.**
+- **Every member must run the same version of the session rules.** Earlier
+  versions applied a value with any higher sequence number. A cluster
+  with both versions would apply different values.
 - **Only §4.1 of the thesis is implemented.** The following are not:
   - Revision B (§4.2), quorums that vary by epoch. Membership change is
     related to it but does not implement it.

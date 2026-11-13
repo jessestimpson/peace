@@ -22,6 +22,11 @@
 %% Every request is sent to the peace server of this node. The request
 %% follows redirects to the leader.
 %%
+%% If the node has a session process, a `PUT' is submitted through the
+%% session process. A `PUT' is then never answered 503. A `PUT' that is
+%% answered 504 stays in the session, and the session process submits it
+%% until it is applied.
+%%
 %% Status codes:
 %%
 %% <ul>
@@ -101,14 +106,22 @@ request('GET', #{path := <<"/kv/", Key/binary>>}) ->
     end;
 request('PUT', #{path := <<"/kv/", Key0/binary>>, query := Query}) ->
     Key = binary_to_integer(Key0),
-    Result =
+    Write =
         case maps:from_list(uri_string:dissect_query(Query)) of
             #{<<"value">> := Value, <<"expected">> := Expected} ->
-                peace_kv:cas(
-                    peace_kv_node:server(), Key, binary_to_integer(Expected), binary_to_integer(Value), ?TIMEOUT_MS
-                );
+                {cas, Key, binary_to_integer(Expected), binary_to_integer(Value)};
             #{<<"value">> := Value} ->
-                peace_kv:put(peace_kv_node:server(), Key, binary_to_integer(Value), ?TIMEOUT_MS)
+                {put, Key, binary_to_integer(Value)}
+        end,
+    Result =
+        case peace_kv_node:session() of
+            undefined ->
+                peace:propose(peace_kv_node:server(), Write, ?TIMEOUT_MS);
+            Session ->
+                case peace:call(Session, Write, ?TIMEOUT_MS) of
+                    {ok, Reply} -> {ok, Reply, undefined};
+                    Other0 -> Other0
+                end
         end,
     case Result of
         {ok, ok, _Leader} -> {204, <<>>};

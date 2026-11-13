@@ -10,7 +10,12 @@
 
 -include("peace_eta.hrl").
 
--export([value/5, query/3, reconfigure/5, restart/1, deliver/3]).
+-export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/3]).
+
+%% The number of values that a client of `pipeline/3' submits, and the time
+%% that the client waits for the replies.
+-define(PIPELINE, 3).
+-define(PIPELINE_MS, 600).
 
 -define(CALL_TIMEOUT_MS, 200).
 -define(RETRY_AFTER_MS, 60).
@@ -41,6 +46,64 @@ value(Tab, N, Servers, Op, Retry) ->
     true = ets:insert(Tab, {{op, Op}, Result}),
     ok = history(Tab, {return, N, Result}),
     ok.
+
+%% Submits three values through one session process and records the result
+%% of each value. The three values are undecided at the same time. The
+%% operation of value `K' is `{N, K}', so the harness can check the order in
+%% which the values of one session were applied.
+%%
+%% The client stops waiting after `?PIPELINE_MS'. The outcome of a value
+%% that has no reply at that time is unknown.
+%%
+%% The client does not close the session, and waits indefinitely after it
+%% has recorded the results. The session process continues to submit the
+%% values that have no reply, as a real client does. There is a second
+%% reason. A server can send a reply after the client has stopped waiting.
+%% The simulated network holds a delayed message on a timer. A timer for a
+%% process that has exited fails the audit of the run. The harness kills the
+%% client and the session process when the run ends.
+pipeline(Tab, N, Servers) ->
+    ?ETA_LABEL({client, N}),
+    {ok, Session} = peace:open_session(Servers, #{id => N, window => ?PIPELINE, retry_ms => ?RETRY_AFTER_MS}),
+    true = ets:insert(Tab, {{session, N}, Session}),
+    Refs = [
+        begin
+            Op = {N, K},
+            true = ets:insert(Tab, {{op, Op}, invoked}),
+            ok = history(Tab, {invoke, Op, {append, Op}}),
+            {Op, peace:cast(Session, {put, Op})}
+        end
+     || K <- lists:seq(1, ?PIPELINE)
+    ],
+    Deadline = erlang:send_after(?PIPELINE_MS, self(), pipeline_deadline),
+    ok = collect(Tab, Refs),
+    _ = erlang:cancel_timer(Deadline),
+    true = ets:insert(Tab, {{pipeline_done, N}, true}),
+    receive
+        stop -> ok
+    end.
+
+collect(_Tab, []) ->
+    ok;
+collect(Tab, Refs) ->
+    receive
+        {peace_reply, Ref, Reply} ->
+            {Op, Ref} = lists:keyfind(Ref, 2, Refs),
+            Result =
+                case Reply of
+                    {ok, Index} -> {ok, Index};
+                    Other -> {unknown, Other}
+                end,
+            ok = record(Tab, Op, Result),
+            collect(Tab, lists:keydelete(Ref, 2, Refs));
+        pipeline_deadline ->
+            lists:foreach(fun({Op, _Ref}) -> ok = record(Tab, Op, {unknown, timeout}) end, Refs)
+    end.
+
+record(Tab, Op, Result) ->
+    _ = ?ETA_LOG({client, Op, Result}),
+    true = ets:insert(Tab, {{op, Op}, Result}),
+    history(Tab, {return, Op, Result}).
 
 %% Performs a linearizable read of every value applied so far. Records the
 %% answer together with the values that had already been acknowledged when

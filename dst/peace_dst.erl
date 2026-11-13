@@ -72,6 +72,10 @@
 %%   value of that client is decided at that index.</li>
 %% <li>`applied_once' - no machine has applied a value twice, regardless of
 %%   how many indexes hold the value because of client retries.</li>
+%% <li>`session_order' - every machine has applied the values of each
+%%   session process in the order in which the client submitted them, with
+%%   no value left out. This invariant applies to the clients of
+%%   `retry => pipeline'.</li>
 %% <li>`linearizable_read' - a consistent query returns a prefix of the
 %%   decided log, and the prefix contains every value that was acknowledged
 %%   before the query was issued.</li>
@@ -92,6 +96,10 @@
 %%
 %% Clients submit values under a session. A client retries a request when the
 %% outcome of the request is unknown.
+%%
+%% `retry => pipeline' replaces the client of a value. The client starts a
+%% session process (`peace_session') and submits three values, which are
+%% undecided at the same time. See `peace_dst_client:pipeline/3'.
 %%
 %% == Membership ==
 %%
@@ -177,6 +185,9 @@
 %% <li>`bare_retries' - clients retry without a session, and a value is
 %%   applied twice. This mode is not a bug in peace. This mode shows that
 %%   `applied_once' can fail.</li>
+%% <li>`unordered_sessions' - with `retry => pipeline', a server applies a
+%%   value of a session although the value with the previous sequence number
+%%   is not applied. This mode shows that `session_order' can fail.</li>
 %% <li>`no_conflict_step_down' - a leader learns that an index was decided
 %%   with a value other than the value that the leader proposed, and the
 %%   leader continues to lead. This is the same change as
@@ -290,6 +301,7 @@ init(_Seed, Config) ->
         retry =>
             case Mode of
                 bare_retries -> bare;
+                unordered_sessions -> pipeline;
                 _ -> maps:get(retry, Config, session)
             end,
         converge => maps:get(converge, Config, false),
@@ -304,6 +316,10 @@ init(_Seed, Config) ->
         %% stays alive for as long as the server that the restarter started.
         %% The restarter is linked to that server, as a supervisor is.
         sups => [],
+        %% `pipes' lists every client of `retry => pipeline', oldest first,
+        %% with the number of the client. Such a client stays alive after
+        %% it has recorded its results. See `peace_dst_client:pipeline/3'.
+        pipes => [],
         %% Whether the run has started the servers. See `generate/2'.
         booted => false,
         clients => 0
@@ -314,9 +330,9 @@ init(_Seed, Config) ->
 %% restarted the server, and the scheduler adopts the server together with
 %% that process. Listing the server here as well is harmless, and makes the
 %% order of the list a function of the run.
-processes(#{n := N, ops := Ops, sups := Sups}) ->
+processes(#{n := N, ops := Ops, sups := Sups, pipes := Pipes}) ->
     [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)] ++
-        [Pid || Pid <- Ops ++ Sups, is_process_alive(Pid)].
+        [Pid || Pid <- Ops ++ Sups ++ [Pipe || {_C, Pipe} <- Pipes], is_process_alive(Pid)].
 
 %% The first operation of a run starts every server at the same time. The
 %% operation makes no random draw.
@@ -370,8 +386,14 @@ generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
 execute({value, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
-    Retry = maps:get(retry, S),
-    spawn_op(clients, fun() -> peace_dst_client:value(Tab, C, Servers, C, Retry) end, S#{clients := C});
+    case maps:get(retry, S) of
+        pipeline ->
+            Pid = eta_run:spawn_op(fun() -> peace_dst_client:pipeline(Tab, C, Servers) end),
+            ok = eta_net:place(clients, [Pid]),
+            S#{clients := C, pipes := maps:get(pipes, S) ++ [{C, Pid}]};
+        Retry ->
+            spawn_op(clients, fun() -> peace_dst_client:value(Tab, C, Servers, C, Retry) end, S#{clients := C})
+    end;
 execute({query, First}, S = #{tab := Tab, ids := Ids, clients := C0}) ->
     C = C0 + 1,
     Servers = rotate(First, Ids),
@@ -475,6 +497,7 @@ check(#{tab := Tab, ids := Ids}) ->
         fun() -> storage_matches_memory(Tab, Views, Disks) end,
         fun() -> promise_never_regresses(Tab, Disks) end,
         fun() -> agreement(Tab, Disks) end,
+        fun() -> session_order(Views) end,
         fun() -> applied_matches_decided(Views, Record) end,
         fun() -> acknowledged_is_decided(Tab) end,
         fun() -> applied_once(Views) end,
@@ -500,8 +523,9 @@ check_final(Settled, #{tab := Tab, ids := Ids, converge := true}) ->
 %% every run would use its whole settle budget on heartbeat steps. When
 %% `converge' is on, this callback also waits until the servers have
 %% converged.
-settle_done(#{ops := Ops, converge := Converge, ids := Ids}) ->
+settle_done(#{tab := Tab, ops := Ops, pipes := Pipes, converge := Converge, ids := Ids}) ->
     not lists:any(fun is_process_alive/1, Ops) andalso
+        lists:all(fun({C, _Pid}) -> ets:member(Tab, {pipeline_done, C}) end, Pipes) andalso
         (not Converge orelse
             case lists:usort([applied(Core) || {_Id, Core} <- current_members(Ids)]) of
                 [_One] -> true;
@@ -515,6 +539,8 @@ terminate(S = #{tab := Tab, n := N}) ->
     %% but that has not yet registered its name can only be reached through
     %% the link to the restarter.
     ok = kill(maps:get(sups, S)),
+    Sessions = [Pid || [Pid] <- ets:match(Tab, {{session, '_'}, '$1'})],
+    ok = kill([Pid || {_C, Pid} <- maps:get(pipes, S)] ++ Sessions),
     ok = kill(maps:get(ops, S) ++ [Pid || I <- lists:seq(1, N), Pid <- [server_pid(I)], is_pid(Pid)]),
     ok = await_unregistered(N, 1000),
     catch ets:delete(Tab),
@@ -706,7 +732,8 @@ applied_matches_decided(Views, Record) ->
 %% Returns the state that a machine holds after the first `Commit' indexes
 %% of the decided log. The state contains:
 %%   - every value that has no session;
-%%   - the value of each session, the first time that value appears.
+%%   - each value of a session whose sequence number is one above the
+%%     sequence number of the last value of that session in the state.
 %% Returns `{missing, I}' if the record has no value at an index `I' that is
 %% at or below `Commit'. The commit index of a server must never be beyond
 %% the end of the record.
@@ -720,11 +747,9 @@ expected(I, Commit, Record, Sessions, Acc) ->
         #{I := {'$usr', _Tag, Value}} ->
             expected(I + 1, Commit, Record, Sessions, [{I, Value} | Acc]);
         #{I := {'$ses', _Tag, {Client, Seq}, Value}} ->
-            case Sessions of
-                #{Client := Last} when Last >= Seq ->
-                    expected(I + 1, Commit, Record, Sessions, Acc);
-                _ ->
-                    expected(I + 1, Commit, Record, Sessions#{Client => Seq}, [{I, Value} | Acc])
+            case maps:get(Client, Sessions, 0) + 1 of
+                Seq -> expected(I + 1, Commit, Record, Sessions#{Client => Seq}, [{I, Value} | Acc]);
+                _ -> expected(I + 1, Commit, Record, Sessions, Acc)
             end;
         #{I := {'$noop', _Tag}} ->
             expected(I + 1, Commit, Record, Sessions, Acc);
@@ -798,6 +823,27 @@ applied_once(Views) ->
     case Twice of
         [] -> ok;
         _ -> violation(applied_once, #{servers => Twice})
+    end.
+
+%% The operation of a client of `retry => pipeline' is `{N, K}': value `K'
+%% of client `N'. The values of client `N' that a machine has applied must
+%% be the values 1 to some `K', in that order.
+session_order(Views) ->
+    Wrong = [
+        {Id, N, Ks}
+     || {Id, {live, Core}} <- Views,
+        {N, Ks} <- maps:to_list(
+            lists:foldl(
+                fun({N, K}, Acc) -> Acc#{N => maps:get(N, Acc, []) ++ [K]} end,
+                #{},
+                [Op || {_I, {put, Op = {_N, _K}}} <- lists:reverse(peace_core:machine_state(Core))]
+            )
+        ),
+        Ks =/= lists:seq(1, length(Ks))
+    ],
+    case Wrong of
+        [] -> ok;
+        _ -> violation(session_order, #{servers => Wrong})
     end.
 
 linearizable_read(Tab, Record) ->
@@ -955,6 +1001,8 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
             Base#{unsafe_no_snapshot_guard => true};
         bare_retries ->
             Base;
+        unordered_sessions ->
+            Leased#{unsafe_no_session_order => true};
         lossy_disk ->
             Base;
         unsynced_wal ->

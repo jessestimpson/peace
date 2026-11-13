@@ -393,7 +393,58 @@ bare_retries_apply_twice_test_() ->
         ?assertMatch({violation, #{property := applied_once}}, maps:get(outcome, Result))
     end}.
 
+%% In the next three tests, each client submits three values through one
+%% session process, and the three values are undecided at the same time.
+%% This test runs the faults of `faults_majority_test_'.
+pipelined_sessions_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{retry => pipeline}) end),
+        Stats = peace_dst:stats(),
+        exercised(Stats),
+        pipelined(Stats)
+    end}.
+
+%% The leader refuses a value when it holds two undecided values. A refused
+%% value leaves a gap in the values of its session.
+pipelined_sessions_overloaded_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{retry => pipeline, max_pending => 2}) end),
+        Stats = #{acknowledged := Acked, runs := Runs} = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        pipelined(Stats)
+    end}.
+
+%% The churn workload changes the leader while values are undecided.
+pipelined_sessions_churn_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{retry => pipeline, servers => 5, churn => true}) end),
+        Stats = #{acknowledged := Acked, runs := Runs} = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        pipelined(Stats)
+    end}.
+
+%% A server that applies a value of a session before the value with the
+%% previous sequence number applies the values of the session out of order.
+unordered_sessions_are_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
+            opts(Seed, #{mode => unordered_sessions})
+        end),
+        ?assertMatch({violation, #{property := session_order}}, maps:get(outcome, Result)),
+        ?assertEqual(ok, maps:get(outcome, run(opts(Seed, #{retry => pipeline}))), {seed, Seed})
+    end}.
+
 %% ---------------------------------------------------------------------------
+
+%% Asserts that session processes started rounds after the first round, and
+%% that servers answered values with `session_gap'.
+pipelined(Stats) ->
+    ?assert(maps:get(session_rounds, Stats, 0) > 0, Stats),
+    ?assert(maps:get(session_gaps, Stats, 0) > 0, Stats).
 
 %% Returns the summary of each run.
 sweep(Seeds, OptsFun) ->

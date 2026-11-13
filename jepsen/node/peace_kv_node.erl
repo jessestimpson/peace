@@ -29,6 +29,11 @@
 %% test uses small values, so that servers send and store snapshots in
 %% several chunks during a run.
 %%
+%% The optional argument `-peace_kv_node sessions true' starts one session
+%% process on the node (`peace:open_session/2'). The node then submits every
+%% write and every compare-and-set through the session process. The default
+%% is `false', which uses `peace:propose/3'.
+%%
 %% The optional argument `-peace_kv_node quorum Spec' sets the quorum system.
 %% `Spec' is one of:
 %%
@@ -56,9 +61,10 @@
 %% `consistent', which uses `peace:consistent_query/3'.
 -module(peace_kv_node).
 
--export([start/0, server/0, members/1, quorum/1, reads/0]).
+-export([start/0, server/0, session/0, members/1, quorum/1, reads/0]).
 
 -define(NAME, peace_kv).
+-define(SESSION, peace_kv_session).
 
 start() ->
     {ok, _} = application:ensure_all_started(peace),
@@ -84,12 +90,27 @@ start() ->
         maps:from_list(Lease ++ Rate ++ Interval ++ Chunks)
     ),
     ok = peace:start_server(Config),
+    case arg(sessions, "false") of
+        "true" ->
+            %% The session process tries the server of this node first. The
+            %% process that runs this function exits, so the session
+            %% process is not left linked to it.
+            {ok, Session} = peace:open_session([server() | Members -- [server()]]),
+            true = unlink(Session),
+            true = register(?SESSION, Session);
+        "false" ->
+            ok
+    end,
     {ok, _} = peace_kv_http:start(list_to_integer(arg(port, "8080"))),
     ok.
 
 %% The peace server of this node.
 server() ->
     {?NAME, node()}.
+
+%% The session process of this node, or `undefined'.
+session() ->
+    whereis(?SESSION).
 
 %% How the node answers a read: `consistent' or `stale'.
 reads() ->

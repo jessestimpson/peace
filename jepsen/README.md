@@ -41,6 +41,7 @@ The environment variable `NODES` selects the nodes. The default is
 | `--read-lease-ms MS` | off | The `read_lease_ms` option of the cluster. |
 | `--snapshot-interval COUNT` | 4096 | The `snapshot_interval` option of the servers. |
 | `--chunk-bytes BYTES` | 262,144 for a transfer, 1,048,576 in the write-ahead log | The size of a chunk of a snapshot. With a small interval and a small chunk size, servers send and store snapshots in several chunks during a run. |
+| `--sessions` | off | Each node submits every write and every compare-and-set through one session process (`peace:open_session/2`). The operations that a node handles at the same time are undecided at the same time in one session. |
 | `--clock-rate-spread PERCENT` | 0 | The width of the range of the clock rates of the nodes. With 8, each start of a node picks a rate between 0.96 and 1.04. |
 | `--wall-clock-skew` | off | Each start of a node picks a wall clock offset between -1 hour and +1 hour and a wall clock rate between 0.5 and 2. |
 | `--nemesis-interval SECONDS` | 10 | The mean time between two fault operations. |
@@ -65,8 +66,10 @@ clients of the test.
 
 Ten client threads perform reads, writes and compare-and-set operations on
 integer keys. Five threads share one key. A read uses
-`peace:consistent_query/3`. The clients do not use sessions and do not retry
-an operation.
+`peace:consistent_query/3`. The clients do not retry an operation. Without
+`--sessions`, the nodes do not use sessions. With `--sessions`, a write
+whose outcome is unknown stays in the session of the node, and the session
+process submits the write until it is applied or the node is killed.
 
 The client maps the HTTP status to a Jepsen result:
 
@@ -141,6 +144,7 @@ Erlang/OTP 28.
 | `majority`, read leases of 100 ms, clock rate spread 8%, wall clock skew | 5 | partition, kill, pause | 300 s | 2,210 | 3,362 | 84 | 63 | linearizable |
 | `majority`, read leases of 100 ms, clock rate spread 100% | 5 | partition | 180 s | 2,239 | 1,274 | 14 | 22 | linearizable |
 | `majority`, snapshot every 20 indexes, chunks of 64 bytes (run on 2026-11-13) | 5 | partition, kill, pause, members | 300 s | 1,474 | 4,146 | 82 | 89 | linearizable |
+| `majority`, with `--sessions` (run on 2026-11-13) | 5 | partition, kill, pause, members | 300 s | 2,083 | 2,917 | 151 | 77 | linearizable |
 
 Most failed operations are refused connections and `no_leader` answers
 while nodes are down or isolated. The other failed operations are

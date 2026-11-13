@@ -164,7 +164,12 @@ scope depends on the results of milestone 1.
       2026-11-13. A server takes its snapshot at an offset that is a hash
       of the server id. The effect on latency with a large machine state
       was not measured.
-- [ ] Allow a client to have more than one value in flight.
+- [x] Allow a client to have more than one value in flight. Done on
+      2026-11-13. The values of a session are applied in the order of
+      their sequence numbers, and the servers keep the last
+      `session_window` replies of a session. `peace_session` is a client
+      process with up to `window` values undecided. The throughput of a
+      session process was not measured.
 - [x] Add backpressure. Done on 2026-11-13. A leader that holds
       `max_pending' undecided values answers `{error, overloaded}'. The
       storage process merges every write that waits, so the writes that
@@ -204,8 +209,11 @@ Goal: an operator can run, observe, maintain and upgrade a cluster.
 - [ ] Add a version field to messages, stored entries and snapshots.
 - [ ] Add state machine versioning, so that the machine code can be upgraded
       on a running cluster.
-- [ ] Add session expiry by time. Define what a client observes when its
-      session is evicted.
+- [ ] Add session expiry by time. A client of an evicted session is
+      answered `{error, {session_gap, 0}}`, and `peace_session` answers
+      `{error, session_evicted}`. A copy of the first value of an evicted
+      session can still be applied again.
+- [ ] Let a session continue after its session process restarts.
 - [ ] Write an operations guide: deployment, sizing, monitoring, membership
       change, upgrade and recovery.
 

@@ -210,6 +210,8 @@ handle_call(_Other, _From, State) ->
 
 handle_cast({value, Value}, State) ->
     {noreply, event({value, undefined, Value}, State)};
+handle_cast({value, From = {peace_session, _Pid, _Label}, Value, Session}, State) ->
+    {noreply, event({value, From, Value, Session}, State)};
 handle_cast(trigger_election, State) ->
     {noreply, event(force_election, State)};
 handle_cast(_Other, State) ->
@@ -366,6 +368,8 @@ drain(N, {State, Steps}) ->
             drain(N - 1, step({query, From, Fun}, State, Steps));
         {'$gen_cast', {value, Value}} ->
             drain(N - 1, step({value, undefined, Value}, State, Steps));
+        {'$gen_cast', {value, From = {peace_session, _Pid, _Label}, Value, Session}} ->
+            drain(N - 1, step({value, From, Value, Session}, State, Steps));
         {written, Writer, Seq} when Writer =:= State#state.writer ->
             drain(N, {written(Seq, State), Steps})
     after 0 ->
@@ -650,6 +654,12 @@ effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, trans
 effect({send, To, Msg}, State = #state{core = Core}) ->
     send(To, {peace_msg, peace_core:id(Core), Msg}, State);
 effect({reply, undefined, _Reply}, State) ->
+    State;
+effect({reply, {peace_session, Pid, Label}, Reply}, State) ->
+    %% The value came from a `peace_session' process, in a cast. The reply
+    %% is not sent if the node of the process is not connected. The process
+    %% submits the value again when no reply arrives.
+    _ = catch erlang:send(Pid, {peace_session_reply, Label, Reply}, [noconnect]),
     State;
 effect({reply, From, Reply}, State) ->
     gen_server:reply(From, Reply),
