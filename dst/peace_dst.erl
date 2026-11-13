@@ -903,7 +903,7 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         %% log, restarts a server from a snapshot and sends a snapshot.
         snapshot_interval => maps:get(snapshot_interval, Config, 5)
     },
-    Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to], Config)),
+    Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to, max_pending], Config)),
     %% The clocks of the servers run at different rates. The clock of every
     %% third server runs at the true rate. The clocks of the other servers
     %% run fast by `clock_drift' per cent, so those servers measure the end

@@ -170,11 +170,25 @@ one value in flight at a time, and `Seq` must increase.
 
 ### Snapshots
 
-Every `snapshot_interval` applied indexes (default 4096), a server stores
-its machine state and deletes the log up to that index. A restarted server
-starts from its snapshot. A follower that needs log entries the leader has
-deleted is sent the snapshot. The snapshot is the machine state as one
-Erlang term. It is written in one storage write and sent in one message.
+Once in every `snapshot_interval` indexes (default 4096), a server stores
+its machine state and deletes the log up to its commit index. A restarted
+server starts from its snapshot. A follower that needs log entries the
+leader has deleted is sent the snapshot. The snapshot is the machine state
+as one Erlang term. It is written in one storage write and sent in one
+message.
+
+The servers of a cluster take their snapshots at different indexes. The
+index of a server is set by a hash of the server id, or by the option
+`snapshot_offset`. A snapshot of a large state keeps the storage of a
+server busy, and the other servers can still form a phase-two quorum.
+
+### Overload
+
+A leader holds at most `max_pending` undecided values (default 8192). A
+leader that holds this many answers a further value or consistent query
+with `{error, overloaded}`. The value was not proposed, and the caller can
+submit it again later. A value that is sent with `peace:propose_async/2`
+has no caller to answer, and is dropped.
 
 ### Read leases
 

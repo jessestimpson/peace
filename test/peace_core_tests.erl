@@ -284,10 +284,50 @@ sessions_are_bounded_test() ->
     S2 = run(ev(a, {value, again, {put, 1, again}, {1, 1}}, S1)),
     ?assertEqual(again, maps:get(1, kv(a, S2))).
 
+%% A leader that holds `max_pending' undecided values refuses a further
+%% value and a further query. The leader accepts values again after the
+%% undecided values are decided.
+overloaded_leader_refuses_values_test() ->
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{max_pending => 2}))),
+    %% The leader cannot reach its peers, so nothing is decided.
+    S1 = block([{a, b}, {a, c}], S0),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, S1)),
+    S3 = run(ev(a, {value, c2, {put, k, 2}}, S2)),
+    ?assertEqual([], replies(S3)),
+    S4 = run(ev(a, {value, c3, {put, k, 3}}, S3)),
+    S5 = run(ev(a, {query, c4, fun(State) -> State end}, S4)),
+    ?assertEqual([{c3, {error, overloaded}}, {c4, {error, overloaded}}], replies(S5)),
+    %% The refused value was not proposed.
+    ?assertEqual(2, maps:get(undecided, peace_core:overview(core(a, S5)))),
+    S6 = run(ev(a, heartbeat_timeout, block([], S5))),
+    ?assertMatch([_, _, {c1, {ok, ok, a}}, {c2, {ok, ok, a}}], replies(S6)),
+    S7 = run(ev(a, {value, c5, {put, k, 5}}, S6)),
+    ?assertMatch({c5, {ok, ok, a}}, lists:last(replies(S7))).
+
+%% The servers of a cluster take their snapshots at different indexes.
+snapshot_offsets_differ_test() ->
+    Ids = [{peace, n1}, {peace, n2}, {peace, n3}],
+    Offsets = [erlang:phash2(Id, 4096) || Id <- Ids],
+    ?assertEqual(3, length(lists:usort(Offsets))),
+    %% Each server takes its first snapshot when its commit index passes
+    %% its offset, and the next snapshot one interval later.
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 4}))),
+    S1 = lists:foldl(
+        fun(N, S) -> run(ev(a, {value, N, {put, N, N}, {me, N}}, S)) end, S0, lists:seq(1, 12)
+    ),
+    lists:foreach(
+        fun(Id) ->
+            Snap = peace_core:snapshot_index(core(Id, S1)),
+            ?assert(Snap > 12 - 4, {Id, Snap}),
+            ?assertEqual(erlang:phash2(Id, 4), Snap rem 4, {Id, Snap})
+        end,
+        [a]
+    ).
+
 %% The log entries up to the snapshot index are dropped. A restart starts
 %% from the snapshot.
 snapshot_truncates_and_recovers_test() ->
-    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2, snapshot_offset => 0}))),
     S1 = lists:foldl(
         fun(N, S) -> run(ev(a, {value, N, {put, N, N}, {me, N}}, S)) end, S0, [1, 2, 3]
     ),
@@ -307,7 +347,7 @@ snapshot_truncates_and_recovers_test() ->
 %% entries the follower needs. The leader then sends the state to the
 %% follower.
 lagging_follower_is_sent_a_snapshot_test() ->
-    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2, snapshot_offset => 0}))),
     S1 = lists:foldl(
         fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2, 3]
     ),
@@ -330,7 +370,7 @@ lagging_follower_is_sent_a_snapshot_test() ->
 %%
 %% The test asserts that c stays a follower on the first campaign.
 candidate_behind_a_snapshot_does_not_lead_test() ->
-    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2}))),
+    S0 = run(ev(a, force_election, new([a, b, c], majority, #{snapshot_interval => 2, snapshot_offset => 0}))),
     S1 = lists:foldl(
         fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]
     ),
@@ -346,7 +386,7 @@ candidate_behind_a_snapshot_does_not_lead_test() ->
     ?assertEqual(#{1 => 1, 2 => 2}, kv(c, S4)).
 
 without_the_snapshot_guard_a_index_is_decided_twice_test() ->
-    Extra = #{snapshot_interval => 2, unsafe_no_snapshot_guard => true},
+    Extra = #{snapshot_interval => 2, snapshot_offset => 0, unsafe_no_snapshot_guard => true},
     S0 = run(ev(a, force_election, new([a, b, c], majority, Extra))),
     S1 = lists:foldl(
         fun(N, S) -> run(ev(a, {value, N, {put, N, N}}, S)) end, block([{a, c}], S0), [1, 2]

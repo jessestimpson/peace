@@ -93,7 +93,7 @@ membership_test_() ->
 bare_retries_are_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Seed, Outcome} = first_illegal("bare-retries", lists:seq(1, 300), #{mode => bare_retries}),
-        ?debugFmt("bare retries: seed ~b, invariants ~0p", [Seed, element(1, Outcome)]),
+        ?debugFmt("bare retries: seed ~b, invariants ~0p", [Seed, verdict(Outcome)]),
         %% With sessions, the same seed is linearizable.
         ?assertMatch({ok, ok, _, _}, check("bare-retries-fixed", Seed, #{}))
     end}.
@@ -104,7 +104,7 @@ missing_lease_fence_is_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         Config = #{servers => 3, churn => true, read_lease_ms => 200, election_timeout_ms => 200},
         {Seed, Outcome} = first_illegal("no-lease-fence", lists:seq(1, 300), Config#{mode => no_lease_fence}),
-        ?debugFmt("no lease fence: seed ~b, invariants ~0p", [Seed, element(1, Outcome)]),
+        ?debugFmt("no lease fence: seed ~b, invariants ~0p", [Seed, verdict(Outcome)]),
         ?assertMatch({ok, ok, _, _}, check("no-lease-fence-fixed", Seed, Config))
     end}.
 
@@ -113,10 +113,15 @@ missing_lease_fence_is_rejected_test_() ->
 unsafe_quorums_are_rejected_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         {Seed, Outcome} = first_illegal("unsafe-quorums", lists:seq(1, 300), #{mode => unsafe_quorums}),
-        ?debugFmt("unsafe quorums: seed ~b, invariants ~0p", [Seed, element(1, Outcome)])
+        ?debugFmt("unsafe quorums: seed ~b, invariants ~0p", [Seed, verdict(Outcome)])
     end}.
 
 %% Asserts that the sweep checked a useful number of operations.
 exercised(Operations) ->
     ?debugFmt("operations checked: ~b", [Operations]),
     ?assert(Operations > 500, Operations).
+
+%% The result of the invariants of the simulation, for a log line: `ok' or
+%% `violation'.
+verdict(ok) -> ok;
+verdict(Outcome) -> element(1, Outcome).

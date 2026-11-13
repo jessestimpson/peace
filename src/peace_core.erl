@@ -178,10 +178,18 @@
 %%
 %% Snapshots are not in the thesis.
 %%
-%% Each time a server has applied `snapshot_interval' indexes, the server
-%% writes its machine state, its session table and the configuration that
-%% it has applied to storage, and removes the log up to the last applied
-%% index. When a server is asked to catch another
+%% A server takes a snapshot once in every `snapshot_interval' indexes. The
+%% server writes its machine state, its session table and the configuration
+%% that it has applied to storage, and removes the log up to the last
+%% applied index.
+%%
+%% The servers do not take their snapshots at the same indexes. Server `Id'
+%% takes a snapshot when its commit index passes an index `I' with
+%% `I rem snapshot_interval =:= erlang:phash2(Id, snapshot_interval)'. The
+%% option `snapshot_offset' replaces the hash. A
+%% snapshot of a large state keeps the storage of a server busy. If every
+%% server took its snapshot at the same index, every member of a phase-two
+%% quorum would be busy at the same time. When a server is asked to catch another
 %% server up from an index that it no longer holds, it sends its state
 %% instead (`install').
 %%
@@ -487,6 +495,11 @@
     %% Durable. The log holds no entry at or below this index.
     snap = 0 :: non_neg_integer(),
     snapshot_interval :: pos_integer() | infinity,
+    %% The offset of the snapshots of this server. See "Snapshots".
+    snapshot_offset = 0 :: non_neg_integer(),
+    %% The number of undecided values that a leader holds before it refuses
+    %% a value from a client. See `propose/4'.
+    max_pending :: pos_integer() | infinity,
     sessions = #{} :: sessions(),
     max_sessions :: pos_integer(),
     %% Candidate and leader: the epoch that this server is running.
@@ -580,6 +593,13 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
         snap = Snap,
         commit = Snap,
         snapshot_interval = maps:get(snapshot_interval, Config, ?DEFAULT_SNAPSHOT_INTERVAL),
+        snapshot_offset =
+            case {maps:get(snapshot_interval, Config, ?DEFAULT_SNAPSHOT_INTERVAL), Config} of
+                {infinity, _} -> 0;
+                {Interval, #{snapshot_offset := Offset}} -> Offset rem Interval;
+                {Interval, _} -> erlang:phash2(maps:get(id, Config), Interval)
+            end,
+        max_pending = maps:get(max_pending, Config, ?DEFAULT_MAX_PENDING),
         promised = Promised,
         seen = Promised,
         log = Log,
@@ -1116,7 +1136,19 @@ entries_from(From, Log) ->
 %% TLA+ Propose for a new index, together with the Accept of the leader
 %% itself. The leader holds the entry in its log from this point. The
 %% leader counts its own acceptance only after the `stored' event.
-propose(
+%%
+%% A leader that holds `max_pending' undecided values does not propose a
+%% value from a client. It answers `{error, overloaded}'. The limit bounds
+%% the memory that undecided values use and the time that a value waits.
+propose(From, Kind, What, C = #core{role = leader}) ->
+    case overloaded(What, C) of
+        true -> {C, [{reply, From, {error, overloaded}}]};
+        false -> propose1(From, Kind, What, C)
+    end;
+propose(From, _Kind, _What, C = #core{leader = Leader}) ->
+    {C, [{reply, From, {error, {not_leader, Leader}}}]}.
+
+propose1(
     From,
     Kind,
     What,
@@ -1161,9 +1193,15 @@ propose(
         [{persist, #{entries => [{I, Entry}]}}] ++
             Settled ++
             [{send, Peer, {propose, Epoch, [{I, Value}], C3#core.commit, C3#core.now}} || Peer <- Targets],
-    {C3, Effects};
-propose(From, _Kind, _What, C = #core{leader = Leader}) ->
-    {C, [{reply, From, {error, {not_leader, Leader}}}]}.
+    {C3, Effects}.
+
+%% Whether a leader refuses a proposal because it holds `max_pending'
+%% undecided values. Only a value or a query from a client is refused. A
+%% configuration entry is proposed by the leader itself during a membership
+%% change and is never refused.
+overloaded({cfg, _}, _C) -> false;
+overloaded(_What, #core{max_pending = infinity}) -> false;
+overloaded(_What, #core{acks = Acks, max_pending = Max}) -> map_size(Acks) >= Max.
 
 %% The heartbeat of the leader. The leader sends the commit index to each
 %% peer. To each peer that is not in `Quiet', the leader also sends the
@@ -1633,8 +1671,14 @@ membership(C) ->
 %% Snapshots
 %% ---------------------------------------------------------------------------
 
-maybe_snapshot(C = #core{commit = Commit, snap = Snap, snapshot_interval = Interval, log = Log}) when
-    is_integer(Interval), Commit - Snap >= Interval
+maybe_snapshot(
+    C = #core{commit = Commit, snap = Snap, snapshot_interval = Interval, snapshot_offset = Offset, log = Log}
+) when
+    is_integer(Interval),
+    %% The commit index has passed an index that is `Offset' above a
+    %% multiple of `Interval' since the last snapshot. `Interval' is added
+    %% so that the dividend is not negative.
+    (Commit + Interval - Offset) div Interval > (Snap + Interval - Offset) div Interval
 ->
     C1 = C#core{snap = Commit, log = maps:filter(fun(I, _) -> I > Commit end, Log)},
     {C1, [{persist, #{snapshot => {Commit, {C#core.mstate, C#core.sessions, C#core.acfg}}}}]};

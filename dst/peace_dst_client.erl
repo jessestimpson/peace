@@ -74,8 +74,8 @@ history(Tab, Event) ->
     ok.
 
 %% Requests a membership change. `submit/3' is called with `Again' false:
-%%   - After `{error, no_leader}' or `{error, noproc}' the request was
-%%     never submitted. The request is retried, for at most four attempts
+%%   - After `{error, no_leader}', `{error, noproc}' or
+%%     `{error, overloaded}' the request was never submitted. The request is retried, for at most four attempts
 %%     in total.
 %%   - After any other answer, including a timeout, the request is not
 %%     retried. The log shows whether the change happened, and the next
@@ -112,10 +112,15 @@ submit(Fun, Attempts, Again) ->
     case Fun() of
         {ok, Reply, _Leader} ->
             {ok, Reply};
-        {error, Reason} when Attempts > 1, (Reason =:= no_leader orelse Reason =:= noproc) ->
+        {error, Reason} when
+            Attempts > 1, (Reason =:= no_leader orelse Reason =:= noproc orelse Reason =:= overloaded)
+        ->
+            _ = Reason =:= overloaded andalso peace_dst:bump(overloaded),
             timer:sleep(?RETRY_AFTER_MS),
             submit(Fun, Attempts - 1, Again);
-        {error, Reason} when Reason =:= no_leader; Reason =:= noproc; Reason =:= too_many_redirects ->
+        {error, Reason} when
+            Reason =:= no_leader; Reason =:= noproc; Reason =:= too_many_redirects; Reason =:= overloaded
+        ->
             {rejected, Reason};
         _Unknown when Again, Attempts > 1 ->
             timer:sleep(?RETRY_AFTER_MS),

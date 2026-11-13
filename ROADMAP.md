@@ -160,14 +160,18 @@ scope depends on the results of milestone 1.
 - [ ] Repeat the benchmark with each server on its own disk, or on its own
       machine. The benchmark on one disk cannot measure the throughput of
       5 servers or the tail latency.
-- [ ] Take snapshots at different indexes on different servers. All
-      servers now write a checkpoint at the same index. With a large
-      machine state, every member of a phase-two quorum is then busy with a
-      checkpoint at the same time.
+- [x] Take snapshots at different indexes on different servers. Done on
+      2026-11-13. A server takes its snapshot at an offset that is a hash
+      of the server id. The effect on latency with a large machine state
+      was not measured.
 - [ ] Allow a client to have more than one value in flight.
-- [ ] Add backpressure. Bound the leader's queue of pending proposals and
-      the writes that wait in the mailbox of the storage process, and
-      reject or delay proposals when a bound is reached.
+- [x] Add backpressure. Done on 2026-11-13. A leader that holds
+      `max_pending' undecided values answers `{error, overloaded}'. The
+      storage process merges every write that waits, so the writes that
+      wait are bounded by the arrivals during one sync.
+- [ ] Bound the mailbox of a server. A leader refuses a value only when it
+      handles the value. Values that arrive faster than the leader handles
+      them wait in the mailbox without a bound.
 - [ ] Transfer and store snapshots in chunks. A snapshot is currently one
       term in one message, which blocks the distribution channel while it is
       sent.

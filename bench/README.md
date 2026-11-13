@@ -372,10 +372,11 @@ changes 9 and 10.
    have a 99th percentile of 37.6 ms instead of 6.86 ms. The server process
    then holds the whole log, and its garbage collections take tens of
    milliseconds.
-4. **No backpressure.** A leader accepts values without a bound. The
-   storage process merges every write that waits, so the writes that wait
-   are bounded by the arrivals during one sync. The values that wait for a
-   decision are not bounded.
+4. **The mailbox of a server is not bounded.** A leader holds at most
+   `max_pending` undecided values and refuses further values. The leader
+   refuses a value only when it handles the value, so values that arrive
+   faster than the leader handles them wait in its mailbox. The clients of
+   this benchmark are closed-loop and do not reach either limit.
 5. **Leader failure is detected only by the election timeout.** The time
    without a leader is between 1 and 2 election timeouts. A lower election
    timeout shortens the time in proportion.

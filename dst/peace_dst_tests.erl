@@ -97,6 +97,17 @@ faults_flexible_test_() ->
         exercised(peace_dst:stats())
     end}.
 
+%% This test runs the same faults with a leader that refuses a value when
+%% it holds two undecided values. A client retries a refused value.
+overloaded_leader_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{max_pending => 2}) end),
+        Stats = #{acknowledged := Acked, runs := Runs} = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(overloaded, Stats, 0) > 0, Stats)
+    end}.
+
 %% This test runs the same faults with four servers in a grid of two rows.
 %% One row is needed to commit. One server from each row is needed to elect.
 faults_grid_test_() ->

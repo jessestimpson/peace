@@ -98,9 +98,19 @@
     %% snapshot of its machine state and deletes its log. The default is
     %% 4096. `infinity' means that the server never takes a snapshot.
     snapshot_interval => pos_integer() | infinity,
+    %% A server takes a snapshot when its commit index passes an index `I'
+    %% with `I rem snapshot_interval =:= snapshot_offset'. The default is a
+    %% hash of the server id, so that the servers of a cluster take their
+    %% snapshots at different indexes.
+    snapshot_offset => non_neg_integer(),
     %% The number of client sessions that are remembered. The value must be
     %% the same on every member. The default is 10000.
     max_sessions => pos_integer(),
+    %% The number of values that a leader holds undecided at one time. A
+    %% leader that holds this many answers a further value or consistent
+    %% query with `{error, overloaded}' and does not propose it. The default
+    %% is 8192. `infinity' means that there is no limit.
+    max_pending => pos_integer() | infinity,
     %% With `quorum', a leader sends each proposal only to a phase-two quorum
     %% of acceptors. The other acceptors learn the value on the heartbeat
     %% (thesis section 4.3.3). The default is `all'. See "Proposing to a
@@ -254,8 +264,10 @@ propose(ServerOrServers, Value) ->
 %% <li>`{timeout, Server}', `{error, leadership_lost}' and
 %%   `{error, {server_down, Reason}}': the outcome is unknown. The value may
 %%   be applied later, or never.</li>
-%% <li>`{error, no_leader}', `{error, noproc}' and
-%%   `{error, too_many_redirects}': the value was not submitted.</li>
+%% <li>`{error, no_leader}', `{error, noproc}',
+%%   `{error, too_many_redirects}' and `{error, overloaded}': the value was
+%%   not submitted. `overloaded' means that the leader holds `max_pending'
+%%   undecided values. The caller can submit the value again later.</li>
 %% </ul>
 %%
 %% The third argument is either a timeout or a map of options.
@@ -298,7 +310,8 @@ propose(ServerOrServers, Value, Timeout) ->
 %% not a thesis term. The name is `propose/2' with the usual suffix. The
 %% caller receives no reply. The caller is not told whether `Server' was the
 %% leader. Use this function for values whose effect is observed in some
-%% other way.
+%% other way. A leader that holds `max_pending' undecided values drops the
+%% value.
 -spec propose_async(server_id(), peace_machine:value()) -> ok.
 propose_async(Server, Value) ->
     gen_server:cast(Server, {value, Value}).

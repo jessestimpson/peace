@@ -136,7 +136,9 @@ request(_Method, _Target) ->
 
 %% The answers that mean that the request was not submitted are 503. Every
 %% other failure has an unknown outcome and is 504. See `peace:propose/3'.
-failure({error, Reason}) when Reason =:= no_leader; Reason =:= noproc; Reason =:= too_many_redirects ->
+failure({error, Reason}) when
+    Reason =:= no_leader; Reason =:= noproc; Reason =:= too_many_redirects; Reason =:= overloaded
+->
     {503, atom_to_binary(Reason)};
 failure({error, reconfiguration_in_progress}) ->
     {503, <<"reconfiguration_in_progress">>};
