@@ -353,12 +353,16 @@ unsynced_wal_is_caught_test_() ->
 %% the value that the leader proposed, and the leader continues to lead. The
 %% leader then causes a follower to decide the value that was not decided.
 %% With the guard, the same seed produces no violation.
+%%
+%% The hazard needs a rare schedule. The test searches 1500 seeds. No seed
+%% of the first 300 reaches the hazard since servers send and store
+%% snapshots in chunks, which adds steps to every run.
 stale_leader_is_caught_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
         Config = #{servers => 5, churn => true},
         Planted = Config#{mode => no_conflict_step_down},
-        {Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) -> opts(Seed, Planted) end),
+        {Seed, Result} = first_violation(lists:seq(1, 1500), fun(Seed) -> opts(Seed, Planted) end),
         ?assertMatch({violation, #{property := agreement}}, maps:get(outcome, Result)),
         Shrunk = eta_shrink:shrink(peace_dst, maps:get(trace, Result), opts(Seed, Planted)),
         ?assertMatch(#{verified := true}, Shrunk, eta_run:summary(Shrunk)),
@@ -418,7 +422,9 @@ first_violation([Seed | Seeds], OptsFun) ->
 %%   - clients received acknowledgements of values and answers to queries;
 %%   - leadership changed;
 %%   - servers were cut off, killed and restarted;
-%%   - servers took snapshots.
+%%   - servers took snapshots;
+%%   - servers received snapshots from other servers, in more than one
+%%     chunk.
 exercised(Stats) ->
     #{
         runs := Runs,
@@ -435,4 +441,7 @@ exercised(Stats) ->
     ?assert(Isolations >= Runs, Stats),
     ?assert(Crashes >= Runs, Stats),
     ?assert(Restarts >= Runs div 2, Stats),
-    ?assert(maps:get(snapshots, Stats, 0) >= Runs * 3, Stats).
+    ?assert(maps:get(snapshots, Stats, 0) >= Runs * 3, Stats),
+    Received = maps:get(snapshots_received, Stats, 0),
+    ?assert(Received > 0, Stats),
+    ?assert(maps:get(chunks_requested, Stats, 0) > Received, Stats).

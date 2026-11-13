@@ -23,6 +23,22 @@
 %% `{written, self(), Seq}' to the server, where `Seq' is the highest
 %% sequence number in the merged write.
 %%
+%% == Snapshots ==
+%%
+%% A snapshot is a cast `{snapshot, Batch}'. The batch holds only the
+%% snapshot, and it has no sequence number. This process stores the
+%% snapshot in steps, if the backend supports that (see `peace_storage').
+%% Between two steps, this process performs the writes that are in the
+%% mailbox. A large snapshot therefore does not delay the acceptances of
+%% the server. After the snapshot is stored, this process sends
+%% `{snapshot_written, self()}' to the server.
+%%
+%% The writes that are performed between two steps were sent after the
+%% snapshot. `peace_core' guarantees that every index under a snapshot was
+%% written as decided by a write that was sent before the snapshot. Those
+%% writes are performed before the first step, because this process takes
+%% casts from its mailbox in order.
+%%
 %% == Failure ==
 %%
 %% If the backend fails to write, this process exits with the reason
@@ -44,7 +60,7 @@
 
 -include("peace_eta.hrl").
 
--export([start_link/3, write/3, stop/1, name/1, merge/1]).
+-export([start_link/3, write/3, snapshot/2, stop/1, name/1, merge/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 %% The time to wait for the storage process of an earlier server process
@@ -88,6 +104,13 @@ start_link(Id = {Name, _Node}, Mod, Args) ->
 write(Pid, Seq, Batch) ->
     gen_server:cast(Pid, {write, Seq, Batch}).
 
+%% @doc Sends a snapshot. `Batch' holds only the key `snapshot'. The
+%% storage process answers with `{snapshot_written, Pid}' after the
+%% snapshot is stored.
+-spec snapshot(pid(), peace_storage:batch()) -> ok.
+snapshot(Pid, Batch) ->
+    gen_server:cast(Pid, {snapshot, Batch}).
+
 %% @doc Closes the backend and stops the storage process.
 -spec stop(pid()) -> ok.
 stop(Pid) ->
@@ -122,6 +145,8 @@ handle_call(_Other, _From, State) ->
 
 handle_cast({write, Seq, Batch}, State) ->
     write_groups(drain([{Seq, [Batch]}]), State);
+handle_cast({snapshot, Batch}, State = #state{mod = Mod, storage = Storage}) ->
+    snapshot_step(catch peace_storage:snapshot_begin(Mod, Batch, Storage), State);
 handle_cast(_Other, State) ->
     {noreply, State}.
 
@@ -154,6 +179,21 @@ write_groups([{Last, Batches} | Groups], State = #state{server = Server, mod = M
             {stop, {shutdown, {storage_failed, {Class, Reason, Stack}}}, State}
     end.
 
+%% Handles the result of one step of a snapshot. Before the next step, this
+%% function performs the writes that are in the mailbox.
+snapshot_step({done, Storage}, State = #state{server = Server}) ->
+    Server ! {snapshot_written, self()},
+    {noreply, State#state{storage = Storage}};
+snapshot_step({more, Storage}, State0 = #state{mod = Mod}) ->
+    case write_groups(drain([]), State0#state{storage = Storage}) of
+        {noreply, State} -> snapshot_step(catch peace_storage:snapshot_continue(Mod, State#state.storage), State);
+        Stop -> Stop
+    end;
+snapshot_step({error, Reason}, State) ->
+    {stop, {shutdown, {storage_failed, Reason}}, State};
+snapshot_step({'EXIT', Reason}, State) ->
+    {stop, {shutdown, {storage_failed, Reason}}, State}.
+
 %% Takes from the mailbox the writes that are already there, and divides
 %% them into groups. The pattern is the message format of a `gen_server'
 %% cast. Each group holds the highest sequence number of the group and the
@@ -173,7 +213,9 @@ drain(Groups) ->
                 {_, [{_Last, [#{snapshot := _}]} | _]} ->
                     drain([{Seq, [Batch]} | Groups]);
                 {_, [{_Last, Batches} | Rest]} ->
-                    drain([{Seq, [Batch | Batches]} | Rest])
+                    drain([{Seq, [Batch | Batches]} | Rest]);
+                {_, []} ->
+                    drain([{Seq, [Batch]}])
             end
     after 0 ->
         lists:reverse([{Last, lists:reverse(Batches)} || {Last, Batches} <- Groups])

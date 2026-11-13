@@ -1,0 +1,15 @@
+Three runs of bench/run.sh snapshot_storage.
+
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Machine state | Puts | p50 ms | p99 ms | Max ms | Puts over 20 ms |
+|---|---|---|---|---|---|
+| 100 MB | 526 | 0.61 | 5.38 | 14.2 | 0 |
+| 400 MB | 488 | 0.69 | 11.2 | 106.4 | 4 |
+| 1000 MB | 458 | 0.98 | 21.7 | 122.0 | 5 |
+| 100 MB | 524 | 0.60 | 9.93 | 14.5 | 0 |
+| 400 MB | 493 | 0.66 | 13.5 | 112.1 | 2 |
+| 1000 MB | 446 | 1.00 | 93.9 | 111.7 | 6 |
+| 100 MB | 528 | 0.61 | 6.18 | 12.1 | 0 |
+| 400 MB | 505 | 0.71 | 7.18 | 92.4 | 1 |
+| 1000 MB | 434 | 0.99 | 103.4 | 111.3 | 8 |

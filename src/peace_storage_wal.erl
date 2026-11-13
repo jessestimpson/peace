@@ -1,15 +1,16 @@
 %% @doc Durable storage in a write-ahead log.
 %%
 %% Args: `#{dir := file:name_all()}'. Each server has one directory below
-%% `dir', named after the server.
+%% `dir', named after the server. The optional key `checkpoint_chunk_bytes'
+%% is the size of a chunk of a checkpoint. The default is 1048576.
 %%
 %% == Files ==
 %%
 %% The directory of a server contains the files of one generation `G':
 %%
 %% <ul>
-%% <li>`G.ckpt' is the checkpoint. It contains the promised epoch, the
-%%   snapshot, and the entries above the snapshot, as of the start of the
+%% <li>`G.ckpt' is the checkpoint. It contains the snapshot, the promised
+%%   epoch, and the entries above the snapshot, as of the start of the
 %%   generation. Generation 0 has no checkpoint. Generation 0 starts with
 %%   no data.</li>
 %% <li>`G.wal' is the log. It contains one record for each write since the
@@ -18,12 +19,15 @@
 %%
 %% A write without a snapshot appends one record to the log and syncs the
 %% log. A write with `sync => false' appends the record and does not sync.
-%% The sync of the next record covers it. A write with a snapshot starts
-%% generation `G + 1':
+%% The sync of the next record covers it. A snapshot starts generation
+%% `G + 1':
 %%
 %% <ol>
-%% <li>The backend writes the checkpoint to a temporary file and syncs the
-%%   file.</li>
+%% <li>The backend encodes the snapshot and writes it to a temporary file,
+%%   as one record for each chunk of `checkpoint_chunk_bytes' bytes. The
+%%   backend syncs the file after each chunk.</li>
+%% <li>The backend writes one last record with the promised epoch and the
+%%   entries above the snapshot, and syncs the file.</li>
 %% <li>The backend renames the temporary file to `G+1.ckpt' and syncs the
 %%   directory.</li>
 %% <li>The backend creates `G+1.wal' and syncs it.</li>
@@ -33,6 +37,24 @@
 %% A crash at any point leaves a complete checkpoint with the highest
 %% generation number. `open/2' uses that generation and deletes every other
 %% file.
+%%
+%% == Writes during a checkpoint ==
+%%
+%% `snapshot_begin/2' performs the first part of step 1.
+%% `snapshot_continue/1' writes one chunk for each call, and performs steps
+%% 2 to 5 in the last call. `peace_writer' calls `write/2' between these
+%% calls. Such a write appends to `G.wal', as before the checkpoint. The
+%% last record of the checkpoint holds the promised epoch and the entries as
+%% of step 2, so the checkpoint includes these writes. A checkpoint of a
+%% large snapshot therefore delays another write by the time to write and
+%% sync one chunk. There are two exceptions: `snapshot_begin/2' encodes the
+%% whole snapshot (see `peace_chunks'), and the last call writes every
+%% entry above the snapshot.
+%%
+%% A crash before step 3 leaves generation `G', with every write that was
+%% made during the checkpoint.
+%%
+%% `write/2' with a snapshot performs the whole checkpoint in one call.
 %%
 %% == Records ==
 %%
@@ -68,8 +90,13 @@
 %% == Limitations ==
 %%
 %% <ul>
-%% <li>A checkpoint contains the whole snapshot in one record, so every
-%%   snapshot rewrites the whole machine state.</li>
+%% <li>Every checkpoint contains the whole snapshot, so every snapshot
+%%   rewrites the whole machine state.</li>
+%% <li>The backend holds the encoded snapshot in memory while it writes the
+%%   checkpoint (see `peace_chunks'). `open/2' reads the whole checkpoint
+%%   into memory.</li>
+%% <li>The last call of a checkpoint writes every entry above the snapshot
+%%   in one record.</li>
 %% <li>The log is only shortened by a snapshot. With
 %%   `snapshot_interval => infinity' the log grows without limit.</li>
 %% <li>The backend holds in memory a map of the entries above the snapshot,
@@ -79,12 +106,25 @@
 
 -behaviour(peace_storage).
 
--export([open/2, write/2, close/1]).
+-export([open/2, write/2, close/1, snapshot_begin/2, snapshot_continue/1]).
 
 -include("peace_eta.hrl").
 
 -define(HEADER, <<"peacewal", 1:32>>).
 -define(MARKER, 16#70656163).
+-define(CHUNK_BYTES, 1048576).
+
+%% A checkpoint that is being written.
+-record(ckpt, {
+    gen :: pos_integer(),
+    tmp :: file:filename_all(),
+    fd :: file:io_device(),
+    index :: peace:index(),
+    %% The chunks of the encoded snapshot that are not yet written, and the
+    %% size of the encoded snapshot in bytes. See `peace_chunks'.
+    chunks :: [iodata()],
+    size :: non_neg_integer()
+}).
 
 -record(wal, {
     dir :: file:filename_all(),
@@ -93,8 +133,9 @@
     gen :: non_neg_integer(),
     fd :: file:io_device(),
     promised :: undefined | peace:epoch(),
-    snapshot :: undefined | {peace:index(), peace_core:snapshot()},
-    entries :: #{peace:index() => peace_core:entry()}
+    entries :: #{peace:index() => peace_core:entry()},
+    chunk :: pos_integer(),
+    ckpt :: undefined | #ckpt{}
 }).
 
 %% ---------------------------------------------------------------------------
@@ -130,10 +171,10 @@ open({Name, Node}, Args = #{dir := Base}) ->
                                 gen = Gen,
                                 fd = Fd,
                                 promised = Promised,
-                                snapshot = Snapshot,
-                                entries = Entries
+                                entries = Entries,
+                                chunk = maps:get(checkpoint_chunk_bytes, Args, ?CHUNK_BYTES)
                             },
-                            {ok, W, stored(W)};
+                            {ok, W, stored(W, Snapshot)};
                         {error, Reason} ->
                             {error, Reason}
                     end;
@@ -142,8 +183,11 @@ open({Name, Node}, Args = #{dir := Base}) ->
             end
     end.
 
+write(#{snapshot := _}, #wal{ckpt = #ckpt{}}) ->
+    {error, checkpoint_in_progress};
 write(Batch = #{snapshot := _}, W) ->
-    checkpoint(Batch, W);
+    {Promised, Entries} = apply_batch(Batch, {W#wal.promised, W#wal.entries}),
+    finish(snapshot_begin(Batch, W#wal{promised = Promised, entries = Entries}));
 write(Batch, W) when map_size(Batch) =:= 0 ->
     {ok, W};
 write(Batch, W = #wal{io = Io, fd = Fd, promised = Promised0, entries = Entries0}) ->
@@ -176,15 +220,37 @@ close(#wal{fd = Fd}) ->
 %% Checkpoints
 %% ---------------------------------------------------------------------------
 
-%% Starts the next generation. See "Files" in the module documentation.
-checkpoint(Batch = #{snapshot := Snapshot = {Index, _}}, W = #wal{dir = Dir, io = Io, gen = Gen0, fd = Fd0}) ->
-    {Promised, Entries0} = apply_batch(Batch, {W#wal.promised, W#wal.entries}),
-    Entries = maps:filter(fun(I, _) -> I > Index end, Entries0),
+%% @doc Starts a checkpoint. See "Files" and "Writes during a checkpoint"
+%% in the module documentation. The result `more' means that
+%% `snapshot_continue/1' must be called.
+snapshot_begin(#{snapshot := _}, #wal{ckpt = #ckpt{}}) ->
+    {error, checkpoint_in_progress};
+snapshot_begin(#{snapshot := {Index, Snapshot}}, W = #wal{dir = Dir, io = Io, gen = Gen0}) ->
     Gen = Gen0 + 1,
     Tmp = path(Dir, Gen, ".ckpt.tmp"),
     try
-        {ok, TmpFd} = io_open(Io, Tmp, [write, raw, binary]),
-        ok = io_write(Io, TmpFd, [?HEADER, record({Promised, Snapshot, Entries})]),
+        {ok, Fd} = io_open(Io, Tmp, [write, raw, binary]),
+        ok = io_write(Io, Fd, ?HEADER),
+        {Chunks, Size} = peace_chunks:encode(Snapshot, W#wal.chunk),
+        {more, W#wal{ckpt = #ckpt{gen = Gen, tmp = Tmp, fd = Fd, index = Index, chunks = Chunks, size = Size}}}
+    catch
+        error:{badmatch, Error} -> {error, {checkpoint, Error}}
+    end.
+
+%% @doc Writes the next chunk of the checkpoint. The call after the last
+%% chunk completes the checkpoint and returns `done'.
+snapshot_continue(W = #wal{io = Io, ckpt = Ckpt = #ckpt{fd = Fd, chunks = [Chunk | Chunks]}}) ->
+    %% The chunk is synced here, so that the sync of the last call does not
+    %% cover the whole snapshot.
+    case {io_write(Io, Fd, record({chunk, iolist_to_binary(Chunk)})), io_sync(Io, Fd)} of
+        {ok, ok} -> {more, W#wal{ckpt = Ckpt#ckpt{chunks = Chunks}}};
+        Error -> {error, {checkpoint, Error}}
+    end;
+snapshot_continue(W = #wal{dir = Dir, io = Io, gen = Gen0, fd = Fd0, promised = Promised, ckpt = Ckpt}) ->
+    #ckpt{gen = Gen, tmp = Tmp, fd = TmpFd, index = Index, chunks = [], size = Size} = Ckpt,
+    Entries = maps:filter(fun(I, _) -> I > Index end, W#wal.entries),
+    try
+        ok = io_write(Io, TmpFd, record({checkpoint, Promised, Index, Size, Entries})),
         ok = io_sync(Io, TmpFd),
         ok = file:close(TmpFd),
         ok = io_rename(Io, Tmp, path(Dir, Gen, ".ckpt")),
@@ -193,10 +259,15 @@ checkpoint(Batch = #{snapshot := Snapshot = {Index, _}}, W = #wal{dir = Dir, io 
         _ = file:close(Fd0),
         _ = file:delete(path(Dir, Gen0, ".wal")),
         _ = file:delete(path(Dir, Gen0, ".ckpt")),
-        {ok, W#wal{gen = Gen, fd = Fd, promised = Promised, snapshot = Snapshot, entries = Entries}}
+        {done, W#wal{gen = Gen, fd = Fd, entries = Entries, ckpt = undefined}}
     catch
         error:{badmatch, Error} -> {error, {checkpoint, Error}}
     end.
+
+%% Performs the rest of a checkpoint in one call.
+finish({more, W}) -> finish(snapshot_continue(W));
+finish({done, W}) -> {ok, W};
+finish({error, Reason}) -> {error, Reason}.
 
 read_checkpoint(_Dir, 0) ->
     {ok, undefined, undefined, #{}};
@@ -204,14 +275,36 @@ read_checkpoint(Dir, Gen) ->
     File = path(Dir, Gen, ".ckpt"),
     case file:read_file(File) of
         {ok, <<Header:12/binary, Rest/binary>>} when Header =:= ?HEADER ->
-            case next_record(Rest) of
-                {ok, {Promised, Snapshot, Entries}, <<>>} -> {ok, Promised, Snapshot, Entries};
-                _ -> {error, {damaged_checkpoint, File}}
+            case read_chunks(Rest, []) of
+                {ok, Promised, Snapshot, Entries} -> {ok, Promised, Snapshot, Entries};
+                damaged -> {error, {damaged_checkpoint, File}}
             end;
         {ok, _} ->
             {error, {damaged_checkpoint, File}};
         {error, Reason} ->
             {error, {damaged_checkpoint, File, Reason}}
+    end.
+
+%% Reads the records of a checkpoint. `Chunks' holds the chunks of the
+%% snapshot that were read, in reverse order.
+read_chunks(Bin, Chunks) ->
+    case next_record(Bin) of
+        {ok, {chunk, Part}, Rest} ->
+            read_chunks(Rest, [Part | Chunks]);
+        {ok, {checkpoint, Promised, Index, Size, Entries}, <<>>} ->
+            Ordered = lists:reverse(Chunks),
+            try iolist_size(Ordered) =:= Size andalso {ok, peace_chunks:decode(Ordered)} of
+                false -> damaged;
+                {ok, Snapshot} -> {ok, Promised, {Index, Snapshot}, Entries}
+            catch
+                error:badarg -> damaged
+            end;
+        {ok, {Promised, Snapshot, Entries}, <<>>} when Chunks =:= [] ->
+            %% A checkpoint that an earlier version of this module wrote. It
+            %% holds the snapshot in one record.
+            {ok, Promised, Snapshot, Entries};
+        _ ->
+            damaged
     end.
 
 %% ---------------------------------------------------------------------------
@@ -313,7 +406,7 @@ apply_batch(Batch, {Promised0, Entries0}) ->
         maps:merge(Entries0, maps:from_list(maps:get(entries, Batch, [])))
     }.
 
-stored(#wal{promised = Promised, snapshot = Snapshot, entries = Entries}) ->
+stored(#wal{promised = Promised, entries = Entries}, Snapshot) ->
     maps:from_list(
         [{entries, Entries}] ++
             [{promised, Promised} || Promised =/= undefined] ++

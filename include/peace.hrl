@@ -9,6 +9,7 @@
 -define(DEFAULT_CALL_TIMEOUT_MS, 5000).
 -define(DEFAULT_SNAPSHOT_INTERVAL, 4096).
 -define(DEFAULT_MAX_PENDING, 8192).
+-define(DEFAULT_SNAPSHOT_CHUNK_BYTES, 262144).
 -define(DEFAULT_MAX_SESSIONS, 10000).
 
 %% Planted bugs. A test build can switch off a safeguard, to show that the

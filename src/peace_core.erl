@@ -189,9 +189,12 @@
 %% option `snapshot_offset' replaces the hash. A
 %% snapshot of a large state keeps the storage of a server busy. If every
 %% server took its snapshot at the same index, every member of a phase-two
-%% quorum would be busy at the same time. When a server is asked to catch another
-%% server up from an index that it no longer holds, it sends its state
-%% instead (`install').
+%% quorum would be busy at the same time.
+%%
+%% When a server is asked to catch another server up from an index that it
+%% no longer holds, it sends its state instead (`install'). `install' is
+%% one message in this module. `peace_server' sends the message in chunks.
+%% See `peace_transfer'.
 %%
 %% Removing log entries removes information that phase one relies on: the
 %% report by an acceptor of the values that it accepted. Without a guard,

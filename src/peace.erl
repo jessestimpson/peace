@@ -103,6 +103,9 @@
     %% hash of the server id, so that the servers of a cluster take their
     %% snapshots at different indexes.
     snapshot_offset => non_neg_integer(),
+    %% A server sends a snapshot to another server in chunks of at most this
+    %% many bytes. The default is 262144. See `peace_transfer'.
+    snapshot_chunk_bytes => pos_integer(),
     %% The number of client sessions that are remembered. The value must be
     %% the same on every member. The default is 10000.
     max_sessions => pos_integer(),

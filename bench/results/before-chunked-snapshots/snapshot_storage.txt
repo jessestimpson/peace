@@ -1,0 +1,16 @@
+Three runs of bench/run.sh snapshot_storage, with the harness of this
+commit and the library of commit 7ee3e50.
+
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Machine state | Puts | p50 ms | p99 ms | Max ms | Puts over 20 ms |
+|---|---|---|---|---|---|
+| 100 MB | 507 | 0.64 | 6.50 | 222.7 | 2 |
+| 400 MB | 490 | 0.65 | 10.9 | 384.4 | 1 |
+| 1000 MB | 416 | 0.65 | 7.86 | 1232.2 | 2 |
+| 100 MB | 514 | 0.66 | 8.10 | 90.0 | 2 |
+| 400 MB | 480 | 0.63 | 7.85 | 550.7 | 1 |
+| 1000 MB | 407 | 0.63 | 11.6 | 1294.9 | 2 |
+| 100 MB | 524 | 0.61 | 6.50 | 59.2 | 1 |
+| 400 MB | 448 | 0.66 | 10.9 | 543.9 | 2 |
+| 1000 MB | 412 | 0.64 | 8.31 | 1278.7 | 2 |

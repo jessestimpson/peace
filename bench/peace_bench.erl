@@ -166,6 +166,33 @@ suite(restart) ->
      || Storage <- [dets, wal], MB <- [1, 10, 100]
     ],
     ok;
+%% The latency of puts while a follower receives a snapshot of a given
+%% size. Every server takes one snapshot, 10 indexes before the end of the
+%% load. The next snapshot of a server is due after the trial, so the trial
+%% measures the transfer of a snapshot and not the storage of a snapshot.
+suite(large_snapshot) ->
+    header(large_snapshot),
+    [
+        with_cluster(
+            #{servers => 3, storage => wal, opts => #{snapshot_interval => MB * 16 - 10, snapshot_offset => 0}},
+            fun(C) -> large_snapshot_trial(C, MB) end
+        )
+     || MB <- [100, 400, 1000]
+    ],
+    ok;
+%% The latency of puts while every server stores a snapshot of a given
+%% size. Every server takes its first snapshot at the same index, 200
+%% indexes after the end of the load.
+suite(snapshot_storage) ->
+    header(snapshot_storage),
+    [
+        with_cluster(
+            #{servers => 3, storage => wal, opts => #{snapshot_interval => MB * 16 + 200, snapshot_offset => 0}},
+            fun(C) -> snapshot_storage_trial(C, MB) end
+        )
+     || MB <- [100, 400, 1000]
+    ],
+    ok;
 %% The time for a follower to catch up after it missed a number of values.
 %% The heartbeat interval is one fifth of the election timeout.
 suite(catch_up) ->
@@ -520,6 +547,82 @@ catch_up_trial(C0 = #{ids := Ids}, HeartbeatMs, Missed) ->
     ]),
     C2.
 
+%% Loads `MB' megabytes of machine state, kills a follower's node, deletes
+%% the files of the follower and restarts the follower. The follower
+%% receives a snapshot. One client sends a put of 100 bytes to the leader
+%% every 10 ms, for 2 seconds before the restart and from the restart until
+%% the follower has caught up.
+large_snapshot_trial(C0 = #{ids := Ids, dir := Dir}, MB) ->
+    Leader = await_leader(C0),
+    ok = puts(Leader, blob, MB * 16, 65536, 4),
+    [Follower = {Name, Node} | _] = Ids -- [Leader],
+    _ = await_commit(Follower, commit_index(Leader)),
+    C1 = kill(C0, Follower),
+    ok = file:del_dir_r(filename:join(Dir, lists:concat([Name, "@", Node]))),
+    Before = probe(Leader, 2000),
+    C2 = boot(C1, Follower),
+    Target = commit_index(Leader),
+    During = probe(Leader, fun() ->
+        T0 = now_us(),
+        ok = start_server(C2, Follower),
+        await_commit(Follower, Target) - T0
+    end),
+    {Elapsed, Times} = During,
+    row(large_snapshot, [
+        io_lib:format("~b MB", [MB]),
+        ms(Elapsed)
+        | lists:append([
+            [ms(percentile(S, 0.5)), ms(percentile(S, 0.99)), ms(lists:last(S))]
+         || S <- [lists:sort(Before), lists:sort(Times)]
+        ])
+    ]),
+    C2.
+
+%% Loads `MB' megabytes of machine state. One client then sends a put of
+%% 100 bytes to the leader every 10 ms for 6 seconds. Every server takes a
+%% snapshot after about 200 of these puts.
+snapshot_storage_trial(C = #{ids := Ids}, MB) ->
+    Leader = await_leader(C),
+    ok = puts(Leader, blob, MB * 16, 65536, 4),
+    [0, 0, 0] = [maps:get(snapshot_index, overview(Id)) || Id <- Ids],
+    Times = lists:sort(probe(Leader, 6000)),
+    true = lists:all(fun(Id) -> maps:get(snapshot_index, overview(Id)) > 0 end, Ids),
+    row(snapshot_storage, [
+        io_lib:format("~b MB", [MB]),
+        integer_to_list(length(Times)),
+        ms(percentile(Times, 0.5)),
+        ms(percentile(Times, 0.99)),
+        ms(lists:last(Times)),
+        integer_to_list(length([T || T <- Times, T > 20000]))
+    ]),
+    C.
+
+%% Sends a put to the leader every 10 ms, for `Ms' milliseconds, or until
+%% `Fun' returns. Returns the time of each put in microseconds, and
+%% the result of `Fun'.
+probe(Leader, Ms) when is_integer(Ms) ->
+    {ok, Times} = probe(Leader, fun() -> timer:sleep(Ms) end),
+    Times;
+probe(Leader, Fun) ->
+    Parent = self(),
+    Pid = spawn_link(fun() -> probe_loop(Leader, Parent, []) end),
+    Result = Fun(),
+    Pid ! stop,
+    receive
+        {probed, Pid, Times} -> {Result, Times}
+    end.
+
+probe_loop(Leader, Parent, Times) ->
+    receive
+        stop -> Parent ! {probed, self(), Times}
+    after 0 ->
+        T0 = now_us(),
+        {ok, ok, _} = peace_kv:put(Leader, '$probe', <<0:800>>, 60000),
+        T1 = now_us(),
+        timer:sleep(10),
+        probe_loop(Leader, Parent, [T1 - T0 | Times])
+    end.
+
 %% The size of the files of a server. The dets backend has one file. The
 %% write-ahead log backend has one directory.
 file_mb(#{dir := Dir}, {Name, Node}) ->
@@ -540,6 +643,17 @@ header(restart) ->
     io:format(
         "~n| Storage | Machine state | Log entries above the snapshot | Server start ms | Caught up ms | Files MB |~n"
         "|---|---|---|---|---|---|~n",
+        []
+    );
+header(large_snapshot) ->
+    io:format(
+        "~n| Machine state | Caught up ms | Before: p50 ms | Before: p99 ms | Before: max ms "
+        "| During: p50 ms | During: p99 ms | During: max ms |~n|---|---|---|---|---|---|---|---|~n",
+        []
+    );
+header(snapshot_storage) ->
+    io:format(
+        "~n| Machine state | Puts | p50 ms | p99 ms | Max ms | Puts over 20 ms |~n|---|---|---|---|---|---|~n",
         []
     );
 header(catch_up) ->

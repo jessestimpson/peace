@@ -207,6 +207,86 @@ two_generations_test() ->
 
 %% ---------------------------------------------------------------------------
 
+%% A snapshot that is larger than one chunk, at index 2.
+large() -> {2, {lists:seq(1, 300), #{}, cfg}}.
+
+open_chunked(Dir) ->
+    {ok, W, Stored} = peace_storage_wal:open(?ID, #{dir => Dir, io => ?IO, checkpoint_chunk_bytes => 64}),
+    {W, Stored}.
+
+finish({more, W}) -> finish(peace_storage_wal:snapshot_continue(W));
+finish({done, W}) -> W.
+
+chunked_checkpoint_test() ->
+    with_dir(fun(Dir) ->
+        {W0, _} = open_chunked(Dir),
+        {ok, W1} = write_all([b1(), b2(), b3()], W0),
+        {ok, _} = peace_storage_wal:write(#{snapshot => large()}, W1),
+        [Ckpt] = filelib:wildcard(filename:join([Dir, "*", "*.ckpt"])),
+        %% The checkpoint holds the snapshot in more than one record.
+        {ok, Bin} = file:read_file(Ckpt),
+        ?assert(length(binary:matches(Bin, <<16#70656163:32>>)) > 3),
+        {_, Recovered} = open_chunked(Dir),
+        ?assertEqual(#{promised => {2, ?ID}, snapshot => large(), entries => #{3 => entry(1, c)}}, Recovered)
+    end).
+
+%% The writes that are made between the steps of a checkpoint are part of
+%% the checkpoint.
+writes_during_checkpoint_test() ->
+    with_dir(fun(Dir) ->
+        {W0, _} = open_chunked(Dir),
+        {ok, W1} = write_all([b1(), b2()], W0),
+        {more, W2} = peace_storage_wal:snapshot_begin(#{snapshot => large()}, W1),
+        {more, W3} = peace_storage_wal:snapshot_continue(W2),
+        {ok, W4} = peace_storage_wal:write(b3(), W3),
+        {more, W5} = peace_storage_wal:snapshot_continue(W4),
+        {ok, W6} = peace_storage_wal:write(#{entries => [{4, entry(2, d)}]}, W5),
+        ?assertEqual({error, checkpoint_in_progress}, peace_storage_wal:write(snap(), W6)),
+        W7 = finish({more, W6}),
+        Expected = #{
+            promised => {2, ?ID}, snapshot => large(), entries => #{3 => entry(1, c), 4 => entry(2, d)}
+        },
+        {_, Recovered} = open_chunked(Dir),
+        ?assertEqual(Expected, Recovered),
+        %% The store is usable after the checkpoint.
+        {ok, _} = peace_storage_wal:write(#{entries => [{5, entry(2, e)}]}, W7),
+        {_, #{entries := Entries}} = open_chunked(Dir),
+        ?assertEqual([3, 4, 5], lists:sort(maps:keys(Entries)))
+    end).
+
+%% A server that stops during a checkpoint recovers the previous
+%% generation, with the writes that were made during the checkpoint.
+stop_during_checkpoint_test() ->
+    with_dir(fun(Dir) ->
+        {W0, _} = open_chunked(Dir),
+        {ok, W1} = write_all([b1(), b2()], W0),
+        {more, W2} = peace_storage_wal:snapshot_begin(#{snapshot => large()}, W1),
+        {more, W3} = peace_storage_wal:snapshot_continue(W2),
+        {ok, _} = peace_storage_wal:write(b3(), W3),
+        {W4, Recovered} = open_chunked(Dir),
+        ?assertEqual(s3(), Recovered),
+        ?assertEqual([], filelib:wildcard(filename:join([Dir, "*", "*.tmp"]))),
+        {ok, _} = peace_storage_wal:write(#{snapshot => large()}, W4),
+        {_, #{snapshot := Snapshot}} = open_chunked(Dir),
+        ?assertEqual(large(), Snapshot)
+    end).
+
+%% A checkpoint that holds the snapshot in one record was written by an
+%% earlier version of the backend. `open/2' reads it.
+single_record_checkpoint_test() ->
+    with_dir(fun(Dir) ->
+        {W0, _} = open(Dir),
+        {ok, _} = write_all([b1(), b2(), b3(), snap()], W0),
+        [Ckpt] = filelib:wildcard(filename:join([Dir, "*", "*.ckpt"])),
+        #{snapshot := Snapshot, promised := Promised, entries := Entries} = s4(),
+        Payload = term_to_binary({Promised, Snapshot, Entries}),
+        Len = byte_size(Payload),
+        Record = <<16#70656163:32, Len:64, (erlang:crc32([<<Len:64>>, Payload])):32, Payload/binary>>,
+        ok = file:write_file(Ckpt, [<<"peacewal", 1:32>>, Record]),
+        {_, Recovered} = open(Dir),
+        ?assertEqual(s4(), Recovered)
+    end).
+
 open(Dir) ->
     {ok, W, Stored} = peace_storage_wal:open(?ID, #{dir => Dir, io => ?IO}),
     {W, Stored}.

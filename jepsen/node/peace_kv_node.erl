@@ -22,6 +22,13 @@
 %% The optional argument `-peace_kv_node read_lease_ms N' sets the
 %% `read_lease_ms' option of the cluster.
 %%
+%% The optional argument `-peace_kv_node snapshot_interval N' sets the
+%% `snapshot_interval' option. The optional argument
+%% `-peace_kv_node chunk_bytes N' sets the `snapshot_chunk_bytes' option and
+%% the `checkpoint_chunk_bytes' option of the write-ahead log. The Jepsen
+%% test uses small values, so that servers send and store snapshots in
+%% several chunks during a run.
+%%
 %% The optional argument `-peace_kv_node quorum Spec' sets the quorum system.
 %% `Spec' is one of:
 %%
@@ -58,6 +65,15 @@ start() ->
     Members = members(arg(members)),
     Lease = [{read_lease_ms, list_to_integer(L)} || L <- args(read_lease_ms)],
     Rate = [{test_clock_rate, clock_rate(R)} || R <- args(clock_rate)],
+    Interval = [{snapshot_interval, list_to_integer(I)} || I <- args(snapshot_interval)],
+    Dir = application:get_env(peace, data_dir, "peace_data"),
+    Chunks = lists:append([
+        [
+            {snapshot_chunk_bytes, list_to_integer(B)},
+            {storage, {peace_storage_wal, #{dir => Dir, checkpoint_chunk_bytes => list_to_integer(B)}}}
+        ]
+     || B <- args(chunk_bytes)
+    ]),
     Config = maps:merge(
         #{
             id => server(),
@@ -65,7 +81,7 @@ start() ->
             machine => peace_kv:machine(),
             quorum => quorum(arg(quorum, "majority"))
         },
-        maps:from_list(Lease ++ Rate)
+        maps:from_list(Lease ++ Rate ++ Interval ++ Chunks)
     ),
     ok = peace:start_server(Config),
     {ok, _} = peace_kv_http:start(list_to_integer(arg(port, "8080"))),

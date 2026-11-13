@@ -103,3 +103,32 @@ merge_proposed_and_decided_test() ->
         {#{entries => [{1, {learned, x}}], sync => false}, true},
         peace_server:merge_batches(Batches)
     ).
+
+%% The storage process performs a write between two steps of a snapshot.
+write_between_snapshot_steps_test() ->
+    Id = {peace_server_tests_writer, node()},
+    {ok, Writer, #{}} = peace_writer:start_link(Id, peace_step_storage, #{test => self()}),
+    Snapshot = #{snapshot => {2, {state, #{}, cfg}}},
+    Batch = #{entries => [{3, {learned, x}}]},
+    ok = peace_writer:snapshot(Writer, Snapshot),
+    receive
+        {began, Snapshot} -> ok
+    end,
+    receive
+        {step, Writer} -> ok
+    end,
+    ok = peace_writer:write(Writer, 1, Batch),
+    Writer ! go,
+    %% The write returns before the second step ends.
+    receive
+        {written, Writer, 1} -> ok
+    end,
+    receive
+        {wrote, Batch} -> ok
+    end,
+    ?assertEqual(none, receive {snapshot_written, Writer} -> stored after 0 -> none end),
+    [receive {step, Writer} -> Writer ! go end || _ <- [2, 3]],
+    receive
+        {snapshot_written, Writer} -> ok
+    end,
+    ok = peace_writer:stop(Writer).

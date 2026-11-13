@@ -115,8 +115,9 @@ restarts. The `storage => {Module, Args}` option selects the backend:
 | `{peace_storage_dets, #{dir => Dir}}` | One dets file per server. Durable and slower than the write-ahead log. |
 | `{peace_storage_mem, #{}}` | Stores nothing. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. For tests. |
 
-A backend implements the [peace_storage](src/peace_storage.erl) behaviour,
-which has three callbacks.
+A backend implements the [peace_storage](src/peace_storage.erl) behaviour.
+The behaviour has three callbacks, and two optional callbacks that store a
+snapshot in steps.
 
 A server handles the events that are waiting in its mailbox as a group and
 sends one storage write for the group to its storage process,
@@ -126,7 +127,8 @@ that syncs once per call therefore performs group commit. The server
 handles further events while a write is in progress.
 
 Both durable backends sync every write that contains a promise, a proposal
-or a snapshot. A server does not wait for the write of a snapshot. A write that contains only `learned` entries is not synced.
+or a snapshot. A server does not wait for the write of a snapshot. A write
+that contains only `learned` entries is not synced.
 A `learned` entry records that an index is decided. The decision is already
 durable, because a phase-two quorum has stored its acceptances.
 
@@ -173,9 +175,27 @@ one value in flight at a time, and `Seq` must increase.
 Once in every `snapshot_interval` indexes (default 4096), a server stores
 its machine state and deletes the log up to its commit index. A restarted
 server starts from its snapshot. A follower that needs log entries the
-leader has deleted is sent the snapshot. The snapshot is the machine state
-as one Erlang term. It is written in one storage write and sent in one
-message.
+leader has deleted is sent the snapshot. The snapshot is the machine state,
+the session table and the applied configuration.
+
+A snapshot is sent and stored in chunks:
+
+- **Transfer.** The sender encodes the snapshot into chunks, in a separate
+  process. The receiver asks for one chunk at a time. A chunk holds at
+  most `snapshot_chunk_bytes` bytes (default 262,144). At most one chunk
+  per receiver is on the network, so the other messages of the sender,
+  which include its heartbeats, are not delayed by more than one chunk.
+  See [peace_transfer](src/peace_transfer.erl).
+- **Storage.** The write-ahead log writes a snapshot as one record per
+  chunk of 1,048,576 bytes and syncs each chunk. The storage process
+  performs the other writes of the server between two chunks. See "Writes
+  during a checkpoint" in [peace_storage_wal](src/peace_storage_wal.erl).
+  The dets backend stores a snapshot in one write.
+
+With a machine state of 1000 MB on the benchmark machine, the longest put
+was 8 to 57 ms while a follower received a snapshot, and 111 to 122 ms
+while every server stored a snapshot at the same index. See "Large
+snapshots" in [bench/README.md](bench/README.md).
 
 The servers of a cluster take their snapshots at different indexes. The
 index of a server is set by a hash of the server id, or by the option
@@ -316,7 +336,9 @@ Workloads:
 | Write-ahead log | The write-ahead log backend runs in the same way, on eta's simulated disk. A killed node loses the file data and the directory operations that it did not sync. |
 
 In every workload, servers take a snapshot every five indexes and clients
-retry with sessions. Read leases are also tested with two of three servers
+retry with sessions. A server sends a snapshot in chunks of 48 bytes and
+stores a snapshot in at least two steps, so faults and other writes occur
+between the chunks of a snapshot. Read leases are also tested with two of three servers
 running clocks six per cent fast.
 
 Eight invariants are checked after every step. They include agreement across
@@ -364,9 +386,9 @@ Trace validation rejects some runs that pass the simulation's invariants:
 | Planted bug | Rejected by the model | Caught by invariants |
 |---|---|---|
 | Quorums that do not intersect | 30 of 30 runs | 6 |
-| Disk that loses its contents | 24 of 30 | 24 |
-| No snapshot guard | 3 of 60 | 1 |
-| Deposed leader does not step down | 3 of 60 | 0 |
+| Disk that loses its contents | 25 of 30 | 25 |
+| No snapshot guard | 16 of 60 | 15 |
+| Deposed leader does not step down | 2 of 60 | 0 |
 
 Limitations:
 
@@ -443,6 +465,10 @@ The tests in [test/](test/) cover:
 - the write-ahead log under injected faults: failed sync, short write, full
   disk, torn write, damaged record, damaged header, damaged checkpoint and
   failed checkpoint
+- the write-ahead log with a checkpoint in several chunks: writes between
+  two chunks, and a stop during the checkpoint
+- the transfer of a snapshot in chunks: a lost request, a repeated chunk, a
+  damaged chunk and a transfer that replaces another transfer
 - a server whose storage write fails: the server stops, sends nothing and is
   not restarted
 
@@ -485,6 +511,8 @@ Requirements:
 | [src/peace.erl](src/peace.erl) | Client API |
 | [src/peace_core.erl](src/peace_core.erl) | The protocol, as a pure function from an event and a state to a new state and a list of effects |
 | [src/peace_server.erl](src/peace_server.erl) | The `gen_server` that performs the effects: storage writes, timers and sends |
+| [src/peace_writer.erl](src/peace_writer.erl) | The storage process of a server. It calls the storage backend. |
+| [src/peace_transfer.erl](src/peace_transfer.erl) | The transfer of a snapshot between two servers, in chunks |
 | [src/peace_quorum.erl](src/peace_quorum.erl) | Quorum systems and their validation |
 | [src/peace_machine.erl](src/peace_machine.erl) | The state machine behaviour |
 | [src/peace_storage.erl](src/peace_storage.erl) | The storage behaviour. The three backends are in separate modules. |
@@ -499,9 +527,23 @@ Requirements:
 peace is not ready for production use. [ROADMAP.md](ROADMAP.md) lists the
 work required.
 
-- **Snapshots are not chunked.** A snapshot is one Erlang term, sent in one
-  message and stored in one write. The machine state must be small enough
-  for that.
+- **A snapshot must fit in memory more than once.** The machine state is
+  one Erlang term. A snapshot is sent and stored in chunks, which bounds
+  the size of one message and of one write. It does not bound the memory:
+  - To send or store a snapshot, a server encodes the whole term. The
+    encoding refers to the binaries of more than 64 bytes in the term and
+    copies everything else.
+  - To receive a snapshot, a server holds every chunk and then joins the
+    chunks into one binary.
+  - The write-ahead log reads the whole checkpoint when it opens.
+- **A server that receives a large snapshot is busy.** The receiver joins
+  and decodes the chunks in the server process. The allocation of one
+  large binary stops every process of the node for a time that grows with
+  the size. `term_to_binary/1` of 1000 MB stopped the node for 30 to 70 ms
+  on the benchmark machine. The join was not measured separately.
+- **Large snapshots were measured only with a machine state of large
+  binaries.** A machine state of small terms is copied when a server
+  starts to send it or to store it, and was not measured.
 - **Sessions do not expire by time.** The session table is bounded by
   `max_sessions`. When it is full, the session with the oldest index is
   evicted.

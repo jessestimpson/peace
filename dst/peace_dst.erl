@@ -86,7 +86,9 @@
 %%
 %% Servers take a snapshot every few indexes. Every run therefore includes
 %% log truncation, recovery from a snapshot, and catch-up from a snapshot
-%% that another server sends.
+%% that another server sends. A server sends a snapshot in chunks of 48
+%% bytes, so the faults of a run also occur between the chunks of a
+%% snapshot.
 %%
 %% Clients submit values under a session. A client retries a request when the
 %% outcome of the request is unknown.
@@ -599,7 +601,10 @@ storage_matches_memory(Tab, Views, Disks) ->
             lists:foldl(
                 fun apply_batch/2,
                 {Promised0, Stored0, peace_dst_storage:snapshot_index(Tab, Id)},
-                inflight(Id)
+                %% A snapshot may be stored after a write that was sent
+                %% later. The snapshots are applied first. `apply_batch/2'
+                %% then removes the entries under them from each write.
+                snapshots(Id) ++ inflight(Id)
             )
         ],
         peace_core:promised(Core) =/= Promised orelse Log =/= Stored orelse
@@ -630,6 +635,19 @@ inflight({Name, Node}) ->
         Pid ->
             case eta_observe:read(Pid) of
                 #{inflight := Inflight} -> [Batch || {_Seq, Batch} <- Inflight];
+                _ -> []
+            end
+    end.
+
+%% Returns the snapshots that a server has sent to its storage process and
+%% that are not yet stored, in order.
+snapshots({Name, Node}) ->
+    case server_pid(Name, Node) of
+        undefined ->
+            [];
+        Pid ->
+            case eta_observe:read(Pid) of
+                #{snapshots := Snapshots} -> Snapshots;
                 _ -> []
             end
     end.
@@ -882,10 +900,10 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
             {dets, _} ->
                 #{tab => Tab, node => node_name(I), disk => {peace_storage_dets, #{dir => disk_dir()}}};
             {wal, unsynced_wal} ->
-                Args = #{dir => disk_dir(), io => peace_dst_nosync_io},
+                Args = #{dir => disk_dir(), io => peace_dst_nosync_io, checkpoint_chunk_bytes => 48},
                 #{tab => Tab, node => node_name(I), disk => {peace_storage_wal, Args}};
             {wal, _} ->
-                #{tab => Tab, node => node_name(I), disk => {peace_storage_wal, #{dir => disk_dir()}}}
+                #{tab => Tab, node => node_name(I), disk => {peace_storage_wal, #{dir => disk_dir(), checkpoint_chunk_bytes => 48}}}
         end,
     Base = #{
         id => Id,
@@ -901,7 +919,11 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         heartbeat_ms => 10,
         %% The snapshot interval is small enough that every run truncates the
         %% log, restarts a server from a snapshot and sends a snapshot.
-        snapshot_interval => maps:get(snapshot_interval, Config, 5)
+        snapshot_interval => maps:get(snapshot_interval, Config, 5),
+        %% A snapshot of the machine of the simulation is a few hundred
+        %% bytes. The chunk size is small enough that a server sends every
+        %% snapshot in several chunks.
+        snapshot_chunk_bytes => maps:get(snapshot_chunk_bytes, Config, 48)
     },
     Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to, max_pending], Config)),
     %% The clocks of the servers run at different rates. The clock of every

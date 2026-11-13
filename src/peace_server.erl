@@ -22,6 +22,10 @@
 %% This module does not wait for the write, except for a write that
 %% contains a promise.
 %%
+%% This module sends a snapshot to another server in chunks, and gives a
+%% snapshot that arrived in chunks to `peace_core' as one `install'
+%% message. See `peace_transfer'.
+%%
 %% If the storage backend fails to open or to write, the server stops and
 %% is not restarted. See `persist/2'.
 -module(peace_server).
@@ -30,7 +34,7 @@
 
 -include("peace.hrl").
 -include("peace_eta.hrl").
--eta_observe({state, [core, inflight]}).
+-eta_observe({state, [core, inflight, snapshots]}).
 
 -export([start_link/1, start/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -58,9 +62,16 @@ log_event(Event) -> Event.
 %% a check that runs during the wait compares the disk with the state that
 %% the write belongs to.
 -define(PUBLISH(State),
-    put(eta_observe:key(), #{core => State#state.core, inflight => State#state.inflight})
+    put(eta_observe:key(), #{
+        core => State#state.core,
+        inflight => State#state.inflight,
+        snapshots => State#state.snapshots
+    })
 ).
+%% Counts an occurrence for the statistics of the simulation.
+-define(COUNT(Key), peace_dst:bump(Key)).
 -else.
+-define(COUNT(Key), ok).
 -define(PUBLISH(State), ok).
 -define(TRACE(Event, Core), ok).
 -endif.
@@ -81,6 +92,10 @@ log_event(Event) -> Event.
     seq = 0 :: non_neg_integer(),
     done = 0 :: non_neg_integer(),
     inflight = [] :: [{pos_integer(), peace_storage:batch()}],
+    %% The snapshots that were sent to the storage process and that are not
+    %% yet stored, in order. A snapshot has no sequence number. See
+    %% `submit/2'.
+    snapshots = [] :: [peace_storage:batch()],
     %% The `accept' messages that wait for a write. Each element holds the
     %% sequence number of the write and the effects, in order.
     held = [] :: [{pos_integer(), [peace_core:effect()]}],
@@ -92,6 +107,11 @@ log_event(Event) -> Event.
     %% The `stored' events of the writes that have returned and that
     %% `peace_core' has not yet handled. See `event/2'.
     stored = [] :: [peace_core:event()],
+    %% The snapshots that this server sends and receives in chunks. See
+    %% `peace_transfer'.
+    transfer :: peace_transfer:t(),
+    %% The monitor of the process that encodes a snapshot, if one runs.
+    encoder :: undefined | reference(),
     %% A function that is called with every step of `peace_core'. It is set
     %% only in a test build. See `tracer/1'.
     tracer :: undefined | fun((step()) -> term())
@@ -155,6 +175,9 @@ init(Config = #{id := Id}, Writer, Stored) ->
         tracer = tracer(Config),
         clock = Clock,
         writer = Writer,
+        transfer = peace_transfer:new(
+            maps:get(snapshot_chunk_bytes, Config, ?DEFAULT_SNAPSHOT_CHUNK_BYTES), ElectionMs
+        ),
         election_ms = ElectionMs,
         heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
     },
@@ -209,6 +232,32 @@ handle_info({peace_msg, Peer, Msg}, State) ->
     {noreply, event({msg, Peer, Msg}, State)};
 handle_info({written, Writer, Seq}, State = #state{writer = Writer}) ->
     {noreply, handle_stored(written(Seq, State))};
+handle_info({snapshot_written, Writer}, State = #state{writer = Writer, snapshots = [_Stored | Snapshots]}) ->
+    {noreply, State#state{snapshots = Snapshots}};
+handle_info({peace_chunk, Peer, {offer, Id}}, State = #state{core = Core, transfer = Transfer0}) ->
+    Now = now_ms(State#state.clock),
+    {Transfer, Sends} = peace_transfer:offered(Peer, Id, peace_core:commit_index(Core), Now, Transfer0),
+    {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
+handle_info({peace_chunk, Peer, {chunk, Id, Offset, Bin}}, State0 = #state{transfer = Transfer0}) ->
+    Now = now_ms(State0#state.clock),
+    {Transfer, Sends, Install} = peace_transfer:chunk(Peer, Id, Offset, Bin, Now, Transfer0),
+    State = send_chunks(Sends, State0#state{transfer = Transfer}),
+    case Install of
+        none -> {noreply, State};
+        {install, _Index, _Snapshot} ->
+            _ = ?COUNT(snapshots_received),
+            {noreply, event({msg, Peer, Install}, State)}
+    end;
+handle_info({peace_chunk, Peer, {request, Id, Offset}}, State = #state{transfer = Transfer0}) ->
+    {Transfer, Sends} = peace_transfer:request(Peer, Id, Offset, Transfer0),
+    _ = ?COUNT(chunks_requested),
+    {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
+handle_info({peace_encoded, Index, Chunks, Size, Crc}, State = #state{transfer = Transfer0}) ->
+    {Transfer, Sends} = peace_transfer:encoded(Index, Chunks, Size, Crc, Transfer0),
+    {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
+handle_info({'DOWN', Ref, process, _Pid, _Reason}, State = #state{encoder = Ref, transfer = Transfer}) ->
+    %% If the encoding succeeded, the result arrived before this message.
+    {noreply, State#state{encoder = undefined, transfer = peace_transfer:encode_failed(Transfer)}};
 handle_info({'DOWN', Ref, process, _Pid, _Reason}, State = #state{connecting = Connecting}) ->
     {noreply, State#state{connecting = maps:filter(fun(_Node, R) -> R =/= Ref end, Connecting)}};
 handle_info(_Other, State) ->
@@ -425,6 +474,25 @@ is_accept({send, _Peer, {accept, _Epoch, _Indexes, _Stamp}}) -> true;
 is_accept(_Effect) -> false.
 
 %% Sends a write to the storage process.
+%%
+%% A snapshot is sent separately from the rest of the write, and without a
+%% sequence number. The storage process performs later writes while it
+%% stores the snapshot (see `peace_writer'), so the snapshot may be stored
+%% after a write that was sent later. No effect waits for a snapshot:
+%%
+%% <ul>
+%% <li>Until the snapshot is stored, storage holds the earlier snapshot and
+%%   every entry that this server accepted. A server that restarts from that
+%%   state is bound by every promise and every acceptance that it sent.</li>
+%% <li>If the snapshot came from another server, storage may then hold
+%%   entries above the index of the snapshot and no entries at some indexes
+%%   below it. This server did not accept a value at those indexes. After a
+%%   restart, this server asks for those indexes again.</li>
+%% </ul>
+submit(Batch = #{snapshot := Snapshot}, State = #state{writer = Writer, snapshots = Snapshots}) ->
+    Only = #{snapshot => Snapshot},
+    ok = peace_writer:snapshot(Writer, Only),
+    submit(maps:remove(snapshot, Batch), State#state{snapshots = Snapshots ++ [Only]});
 submit(Batch, State) when map_size(Batch) =:= 0 ->
     State;
 submit(Batch, State = #state{writer = Writer, seq = Seq0, inflight = Inflight}) ->
@@ -441,14 +509,20 @@ hold(Accepts, State = #state{seq = Seq, done = Seq}) ->
 hold(Accepts, State = #state{seq = Seq, held = Held}) ->
     State#state{held = Held ++ [{Seq, Accepts}]}.
 
-%% Waits until every write that was sent has returned. If the storage
-%% process fails, it exits, and the link stops this process.
-await(State = #state{seq = Seq, done = Seq}) ->
+%% Waits until every write that was sent has returned. A server with a
+%% tracer also waits until every snapshot is stored. If the storage process
+%% fails, it exits, and the link stops this process.
+await(State = #state{seq = Seq, done = Seq, snapshots = Snapshots, tracer = Tracer}) when
+    Snapshots =:= []; Tracer =:= undefined
+->
     State;
 await(State = #state{writer = Writer}) ->
     _ = ?PUBLISH(State),
     receive
-        {written, Writer, Seq} -> await(written(Seq, State))
+        {written, Writer, Seq} ->
+            await(written(Seq, State));
+        {snapshot_written, Writer} ->
+            await(State#state{snapshots = tl(State#state.snapshots)})
     end.
 
 %% The storage process reports that every write up to `Seq' has returned.
@@ -565,6 +639,14 @@ merge_batches(Batches) ->
         end,
     {Merged, not is_map_key(promised, Fields)}.
 
+effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, transfer = Transfer0}) ->
+    %% A snapshot is not sent as one message. See `peace_transfer'.
+    {Transfer, Action} = peace_transfer:offer(To, Index, peace_core:snapshot_index(Core), Transfer0),
+    case Action of
+        none -> State#state{transfer = Transfer};
+        encode -> encode(Index, Snapshot, State#state{transfer = Transfer});
+        Send -> send_chunks([Send], State#state{transfer = Transfer})
+    end;
 effect({send, To, Msg}, State = #state{core = Core}) ->
     send(To, {peace_msg, peace_core:id(Core), Msg}, State);
 effect({reply, undefined, _Reply}, State) ->
@@ -581,6 +663,23 @@ effect({timer, Timer, reset}, State0) ->
 effect({machine, Effects}, State) ->
     lists:foreach(fun machine_effect/1, Effects),
     State.
+
+send_chunks(Sends, State = #state{core = Core}) ->
+    Id = peace_core:id(Core),
+    lists:foldl(fun({send, To, Msg}, State1) -> send(To, {peace_chunk, Id, Msg}, State1) end, State, Sends).
+
+%% Starts a process that encodes a snapshot. The encoding of a large
+%% snapshot takes long, and this process must not wait for it. The start of
+%% the process copies the snapshot, except for the binaries of more than 64
+%% bytes that the snapshot contains.
+encode(Index, Snapshot, State = #state{transfer = Transfer}) ->
+    Server = self(),
+    Bytes = peace_transfer:chunk_bytes(Transfer),
+    {_Pid, Ref} = erlang:spawn_monitor(fun() ->
+        {Chunks, Size} = peace_chunks:encode(Snapshot, Bytes),
+        Server ! {peace_encoded, Index, Chunks, Size, peace_chunks:crc(Chunks)}
+    end),
+    State#state{encoder = Ref}.
 
 %% A server must not wait on the network. A plain send to a node that is not
 %% connected blocks the sender while the connection is set up. If the node is

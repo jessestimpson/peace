@@ -66,7 +66,9 @@
       :else q)))
 
 (defn clock-args
-  "The clock arguments of peace_kv_node. With --clock-rate-spread P, every
+  "The lease, snapshot and clock arguments of peace_kv_node. With
+  --snapshot-interval and --chunk-bytes, the servers use those settings.
+  With --clock-rate-spread P, every
   start of a node picks a clock rate between 1 - P/200 and 1 + P/200."
   [test]
   (let [spread (:clock-rate-spread test)
@@ -74,6 +76,10 @@
     (concat
       (when lease
         [:-peace_kv_node "read_lease_ms" (str lease)])
+      (when (:snapshot-interval test)
+        [:-peace_kv_node "snapshot_interval" (str (:snapshot-interval test))])
+      (when (:chunk-bytes test)
+        [:-peace_kv_node "chunk_bytes" (str (:chunk-bytes test))])
       (when (pos? spread)
         [:-peace_kv_node "clock_rate"
          (str (+ 1000 (- (rand-int (inc (* 10 spread))) (* 5 spread))) "/1000")]))))
@@ -371,6 +377,10 @@
     :validate [#(re-matches #"majority|counting:\d+:\d+|grid:\d+|weighted:\d+(\+\d+)*" %)
                "must be majority, counting:Q1:Q2, grid:R or weighted:W+W+..."]]
    [nil "--read-lease-ms MS" "The read_lease_ms option of the cluster. Read leases are off by default."
+    :parse-fn parse-long]
+   [nil "--snapshot-interval COUNT" "The snapshot_interval option of the servers. The default of peace is 4096."
+    :parse-fn parse-long]
+   [nil "--chunk-bytes BYTES" "The size of a chunk of a snapshot, in a transfer and in the write-ahead log."
     :parse-fn parse-long]
    [nil "--clock-rate-spread PERCENT" "The width of the range of the clock rates of the nodes, in percent."
     :default  0

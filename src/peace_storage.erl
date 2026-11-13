@@ -38,7 +38,7 @@
 %% </ul>
 -module(peace_storage).
 
--export([open/3, write/3, close/2]).
+-export([open/3, write/3, close/2, snapshot_begin/3, snapshot_continue/2]).
 
 -export_type([storage/0, stored/0, batch/0]).
 
@@ -68,6 +68,25 @@
 %%
 %% `peace_writer' calls the backend. It may merge several batches into one
 %% call.
+%%
+%% == Snapshots in steps ==
+%%
+%% A backend may export `snapshot_begin/2' and `snapshot_continue/1'.
+%% `peace_writer' then stores a snapshot with one call to
+%% `snapshot_begin/2' and calls to `snapshot_continue/1' until the result is
+%% `done'. `peace_writer' calls `write/2' between these calls, with batches
+%% that have no snapshot. The backend must:
+%%
+%% <ul>
+%% <li>keep the stored snapshot and every stored entry until the call that
+%%   returns `done', and</li>
+%% <li>in that call, replace the snapshot and delete every entry at or below
+%%   the index of the snapshot, and keep the promised epoch and the entries
+%%   above that index that were written since `snapshot_begin/2'.</li>
+%% </ul>
+%%
+%% A backend without these functions receives the snapshot in a batch, with
+%% `write/2'.
 -type batch() :: #{
     promised => peace:epoch(),
     entries => [{peace:index(), peace_core:entry()}],
@@ -81,6 +100,9 @@
 -callback open(peace:server_id(), Args :: term()) -> {ok, State :: term(), stored()} | {error, term()}.
 -callback write(batch(), State :: term()) -> {ok, State :: term()} | {error, term()}.
 -callback close(State :: term()) -> ok.
+-callback snapshot_begin(batch(), State :: term()) -> {more | done, State :: term()} | {error, term()}.
+-callback snapshot_continue(State :: term()) -> {more | done, State :: term()} | {error, term()}.
+-optional_callbacks([snapshot_begin/2, snapshot_continue/1]).
 
 -spec open(module(), peace:server_id(), term()) -> {ok, term(), stored()} | {error, term()}.
 open(Mod, ServerId, Args) ->
@@ -89,6 +111,24 @@ open(Mod, ServerId, Args) ->
 -spec write(module(), batch(), term()) -> {ok, term()} | {error, term()}.
 write(Mod, Batch, State) ->
     Mod:write(Batch, State).
+
+%% @doc Starts to store the snapshot of `Batch'. A backend that does not
+%% store a snapshot in steps stores the snapshot in this call.
+-spec snapshot_begin(module(), batch(), term()) -> {more | done, term()} | {error, term()}.
+snapshot_begin(Mod, Batch, State) ->
+    case erlang:function_exported(Mod, snapshot_begin, 2) of
+        true ->
+            Mod:snapshot_begin(Batch, State);
+        false ->
+            case Mod:write(Batch, State) of
+                {ok, State1} -> {done, State1};
+                {error, Reason} -> {error, Reason}
+            end
+    end.
+
+-spec snapshot_continue(module(), term()) -> {more | done, term()} | {error, term()}.
+snapshot_continue(Mod, State) ->
+    Mod:snapshot_continue(State).
 
 -spec close(module(), term()) -> ok.
 close(Mod, State) ->

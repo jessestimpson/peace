@@ -15,7 +15,7 @@ are from the fourth run.
 | [peace_kv_tests.erl](peace_kv_tests.erl) | Tests for `peace_kv` |
 | [peace_bench.erl](peace_bench.erl) | The benchmark harness |
 | [run.sh](run.sh) | Compiles the `bench` profile and runs the harness |
-| [results/](results) | The unedited output of each suite. [results/before-group-commit/](results/before-group-commit) has the output of the first run. [results/before-milestone-4/](results/before-milestone-4) has the output of the second run. [results/before-storage-process/](results/before-storage-process) has the output of the third run. |
+| [results/](results) | The unedited output of each suite. [results/before-group-commit/](results/before-group-commit) has the output of the first run. [results/before-milestone-4/](results/before-milestone-4) has the output of the second run. [results/before-storage-process/](results/before-storage-process) has the output of the third run. [results/before-chunked-snapshots/](results/before-chunked-snapshots) has the output of the two snapshot suites with the library of commit 7ee3e50. |
 
 ## Commands
 
@@ -25,11 +25,15 @@ bench/run.sh smoke                # one short run, to check the harness
 bench/run.sh quick                # puts on 3 servers with mem and wal, about 2 minutes
 bench/run.sh slow_disk            # puts on 3 servers where one server has a slow disk
 bench/run.sh throughput reads     # the named suites
+bench/run.sh large_snapshot       # puts while a follower receives a snapshot of up to 1000 MB
+bench/run.sh snapshot_storage     # puts while every server stores a snapshot of up to 1000 MB
 rebar3 as bench eunit             # the tests for peace_kv
 ```
 
-The suites are `throughput`, `value_size`, `propose_to`, `reads`,
-`failover`, `restart` and `catch_up`.
+The suites of `make bench` are `throughput`, `value_size`, `propose_to`,
+`reads`, `failover`, `restart` and `catch_up`. The suites `quick`,
+`slow_disk`, `large_snapshot` and `snapshot_storage` are run by name. The
+two snapshot suites need about 8 GB of free memory.
 
 The environment variable `PEACE_BENCH_NODE_FLAGS` sets extra emulator flags
 for the server nodes.
@@ -169,6 +173,61 @@ stored it, and the two other servers are a phase-two quorum. The leader
 does not wait for its own write. The throughput is higher with one slow
 server, because the two other servers then share the disk between two and
 not three.
+
+### Large snapshots
+
+3 servers, wal storage. The machine state is a number of values of 65,536
+bytes. One client sends a put of 100 bytes to the leader every 10 ms. Each
+suite was run three times. The tables give the lowest and the highest
+result of the three runs. "Before" is the library of commit 7ee3e50, which
+sent a snapshot in one message and stored a snapshot in one write.
+
+**A follower receives a snapshot.** Source:
+[results/large_snapshot.txt](results/large_snapshot.txt) and
+[results/before-chunked-snapshots/large_snapshot.txt](results/before-chunked-snapshots/large_snapshot.txt).
+The harness kills the node of a follower, deletes the files of the follower
+and restarts the follower. The puts are measured from the restart until the
+follower has the commit index of the leader. No server stores a snapshot
+during that time.
+
+| Machine state | Caught up ms, before | Caught up ms, now | Longest put ms, before | Longest put ms, now |
+|---|---|---|---|---|
+| 100 MB | 50.4 to 55.3 | 89.7 to 93.7 | 9.64 to 21.7 | 0.78 to 1.26 |
+| 400 MB | 163.6 to 184.0 | 273.3 to 306.9 | 46.1 to 48.5 | 1.04 to 15.2 |
+| 1000 MB | 312.8 to 316.2 | 668.2 to 706.0 | 117.3 to 125.8 | 7.80 to 56.6 |
+
+The transfer in chunks takes about twice as long. The longest put is
+shorter, because the leader no longer sends the snapshot as one message.
+
+**Every server stores a snapshot.** Source:
+[results/snapshot_storage.txt](results/snapshot_storage.txt) and
+[results/before-chunked-snapshots/snapshot_storage.txt](results/before-chunked-snapshots/snapshot_storage.txt).
+The three servers take a snapshot at the same index (`snapshot_offset` is 0
+on every server). The puts are measured for 6 seconds around that index.
+
+| Machine state | Longest put ms, before | Longest put ms, now | Puts over 20 ms, before | Puts over 20 ms, now |
+|---|---|---|---|---|
+| 100 MB | 59.2 to 222.7 | 12.1 to 14.5 | 1 to 2 | 0 |
+| 400 MB | 384.4 to 550.7 | 92.4 to 112.1 | 1 to 2 | 1 to 4 |
+| 1000 MB | 1,232.2 to 1,294.9 | 111.3 to 122.0 | 2 | 5 to 8 |
+
+Before, no server stored a log entry until its snapshot was stored. Now a
+server stores log entries between two chunks of the snapshot. The puts of
+about 100 ms that remain are caused by the disk that the servers share:
+two processes that are not peace servers and that each write a checkpoint
+of 1000 MB to this disk at the same time measure single writes of 61 to
+72 ms and single chunks of 130 ms. One such process alone measures at most
+13 ms and 19 ms. With the default `snapshot_offset`, the servers take
+their snapshots at different indexes.
+
+Two causes of a pause were found and removed:
+
+- `term_to_binary/1` allocates the encoding as one binary. The allocation
+  of 1000 MB stopped every process of the node for 30 to 70 ms. The
+  encoding now uses `erlang:term_to_iovec/1`, which stopped another process
+  for at most 0.75 ms in the same test.
+- A sync of the whole checkpoint at the end. The write-ahead log now syncs
+  each chunk.
 
 ### Value size
 
@@ -396,7 +455,7 @@ tested.
   10 cores and one disk.
 - The dets and wal results depend on the cost of a sync on this disk. The cost was
   not measured separately. The results do not transfer to another disk.
-- Each configuration was run once. The variance between runs was not
+- Each configuration was run once, except in the two snapshot suites. The variance between runs was not
   measured.
 - The clients are closed-loop. A closed-loop client sends no request while
   it waits, so the latency figures understate the latency that an open
@@ -404,8 +463,12 @@ tested.
 - The restart test reads files that the operating system has in its page
   cache. A restart after a reboot of the machine reads the file from
   disk and takes longer.
-- The largest machine state tested is 100 MB. The largest value tested is
-  100 kB.
+- The largest machine state tested is 1000 MB, and only in the two
+  snapshot suites. The machine state in those suites consists of binaries
+  of 65,536 bytes, which the encoding does not copy. A machine state of
+  small terms was not tested. The largest value tested is 100 kB.
+- The two snapshot suites measure one client that sends 100 puts per
+  second. They do not measure throughput.
 - The leader failure test kills the node. The other nodes observe a closed
   connection. A network partition and a paused process were not tested.
 - Membership change under load was not measured.

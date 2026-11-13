@@ -18,6 +18,12 @@
 %% that earlier entry instead of the entry of the batch. This module then
 %% changes the ETS table to match, and the two states do not differ.
 %%
+%% This module stores a snapshot in steps (see `peace_storage'). The ETS
+%% table changes in the last step. With `disk => {Mod, Args}', the steps
+%% are the steps of that backend, if the backend has them. Otherwise there
+%% are two steps, so that a run can perform writes and kill the server
+%% between the start and the end of a snapshot.
+%%
 %% The shipped `peace_storage_dets' runs under the simulation in this way.
 %% The dets calls of `peace_storage_dets' go to `eta_dets'. `eta_dets' keeps
 %% the file but is not dets. The simulation therefore tests how the backend
@@ -26,7 +32,7 @@
 
 -behaviour(peace_storage).
 
--export([open/2, write/2, close/1]).
+-export([open/2, write/2, close/1, snapshot_begin/2, snapshot_continue/1]).
 -export([promised/2, entries/2, snapshot_index/2, decided/3]).
 
 open(Id, Args = #{tab := Tab}) ->
@@ -62,6 +68,10 @@ stored(Tab, Id) ->
         [] -> Stored1
     end.
 
+write(Batch, {Tab, Id, Disk0, Snapshot}) ->
+    %% A write between two steps of a snapshot.
+    {ok, {Tab, Id, Disk}} = write(Batch, {Tab, Id, Disk0}),
+    {ok, {Tab, Id, Disk, Snapshot}};
 write(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
     %% No code between the two writes yields to the scheduler, so a kill
     %% cannot happen between the two writes.
@@ -89,6 +99,37 @@ write(Batch, State = {Tab, Id, none}) ->
             ok
     end,
     {ok, State}.
+
+snapshot_begin(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
+    case erlang:function_exported(Mod, snapshot_begin, 2) of
+        true ->
+            {more, Disk} = eta_net:with_node(Node, fun() -> Mod:snapshot_begin(Batch, Disk0) end),
+            {more, {Tab, Id, {Mod, Disk, Node}, Batch}};
+        false ->
+            {more, {Tab, Id, {Mod, Disk0, Node}, Batch}}
+    end;
+snapshot_begin(Batch, {Tab, Id, none}) ->
+    {more, {Tab, Id, none, Batch}}.
+
+snapshot_continue({Tab, Id, {Mod, Disk0, Node}, Batch}) ->
+    case erlang:function_exported(Mod, snapshot_continue, 1) of
+        true ->
+            case eta_net:with_node(Node, fun() -> Mod:snapshot_continue(Disk0) end) of
+                {more, Disk} ->
+                    {more, {Tab, Id, {Mod, Disk, Node}, Batch}};
+                {done, Disk} ->
+                    %% The last step of the backend synced every entry.
+                    ok = note_unsynced(Batch, Tab, Id),
+                    {ok, _} = write(Batch, {Tab, Id, none}),
+                    {done, {Tab, Id, {Mod, Disk, Node}}}
+            end;
+        false ->
+            {ok, State} = write(Batch, {Tab, Id, {Mod, Disk0, Node}}),
+            {done, State}
+    end;
+snapshot_continue({Tab, Id, none, Batch}) ->
+    {ok, State} = write(Batch, {Tab, Id, none}),
+    {done, State}.
 
 %% Records, for each index of a batch that is not synced, the entry that the
 %% index held before the batch. A synced batch makes every earlier batch
@@ -153,6 +194,8 @@ decided(Tab, Id, Batch) ->
         maps:get(entries, Batch, [])
     ).
 
+close({Tab, Id, Disk, _Snapshot}) ->
+    close({Tab, Id, Disk});
 close({_Tab, _Id, {Mod, Disk, Node}}) ->
     eta_net:with_node(Node, fun() -> peace_storage:close(Mod, Disk) end);
 close(_State) ->

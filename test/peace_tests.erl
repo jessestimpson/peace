@@ -13,6 +13,7 @@ peace_test_() ->
         fun flexible_quorum_survives_what_majority_cannot/1,
         fun durable_restart/1,
         fun sessions_snapshots_and_leases/1,
+        fun snapshot_in_chunks/1,
         fun change_members/1,
         fun machine_effects/1,
         fun unsafe_quorum_is_refused/1,
@@ -171,6 +172,30 @@ sessions_snapshots_and_leases(Ids0) ->
             {ok, ok, NewLeader} = Put(7),
             {ok, 7, NewLeader} = peace:propose(NewLeader, {get, 7})
         end)}.
+
+%% A server that restarts without data receives a snapshot. The snapshot
+%% is larger than one chunk.
+snapshot_in_chunks(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    Opts = (fast())#{snapshot_interval => 4, snapshot_chunk_bytes => 64},
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
+        Leader = await_leader(Ids),
+        [Behind | _] = Ids -- [Leader],
+        ok = peace:stop_server(Behind),
+        [{ok, ok, Leader} = peace:propose(Leader, {put, N, binary:copy(<<N>>, 100)}) || N <- lists:seq(1, 20)],
+        #{snapshot_index := Snapshot} = peace:overview(Leader),
+        ?assert(Snapshot >= 16),
+        ok = peace:start_server(Opts#{id => Behind, members => Ids, machine => ?TEST_MACHINE}),
+        Expected = history(Leader),
+        ?assert(erlang:external_size(Expected) > 20 * 64),
+        ok = await(fun() ->
+            case history(Behind) of
+                Expected -> {ok, ok};
+                _ -> retry
+            end
+        end)
+    end).
 
 %% This test removes one server and adds one server, with real processes.
 change_members(Ids0) ->

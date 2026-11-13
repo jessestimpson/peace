@@ -39,6 +39,8 @@ The environment variable `NODES` selects the nodes. The default is
 | `--faults LIST` | `partition,kill,pause` | A comma-separated list of `partition`, `kill`, `pause`, `members` and `quorums`, or `none`. |
 | `--quorum SPEC` | `majority` | The quorum system: `majority`, `counting:Q1:Q2`, `grid:R` for rows of `R` nodes, or `weighted:W+W+...` for the weights of the nodes. |
 | `--read-lease-ms MS` | off | The `read_lease_ms` option of the cluster. |
+| `--snapshot-interval COUNT` | 4096 | The `snapshot_interval` option of the servers. |
+| `--chunk-bytes BYTES` | 262,144 for a transfer, 1,048,576 in the write-ahead log | The size of a chunk of a snapshot. With a small interval and a small chunk size, servers send and store snapshots in several chunks during a run. |
 | `--clock-rate-spread PERCENT` | 0 | The width of the range of the clock rates of the nodes. With 8, each start of a node picks a rate between 0.96 and 1.04. |
 | `--wall-clock-skew` | off | Each start of a node picks a wall clock offset between -1 hour and +1 hour and a wall clock rate between 0.5 and 2. |
 | `--nemesis-interval SECONDS` | 10 | The mean time between two fault operations. |
@@ -138,6 +140,7 @@ Erlang/OTP 28.
 | `majority` | 4 | partition, pause, quorums; interval 15 s | 180 s | 1,535 | 1,736 | 81 | 30 | linearizable |
 | `majority`, read leases of 100 ms, clock rate spread 8%, wall clock skew | 5 | partition, kill, pause | 300 s | 2,210 | 3,362 | 84 | 63 | linearizable |
 | `majority`, read leases of 100 ms, clock rate spread 100% | 5 | partition | 180 s | 2,239 | 1,274 | 14 | 22 | linearizable |
+| `majority`, snapshot every 20 indexes, chunks of 64 bytes (run on 2026-11-13) | 5 | partition, kill, pause, members | 300 s | 1,474 | 4,146 | 82 | 89 | linearizable |
 
 Most failed operations are refused connections and `no_leader` answers
 while nodes are down or isolated. The other failed operations are
@@ -153,6 +156,11 @@ In the three runs with `quorums`, 8 changes were confirmed: 3 to majority,
 2 to counting, 2 to a grid and 1 to weighted. 7 more had an unknown
 outcome. An earlier run with `quorums` and the default fault interval of
 10 seconds was linearizable, and none of its 16 changes was confirmed.
+
+The run with a snapshot every 20 indexes and chunks of 64 bytes makes the
+servers store each snapshot in several chunks, and send a snapshot in
+several chunks to a server that is behind. The number of snapshots that
+were sent in that run was not counted.
 
 The run with a clock rate spread of 100% is outside the assumption of read
 leases. The run found no violation. It therefore does not show that the

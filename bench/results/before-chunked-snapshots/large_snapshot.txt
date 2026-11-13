@@ -1,0 +1,16 @@
+Three runs of bench/run.sh large_snapshot, with the harness of this commit
+and the library of commit 7ee3e50.
+
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Machine state | Caught up ms | Before: p50 ms | Before: p99 ms | Before: max ms | During: p50 ms | During: p99 ms | During: max ms |
+|---|---|---|---|---|---|---|---|
+| 100 MB | 55.3 | 0.65 | 10.3 | 10.8 | 0.83 | 9.64 | 9.64 |
+| 400 MB | 164.3 | 0.64 | 8.15 | 10.3 | 0.77 | 46.3 | 46.3 |
+| 1000 MB | 316.2 | 0.64 | 10.1 | 10.1 | 0.54 | 117.3 | 117.3 |
+| 100 MB | 50.4 | 0.67 | 3.03 | 8.96 | 0.69 | 10.2 | 10.2 |
+| 400 MB | 184.0 | 0.64 | 11.6 | 16.5 | 0.68 | 48.5 | 48.5 |
+| 1000 MB | 313.8 | 0.60 | 11.9 | 12.0 | 0.48 | 119.4 | 119.4 |
+| 100 MB | 50.6 | 0.61 | 11.8 | 59.3 | 0.83 | 21.7 | 21.7 |
+| 400 MB | 163.6 | 0.63 | 6.44 | 11.8 | 0.70 | 46.1 | 46.1 |
+| 1000 MB | 312.8 | 0.60 | 3.67 | 6.05 | 0.47 | 125.8 | 125.8 |

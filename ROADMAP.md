@@ -172,9 +172,16 @@ scope depends on the results of milestone 1.
 - [ ] Bound the mailbox of a server. A leader refuses a value only when it
       handles the value. Values that arrive faster than the leader handles
       them wait in the mailbox without a bound.
-- [ ] Transfer and store snapshots in chunks. A snapshot is currently one
-      term in one message, which blocks the distribution channel while it is
-      sent.
+- [x] Transfer and store snapshots in chunks. Done on 2026-11-13. A server
+      sends a snapshot in chunks of `snapshot_chunk_bytes` bytes, and the
+      receiver asks for one chunk at a time. The write-ahead log writes a
+      snapshot as one record per chunk, and the storage process performs
+      other writes between two chunks.
+- [ ] Bound the memory that a snapshot needs. The machine state is one
+      term. A server encodes the whole snapshot into one binary to send it
+      or to store it, and decodes the whole binary to receive it. A bound
+      needs a machine callback that produces and consumes the state in
+      parts.
 - [ ] Evaluate a transport that is separate from Erlang distribution for
       large messages.
 

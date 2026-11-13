@@ -3,7 +3,7 @@
 #
 # Usage: bench/run.sh <suite>...
 # Suites: smoke, quick, slow_disk, throughput, value_size, propose_to, reads, failover,
-#         restart, catch_up, all.
+#         restart, catch_up, large_snapshot, snapshot_storage, all.
 #
 # PEACE_BENCH_NODE_FLAGS sets extra emulator flags for the server nodes.
 set -e
