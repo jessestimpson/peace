@@ -72,8 +72,9 @@ Remaining limitations:
 - A checkpoint rewrites the whole machine state. See milestone 4.
 - The log is shortened only by a snapshot. With
   `snapshot_interval => infinity` the log grows without limit.
-- There is no procedure for a member whose storage failed. See the recovery
-  item in milestone 5.
+- There is no procedure for a member whose storage failed. See the
+  replacement rule in "Memory nodes", which also applies to disk servers,
+  and the forced recovery item in milestone 5.
 
 ### Milestone 3: Validation on real nodes
 
@@ -210,8 +211,32 @@ Goal: an operator can run, observe, maintain and upgrade a cluster.
 - [ ] Add a non-voting stage for a joining server. A server currently counts
       toward quorums before it has caught up, which can delay commits.
 - [ ] Add leader transfer, for use before a node is stopped.
-- [ ] Add a documented procedure and an API to recover a cluster that has
-      permanently lost a phase-one quorum.
+- [ ] Add member tags and leadership pinning. Each member has a set of
+      tags, for example its datacenter or its region. The tags are part of
+      the configuration and are changed with `change_members`. A pinning
+      rule names the tags of the servers that may campaign. When a server
+      with a pinned tag is reachable, a server without the tag does not
+      campaign, and a leader without the tag transfers leadership to a
+      server with the tag. Example: under `{counting, 4, 2}` with two
+      servers on each coast and one in the centre, a pin to `east` keeps
+      the leader and its phase-two quorum on the east coast.
+- [ ] Add operator-driven forced recovery for a cluster that has
+      permanently lost a phase-one quorum. Example: under
+      `{counting, 4, 2}` over five servers, both servers on one coast fail
+      while the leader is on that coast. The 3 remaining servers cannot
+      elect a leader, so `change_members` cannot run. The operator names
+      the surviving servers and a new quorum system, and the surviving
+      servers adopt that configuration without a phase-one quorum of the
+      old configuration. The procedure accepts these consequences:
+  - Data loss. A value that was decided only by the lost servers is not on
+    any surviving server, although a client received an acknowledgement.
+  - Split brain. A lost server that returns with the old configuration can
+    form quorums of the old configuration and decide different values. The
+    procedure must state that the operator has to destroy or fence the lost
+    servers. The recovered cluster should have a new cluster identity, and
+    servers should reject messages that carry the old identity.
+  - The API and the documentation must name both consequences. The
+    recovery must be logged.
 - [ ] Add a version field to messages, stored entries and snapshots.
 - [ ] Add state machine versioning, so that the machine code can be upgraded
       on a running cluster.
@@ -300,6 +325,39 @@ table.
 A server that loses its acceptor state must not answer under its old id. A
 new incarnation is a new acceptor that has promised nothing.
 
+Member identity: a member is identified by `{Node, Incarnation}`. The
+incarnation is created when the storage is created, and is stored in the
+storage. The incarnation therefore changes exactly when the acceptor state
+is lost.
+
+| Storage | When the incarnation is created | Value |
+|---|---|---|
+| ETS table | When the supervisor creates the table | `make_ref()` |
+| Disk | When the data directory is initialised | A unique value written to the data directory |
+
+The Erlang node `creation` value is not used as the incarnation. The
+creation value changes when the node restarts, which does not match the
+lifetime of the acceptor state:
+
+| Event | Creation changes | Acceptor state lost |
+|---|---|---|
+| The node restarts, memory node | yes | yes |
+| The peace application restarts and the node keeps running, memory node | no | yes |
+| The node restarts, disk node | yes | no |
+
+In the second row, an identity based on creation would let a server answer
+under its old identity without its promises. That is unsafe. In the third
+row, the server would be replaced although its state is still valid. A
+reference from `make_ref()` contains the creation value of the node, so it
+also changes when the node restarts.
+
+Replacement rule: when a server joins with the same node as a member and a
+different incarnation, the leader replaces the old member with the new
+server. The new server is not added as an extra member. The replacement
+takes the place of the old member in the configuration: its row and column
+in a grid quorum system, its weight in a weighted quorum system, and its
+tags.
+
 - [ ] Check what the thesis
       ([docs/UCAM-CL-TR-935.pdf](docs/UCAM-CL-TR-935.pdf)) assumes about
       stable storage, and state in the documentation where memory nodes
@@ -308,16 +366,27 @@ new incarnation is a new acceptor that has promised nothing.
       `ordered_set` table in `init/1`. The key is `{ServerName, Key}`. A
       group of events is written with one `ets:insert/2` call, which is
       atomic.
-- [ ] Add an incarnation to the server id. The incarnation is created with
-      the table and stored in the table. Every message carries the
-      incarnation of the sender and of the destination. A server drops a
-      message for another incarnation.
-- [ ] Define how a new incarnation replaces the old incarnation in a grid
-      quorum system, where the rows list server ids.
+- [ ] Identify a member by `{Node, Incarnation}`, with the incarnation
+      created with the storage, for the ETS backend and for the disk
+      backends. Every message carries the incarnation of the sender and of
+      the destination. A server drops a message for another incarnation.
+- [ ] Add a configuration operation that replaces one member with another
+      and keeps the position of the old member: grid row and column,
+      weight and tags. The operation is a membership change through the
+      joint configuration.
 - [ ] Replace on start: a new incarnation starts as a non-member, asks the
-      leader to replace the old incarnation of the same node, and catches
-      up from a snapshot. Several nodes can restart at the same time, and
-      only one membership change runs at a time.
+      leader to replace the member with the same node and a different
+      incarnation, and catches up from a snapshot. Several nodes can
+      restart at the same time, and only one membership change runs at a
+      time. The leader either queues the replacements or combines them
+      into one change.
+- [ ] Use the replace path for a disk server whose data directory was lost
+      or wiped. The server initialises a new data directory, gets a new
+      incarnation, and replaces its old member. This removes the
+      milestone 2 limitation for a member whose storage failed.
+- [ ] Add to the TLA+ membership model a replacement in which the old
+      acceptor has lost its state, and check that a lost incarnation that
+      cannot answer does not break safety.
 - [ ] Refuse to start a memory server that has no state in the table under
       an id that is a member.
 - [ ] Add monitor effects for the machine, as in ra:
