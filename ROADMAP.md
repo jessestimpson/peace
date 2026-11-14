@@ -358,6 +358,61 @@ takes the place of the old member in the configuration: its row and column
 in a grid quorum system, its weight in a weighted quorum system, and its
 tags.
 
+Detection of a lost table: a `persistent_term` key records that a memory
+server created its table during the current lifetime of the node. A
+`persistent_term` key belongs to no process. It lasts until the node stops
+or until code erases it, so it survives a restart of the peace application.
+The server writes the key once, when it creates the table, so the global
+garbage collection that an update of a `persistent_term` causes happens
+once per table.
+
+| Key | Table | Meaning |
+|---|---|---|
+| absent | absent | First start of the server during this lifetime of the node. |
+| present | present | The server process restarted. The state is valid. |
+| present | absent | The table was lost while the node kept running. |
+
+In the third row, the server reports the loss, for example through
+`logger` and `telemetry`. The server then starts with a new incarnation
+and replaces its old member.
+
+Alternative considered: use the Erlang node `creation` value as the
+incarnation, so that the identity is `{Node, Creation}`. In the third row
+of the table above, the server would refuse to start, and the operator
+would restart the node. The loss of the state would then happen only
+together with a node restart.
+
+Advantages of identity based on creation:
+
+- Other nodes can learn the incarnation of a member from any pid on its
+  node, or when the node connects again. The leader does not need a join
+  request from the new incarnation.
+- A pid contains the creation value of its node, and the runtime drops a
+  message sent to a pid of an earlier creation. If servers sent peer
+  messages to pids, the runtime would drop a message addressed to the old
+  incarnation.
+- The rule for operators is that a restarted node is a new member.
+
+Disadvantages, which are the reasons it was not chosen:
+
+- A disk server must not use creation, because its state survives a node
+  restart. Disk servers would still need an incarnation stored in the data
+  directory, so peace would have two identity schemes.
+- Safety depends on a new creation value at each start of the node. Since
+  OTP 23 the value has 32 bits and EPMD assigns it at registration. A
+  custom EPMD module, or a setup without EPMD, can return the same value
+  every time. Two lifetimes of a node would then share one identity.
+- A restart of the peace application that loses the table needs a node
+  restart. The design above replaces the member without operator action.
+- The pid of a server changes when the server process restarts, and the
+  state does not change. Peers would have to learn the new pid. The
+  explicit incarnation checks on messages would still be needed for this
+  case and for the sender check.
+- Safety would depend on the `persistent_term` key. Code that erases the
+  key, or an upgrade that changes the key, would allow a server to answer
+  under its old identity without its state. In the design above, the key
+  only affects reporting.
+
 - [ ] Check what the thesis
       ([docs/UCAM-CL-TR-935.pdf](docs/UCAM-CL-TR-935.pdf)) assumes about
       stable storage, and state in the documentation where memory nodes
@@ -389,6 +444,8 @@ tags.
       cannot answer does not break safety.
 - [ ] Refuse to start a memory server that has no state in the table under
       an id that is a member.
+- [ ] Add the `persistent_term` key that detects a table lost while the
+      node kept running. Report the loss through `logger` and `telemetry`.
 - [ ] Add monitor effects for the machine, as in ra:
       `{monitor, process, Pid}` and `{monitor, node, Node}`. The leader
       performs them and issues them again from `state_enter/2`. The down
