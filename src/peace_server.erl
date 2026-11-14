@@ -112,6 +112,15 @@ log_event(Event) -> Event.
     transfer :: peace_transfer:t(),
     %% The monitor of the process that encodes a snapshot, if one runs.
     encoder :: undefined | reference(),
+    %% The number of client requests that this server holds unhandled. See
+    %% "The mailbox limit".
+    max_mailbox :: pos_integer() | infinity,
+    %% The client requests that were taken from the mailbox and that
+    %% `peace_core' has not yet handled, as events, oldest first.
+    backlog = queue:new() :: queue:queue(peace_core:event()),
+    backlog_len = 0 :: non_neg_integer(),
+    %% Whether a `peace_backlog' message to this process is in the mailbox.
+    backlog_note = false :: boolean(),
     %% A function that is called with every step of `peace_core'. It is set
     %% only in a test build. See `tracer/1'.
     tracer :: undefined | fun((step()) -> term())
@@ -179,20 +188,21 @@ init(Config = #{id := Id}, Writer, Stored) ->
             maps:get(snapshot_chunk_bytes, Config, ?DEFAULT_SNAPSHOT_CHUNK_BYTES), ElectionMs
         ),
         election_ms = ElectionMs,
-        heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5))
+        heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5)),
+        max_mailbox = maps:get(max_mailbox, Config, ?DEFAULT_MAX_MAILBOX)
     },
     State1 = perform(Effects, State),
     ok = trace(State1, {Id, init, undefined, Core, Effects}),
     {ok, State1}.
 
 handle_call({value, Value}, From, State) ->
-    {noreply, event({value, From, Value}, State)};
+    {noreply, request({value, From, Value}, State)};
 handle_call({value, Value, Session}, From, State) ->
-    {noreply, event({value, From, Value, Session}, State)};
+    {noreply, request({value, From, Value, Session}, State)};
 handle_call({reconfigure, New}, From, State) ->
     {noreply, event({reconfigure, From, New}, State)};
 handle_call({consistent_query, Fun}, From, State) ->
-    {noreply, event({query, From, Fun}, State)};
+    {noreply, request({query, From, Fun}, State)};
 handle_call({local_query, Fun}, _From, State = #state{core = Core}) ->
     Reply =
         try
@@ -209,14 +219,23 @@ handle_call(_Other, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
 handle_cast({value, Value}, State) ->
-    {noreply, event({value, undefined, Value}, State)};
+    {noreply, request({value, undefined, Value}, State)};
 handle_cast({value, From = {peace_session, _Pid, _Label}, Value, Session}, State) ->
-    {noreply, event({value, From, Value, Session}, State)};
+    {noreply, request({value, From, Value, Session}, State)};
 handle_cast(trigger_election, State) ->
     {noreply, event(force_election, State)};
 handle_cast(_Other, State) ->
     {noreply, State}.
 
+handle_info(peace_backlog, State0) ->
+    State = State0#state{backlog_note = false},
+    case queue:out(State#state.backlog) of
+        {{value, Event}, Backlog} ->
+            Len = State#state.backlog_len - 1,
+            {noreply, note(event(Event, State#state{backlog = Backlog, backlog_len = Len}))};
+        {empty, _} ->
+            {noreply, State}
+    end;
 handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
     case Timers of
         #{Timer := Ref} ->
@@ -304,7 +323,111 @@ check_quorum1(Config, Members) ->
 %% earlier event are performed. This is safe because `peace_core' is a pure
 %% function.
 event(Event, State) ->
-    handle_stored(flush(drain(?MAX_GROUP - 1, step(Event, State, [])))).
+    handle_stored(flush(drain(?MAX_GROUP - 1, step(Event, shed(State), [])))).
+
+%% == The mailbox limit ==
+%%
+%% A leader refuses a value when it holds `max_pending' undecided values.
+%% `peace_core' makes that decision when it handles the value. A client
+%% request that waits in the mailbox is not yet handled. `max_mailbox'
+%% limits the client requests that wait. A client request is a value or a
+%% consistent query.
+%%
+%% When the mailbox and the backlog together hold more than `max_mailbox'
+%% messages, this module takes every client request out of the mailbox,
+%% oldest first (`pull/1'):
+%%
+%% <ul>
+%% <li>While the backlog holds fewer than `max_mailbox' requests, the
+%%   request is added to the backlog.</li>
+%% <li>Every other request is refused. A leader answers
+%%   `{error, overloaded}'. Another server answers
+%%   `{error, {not_leader, Leader}}'. A value that was sent with
+%%   `peace:propose_async/2' is dropped.</li>
+%% </ul>
+%%
+%% The requests that are refused are therefore the newest. The values of
+%% one session that are kept are a prefix of the values of that session, so
+%% a refusal leaves no gap before a value that is kept.
+%%
+%% While the backlog holds a request:
+%%
+%% <ul>
+%% <li>A client request that arrives is added to the backlog or refused. It
+%%   is not handled before an older request.</li>
+%% <li>`drain/2' handles the messages of peers and of the storage process
+%%   before the requests of the backlog. A leader under load therefore
+%%   continues to decide values and to send heartbeats.</li>
+%% <li>A `peace_backlog' message to this process is in the mailbox, so that
+%%   the backlog is handled when no other message arrives.</li>
+%% </ul>
+%%
+%% The limit is approximate. `message_queue_len' counts every message, and
+%% the mailbox is read once for each group of events.
+
+%% Handles a client request.
+request(Event, State = #state{backlog_len = 0}) ->
+    case over(State) of
+        false -> handle_stored(flush(drain(?MAX_GROUP - 1, step(Event, State, []))));
+        true ->
+            _ = ?COUNT(shed_passes),
+            note(pull(keep(Event, State)))
+    end;
+request(Event, State) ->
+    note(shed(keep(Event, State))).
+
+shed(State) ->
+    case over(State) of
+        true ->
+            _ = ?COUNT(shed_passes),
+            note(pull(State));
+        false ->
+            State
+    end.
+
+over(#state{max_mailbox = infinity}) ->
+    false;
+over(#state{max_mailbox = Max, backlog_len = Len}) ->
+    {message_queue_len, Queued} = erlang:process_info(self(), message_queue_len),
+    Queued + Len > Max.
+
+%% Takes every client request out of the mailbox. The patterns for calls and
+%% casts are the message formats of `gen_server'.
+pull(State) ->
+    receive
+        {'$gen_call', From, {value, Value}} ->
+            pull(keep({value, From, Value}, State));
+        {'$gen_call', From, {value, Value, Session}} ->
+            pull(keep({value, From, Value, Session}, State));
+        {'$gen_call', From, {consistent_query, Fun}} ->
+            pull(keep({query, From, Fun}, State));
+        {'$gen_cast', {value, Value}} ->
+            pull(keep({value, undefined, Value}, State));
+        {'$gen_cast', {value, From = {peace_session, _Pid, _Label}, Value, Session}} ->
+            pull(keep({value, From, Value, Session}, State))
+    after 0 ->
+        State
+    end.
+
+%% Adds a client request to the backlog, or refuses the request.
+keep(Event, State = #state{max_mailbox = Max, backlog = Backlog, backlog_len = Len}) when Len < Max ->
+    State#state{backlog = queue:in(Event, Backlog), backlog_len = Len + 1};
+keep(Event, State = #state{core = Core}) ->
+    _ = ?COUNT(shed_requests),
+    Reply =
+        case peace_core:role(Core) of
+            leader -> {error, overloaded};
+            _ -> {error, {not_leader, peace_core:leader(Core)}}
+        end,
+    effect({reply, element(2, Event), Reply}, State).
+
+%% Makes sure that a `peace_backlog' message is in the mailbox while the
+%% backlog holds a request.
+note(State = #state{backlog_len = Len, backlog_note = false}) when Len > 0 ->
+    self() ! peace_backlog,
+    State#state{backlog_note = true};
+note(State) ->
+    State.
 
 %% Each write that returned produced `stored' events. `peace_core' handles
 %% them before any message that arrives later.
@@ -356,7 +479,7 @@ is_snapshot(_Effect) -> false.
 %% calls and casts are the message formats of `gen_server'.
 drain(0, Acc) ->
     Acc;
-drain(N, {State, Steps}) ->
+drain(N, {State = #state{backlog_len = 0}, Steps}) ->
     receive
         {peace_msg, Peer, Msg} ->
             drain(N - 1, step({msg, Peer, Msg}, State, Steps));
@@ -374,6 +497,19 @@ drain(N, {State, Steps}) ->
             drain(N, {written(Seq, State), Steps})
     after 0 ->
         {State, Steps}
+    end;
+drain(N, {State = #state{backlog = Backlog0, backlog_len = Len}, Steps}) ->
+    %% The backlog holds requests that are older than every client request
+    %% in the mailbox. The messages of peers and of the storage process are
+    %% handled first. See "The mailbox limit".
+    receive
+        {peace_msg, Peer, Msg} ->
+            drain(N - 1, step({msg, Peer, Msg}, State, Steps));
+        {written, Writer, Seq} when Writer =:= State#state.writer ->
+            drain(N, {written(Seq, State), Steps})
+    after 0 ->
+        {{value, Event}, Backlog} = queue:out(Backlog0),
+        drain(N - 1, step(Event, State#state{backlog = Backlog, backlog_len = Len - 1}, Steps))
     end.
 
 %% A test build may supply a function that is called with each step, after

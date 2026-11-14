@@ -242,6 +242,28 @@ with `{error, overloaded}`. The value was not proposed, and the caller can
 submit it again later. A value that is sent with `peace:propose_async/2`
 has no caller to answer, and is dropped.
 
+A server holds at most `max_mailbox` client requests that it has not
+handled (default 16,384). A client request is a value or a consistent
+query. A server that holds more keeps the oldest requests and refuses the
+newest. A leader refuses with `{error, overloaded}`. Another server refuses
+with `{error, {not_leader, Leader}}`. While a server holds requests that it
+took from its mailbox, it handles the messages of the other servers first.
+See "The mailbox limit" in [peace_server](src/peace_server.erl).
+
+A client that submits a refused value again adds load to a leader that is
+overloaded. A client that calls `peace:propose/3` must wait for a random
+time before it submits the value again. A session process does this, and
+also lowers the number of values that it sends:
+
+- The delay before a session process submits values again is random,
+  between 25 and 50 ms after the first error. The range doubles with each
+  further error, up to `retry_ms`.
+- The first `{error, overloaded}` of a round halves the number of values
+  that the session process sends without a reply. Each reply adds 1, up to
+  `window`.
+
+The measurements are in "Overload" in [bench/README.md](bench/README.md).
+
 ### Read leases
 
 By default, `consistent_query/2` puts a no-op through the log. If
@@ -378,6 +400,11 @@ process and submits three values that are undecided at the same time. The
 tests run the faults workload, the faults workload with a leader that holds
 at most two undecided values, and the churn workload.
 
+One test runs the faults workload with `max_mailbox` set to 2, with both
+kinds of client. A server reads the length of its mailbox from the Erlang
+runtime system, which the simulation does not replace. The test therefore
+also checks that three runs of one seed produce the same trace.
+
 Nine invariants are checked after every step. They include agreement across
 the whole run, that a server's memory never holds state its disk does not,
 that a linearizable read returns every value acknowledged before it, and
@@ -513,6 +540,10 @@ The tests in [test/](test/) cover:
   the reply window, and a session table stored by an earlier version
 - the session process: a full window, a gap, a change of leader, a server
   that does not answer, an eviction and a refusing leader
+- the session process and a leader that answers `overloaded`: the delay
+  that doubles, and the number of values sent that halves
+- the mailbox limit: the oldest requests are kept in order, the newest are
+  refused, and the kept values of a session are a prefix
 - a server whose storage write fails: the server stops, sends nothing and is
   not restarted
 
@@ -600,7 +631,14 @@ work required.
 - **A session does not survive its session process.** A client that must
   continue a session after a restart assigns and stores the sequence
   numbers itself.
-- **The throughput of a session process was not measured.**
+- **A refusal costs leader time.** At 3 times the rate that a leader can
+  decide, the benchmark leader applied 13,461 puts per second, against
+  about 85,000 just above that rate.
+- **The mailbox limit is approximate.** A server counts every message in
+  its mailbox, and reads the count once for each group of events. Messages
+  that have not yet arrived at the server are not counted.
+- **The throughput of one session process was not measured.** The
+  benchmark measures 100 to 1,600 session processes together.
 - **Every member must run the same version of the session rules.** Earlier
   versions applied a value with any higher sequence number. A cluster
   with both versions would apply different values.

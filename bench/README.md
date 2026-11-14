@@ -27,12 +27,15 @@ bench/run.sh slow_disk            # puts on 3 servers where one server has a slo
 bench/run.sh throughput reads     # the named suites
 bench/run.sh large_snapshot       # puts while a follower receives a snapshot of up to 1000 MB
 bench/run.sh snapshot_storage     # puts while every server stores a snapshot of up to 1000 MB
+bench/run.sh overload             # puts at a fixed rate above the rate that the leader decides
+bench/run.sh session_overload     # session processes with more undecided values than the leader accepts
 rebar3 as bench eunit             # the tests for peace_kv
 ```
 
 The suites of `make bench` are `throughput`, `value_size`, `propose_to`,
 `reads`, `failover`, `restart` and `catch_up`. The suites `quick`,
-`slow_disk`, `large_snapshot` and `snapshot_storage` are run by name. The
+`slow_disk`, `large_snapshot`, `snapshot_storage`, `overload` and
+`session_overload` are run by name. The
 two snapshot suites need about 8 GB of free memory.
 
 The environment variable `PEACE_BENCH_NODE_FLAGS` sets extra emulator flags
@@ -228,6 +231,62 @@ Two causes of a pause were found and removed:
   for at most 0.75 ms in the same test.
 - A sync of the whole checkpoint at the end. The write-ahead log now syncs
   each chunk.
+
+### Overload
+
+3 servers with wal. Each configuration was run once. The session suite was
+run three times during development, and the figure for 400 sessions varied
+between 40,525 and 64,328 puts per second.
+
+**Puts at a fixed rate.** Source:
+[results/overload.txt](results/overload.txt). 8 processes send puts to the
+leader for 10 s at a fixed rate, and do not wait for replies. "No limit" is
+`max_mailbox => infinity`.
+
+| Puts sent per second | Mailbox limit | Puts applied per second | Puts refused | Largest mailbox (messages) | p50 ms | p99 ms | Time to answer every put after the load (ms) | Leader changed |
+|---|---|---|---|---|---|---|---|---|
+| 99,991 | no limit | 84,769 | 152,222 | 22,775 | 156.3 | 321.8 | 126.1 | no |
+| 99,986 | 16,384 | 75,253 | 247,331 | 19,328 | 166.7 | 447.6 | 252.2 | no |
+| 299,963 | no limit | 7,783 | 2,438,028 | 2,374,368 | 264.7 | 52,447.8 | 107,721.1 | yes |
+| 299,962 | 16,384 | 13,461 | 2,865,006 | 18,389 | 1,454.5 | 1,852.0 | 278.9 | no |
+
+The latency columns cover the puts that were applied. The mailbox was read
+every 20 ms.
+
+- At 300,000 puts per second, the limit kept the mailbox under 20,000
+  messages, kept the leader, and answered every put within 0.3 s of the
+  end of the load. Without the limit the mailbox reached 2.4 million
+  messages, the leader changed, and the last answer arrived 108 s after
+  the end of the load.
+- The limit does not keep the throughput. At 300,000 puts per second the
+  leader applied 13,461 puts per second, against about 85,000 at 100,000
+  puts per second. The leader refused 286,500 puts per second, and each
+  refusal is one receive and one message to the client.
+- At 100,000 puts per second, the leader applied 11% fewer puts with the
+  limit than without it.
+
+**Session processes.** Sources:
+[results/session_overload.txt](results/session_overload.txt) and
+[results/before-mailbox-limit/session_overload.txt](results/before-mailbox-limit/session_overload.txt).
+Each session process has a window of 64 values, and one process submits
+puts through it for 10 s as fast as the session accepts them. With 400
+sessions the windows hold 25,600 values, and the leader accepts 8,192
+(`max_pending`). "Before" is commit 6ec7685: a fixed delay of 50 ms, no
+limit on the values sent, and no mailbox limit.
+
+| Sessions | Puts applied per second, before | Puts applied per second, now | Values sent per put applied, before | Values sent per put applied, now |
+|---|---|---|---|---|
+| 100 | 77,641 | 79,169 | 1.01 | 1.01 |
+| 400 | 46,630 | 40,525 | 3.37 | 1.81 |
+| 1,600 | 5,988 | 29,594 | 29.33 | 2.87 |
+
+- With 1,600 sessions, the earlier session process sent each put 29 times
+  on average, and the cluster applied 5,988 puts per second. The session
+  process now sends each put 2.9 times, and the cluster applies 29,594.
+- With 400 sessions the two versions are within the variation between
+  runs.
+- The throughput with 1,600 sessions is still 37% of the throughput with
+  100 sessions.
 
 ### Value size
 
@@ -431,11 +490,10 @@ changes 9 and 10.
    have a 99th percentile of 37.6 ms instead of 6.86 ms. The server process
    then holds the whole log, and its garbage collections take tens of
    milliseconds.
-4. **The mailbox of a server is not bounded.** A leader holds at most
-   `max_pending` undecided values and refuses further values. The leader
-   refuses a value only when it handles the value, so values that arrive
-   faster than the leader handles them wait in its mailbox. The clients of
-   this benchmark are closed-loop and do not reach either limit.
+4. **A refusal costs leader time.** A server holds at most `max_mailbox`
+   client requests and refuses the newest. At 3 times the rate that the
+   leader can decide, the leader applied 16% of the puts that it applied
+   just above that rate. See "Overload".
 5. **Leader failure is detected only by the election timeout.** The time
    without a leader is between 1 and 2 election timeouts. A lower election
    timeout shortens the time in proportion.
@@ -457,7 +515,7 @@ tested.
   not measured separately. The results do not transfer to another disk.
 - Each configuration was run once, except in the two snapshot suites. The variance between runs was not
   measured.
-- The clients are closed-loop. A closed-loop client sends no request while
+- The clients are closed-loop, except in the `overload` suite. A closed-loop client sends no request while
   it waits, so the latency figures understate the latency that an open
   workload with the same request rate would observe.
 - The restart test reads files that the operating system has in its page

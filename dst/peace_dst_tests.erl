@@ -426,6 +426,34 @@ pipelined_sessions_churn_test_() ->
         pipelined(Stats)
     end}.
 
+%% A server refuses the newest client requests when its mailbox and its
+%% backlog hold more than two messages. The test runs the faults workload
+%% with the clients of `overloaded_leader_test_' and with session processes.
+%%
+%% A server reads the length of its mailbox with `process_info/2', which
+%% the simulation does not replace. The test therefore also checks that a
+%% seed produces the same trace in three runs.
+mailbox_limit_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        lists:foreach(
+            fun(Seed) ->
+                Opts = opts(Seed, #{max_mailbox => 2, retry => pipeline}),
+                Traces = [maps:get(trace, run(Opts)) || _ <- lists:seq(1, 3)],
+                ?assertEqual(1, length(lists:usort(Traces)), {seed, Seed})
+            end,
+            [1, 2, 3]
+        ),
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{max_mailbox => 2}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{max_mailbox => 2, retry => pipeline}) end),
+        Stats = #{acknowledged := Acked, runs := Runs} = peace_dst:stats(),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(shed_passes, Stats, 0) >= Runs, Stats),
+        ?assert(maps:get(shed_requests, Stats, 0) >= Runs, Stats),
+        ?assert(maps:get(session_overloaded, Stats, 0) > 0, Stats)
+    end}.
+
 %% A server that applies a value of a session before the value with the
 %% previous sequence number applies the values of the session out of order.
 unordered_sessions_are_caught_test_() ->

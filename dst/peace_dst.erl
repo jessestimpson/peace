@@ -971,7 +971,7 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         %% snapshot in several chunks.
         snapshot_chunk_bytes => maps:get(snapshot_chunk_bytes, Config, 48)
     },
-    Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to, max_pending], Config)),
+    Leased0 = maps:merge(Base, maps:with([read_lease_ms, propose_to, max_pending, max_mailbox], Config)),
     %% The clocks of the servers run at different rates. The clock of every
     %% third server runs at the true rate. The clocks of the other servers
     %% run fast by `clock_drift' per cent, so those servers measure the end

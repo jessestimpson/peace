@@ -193,6 +193,27 @@ suite(snapshot_storage) ->
      || MB <- [100, 400, 1000]
     ],
     ok;
+%% Values that arrive at the leader at a fixed rate that is above the rate
+%% at which the leader decides values. The rate does not depend on the
+%% replies. The suite runs without and with the mailbox limit.
+suite(overload) ->
+    header(overload),
+    [
+        with_cluster(#{servers => 3, storage => wal, opts => #{max_mailbox => Max}}, fun(C) ->
+            overload_trial(C, Max, Rate, 10000)
+        end)
+     || Rate <- [100000, 300000], Max <- [infinity, 16384]
+    ],
+    ok;
+%% Session processes that together have more undecided values than the
+%% leader accepts (`max_pending', 8192).
+suite(session_overload) ->
+    header(session_overload),
+    [
+        with_cluster(#{servers => 3, storage => wal}, fun(C) -> session_overload_trial(C, Sessions, 64, 10000) end)
+     || Sessions <- [100, 400, 1600]
+    ],
+    ok;
 %% The time for a follower to catch up after it missed a number of values.
 %% The heartbeat interval is one fifth of the election timeout.
 suite(catch_up) ->
@@ -597,6 +618,176 @@ snapshot_storage_trial(C = #{ids := Ids}, MB) ->
     ]),
     C.
 
+%% Sends `Rate' puts per second to the leader for `Ms' milliseconds, from 8
+%% processes. A put is a call in the message format of `gen_server', and
+%% the reply goes to this process. The senders do not wait for replies.
+overload_trial(C, Max, Rate, Ms) ->
+    Leader = {Name, Node} = await_leader(C),
+    Pid = erpc:call(Node, erlang, whereis, [Name]),
+    Before = maps:get(promised, overview(Leader)),
+    Self = self(),
+    Sampler = spawn_link(fun() -> sample_mailbox(Node, Pid, 0) end),
+    Senders = 8,
+    Start = now_us(),
+    _ = [spawn_link(fun() -> overload_sender(Leader, Self, Rate div Senders, Start, Ms * 1000, 0) end) || _ <- lists:seq(1, Senders)],
+    Stats = #{sent := Sent, stop := Stop} = collect_replies(
+        #{senders => Senders, sent => 0, stop => 0, ok => [], answered => 0, refused => 0, other => 0}, 60000
+    ),
+    Answered = now_us(),
+    Sampler ! {stop, self()},
+    Largest =
+        receive
+            {largest, L} -> L
+        end,
+    #{ok := Times0, refused := Refused} = Stats,
+    Times = lists:sort(Times0),
+    After = maps:get(promised, overview(await_leader(C))),
+    row(overload, [
+        case Max of
+            infinity -> "no limit";
+            _ -> integer_to_list(Max)
+        end,
+        integer_to_list(round(Sent / (Ms / 1000))),
+        integer_to_list(round(length(Times) / (Ms / 1000))),
+        integer_to_list(Refused),
+        integer_to_list(Sent - maps:get(answered, Stats)),
+        integer_to_list(Largest),
+        ms(percentile(Times, 0.5)),
+        ms(percentile(Times, 0.99)),
+        ms(Answered - Stop),
+        case Before =:= After of
+            true -> "no";
+            false -> "yes"
+        end
+    ]),
+    C.
+
+overload_sender(Leader, Collector, Rate, Start, Us, Sent) ->
+    Elapsed = now_us() - Start,
+    case Elapsed >= Us of
+        true ->
+            Collector ! {sender_done, Sent, now_us()};
+        false ->
+            Due = Elapsed * Rate div 1000000,
+            _ = [
+                erlang:send(Leader, {'$gen_call', {Collector, {put, now_us()}}, {value, {put, rand:uniform(1000), <<0:800>>}}}, [noconnect])
+             || _ <- lists:seq(Sent + 1, Due)
+            ],
+            timer:sleep(1),
+            overload_sender(Leader, Collector, Rate, Start, Us, max(Sent, Due))
+    end.
+
+%% Receives the replies while the senders run. Stops when every sender has
+%% finished and every put has a reply, or when no message arrived for `Ms'
+%% milliseconds.
+collect_replies(Stats = #{senders := 0, sent := Sent, answered := Sent}, _Ms) ->
+    Stats;
+collect_replies(
+    Stats = #{senders := Senders, sent := Sent, ok := Times, answered := Answered, refused := Refused, other := Other}, Ms
+) ->
+    receive
+        {sender_done, Count, At} ->
+            collect_replies(Stats#{senders := Senders - 1, sent := Sent + Count, stop := At}, Ms);
+        {{put, T0}, {ok, _Reply, _Leader}} ->
+            collect_replies(Stats#{ok := [now_us() - T0 | Times], answered := Answered + 1}, Ms);
+        {{put, _T0}, {error, overloaded}} ->
+            collect_replies(Stats#{refused := Refused + 1, answered := Answered + 1}, Ms);
+        {{put, _T0}, _Reply} ->
+            collect_replies(Stats#{other := Other + 1, answered := Answered + 1}, Ms)
+    after Ms ->
+        Stats
+    end.
+
+%% Reads the length of the mailbox of the leader every 20 ms.
+sample_mailbox(Node, Pid, Largest) ->
+    receive
+        {stop, From} -> From ! {largest, Largest}
+    after 20 ->
+        Length =
+            try erpc:call(Node, erlang, process_info, [Pid, message_queue_len], 5000) of
+                {message_queue_len, N} -> N;
+                _ -> 0
+            catch
+                _:_ -> 0
+            end,
+        sample_mailbox(Node, Pid, max(Largest, Length))
+    end.
+
+%% Starts `Sessions' session processes on the controller. One process for
+%% each session submits puts through the session for `Ms' milliseconds, as
+%% fast as the session accepts them. The trial counts the puts whose reply
+%% the submitting process has read, and the values that the session
+%% processes sent to servers.
+session_overload_trial(C = #{ids := Ids}, Sessions, Window, Ms) ->
+    Leader = await_leader(C),
+    Servers = [Leader | Ids -- [Leader]],
+    Self = self(),
+    Applied = counters:new(1, [write_concurrency]),
+    Counter = spawn_link(fun() -> count_sends(0) end),
+    Feeders = [
+        spawn(fun() ->
+            {ok, S} = peace:open_session(Servers, #{window => Window}),
+            _ = erlang:trace(S, true, [send, {tracer, Counter}]),
+            Self ! {ready, self()},
+            receive
+                go -> ok
+            end,
+            session_feeder(S, Applied)
+        end)
+     || _ <- lists:seq(1, Sessions)
+    ],
+    _ = [
+        receive
+            {ready, Feeder} -> ok
+        end
+     || Feeder <- Feeders
+    ],
+    _ = [Feeder ! go || Feeder <- Feeders],
+    timer:sleep(Ms),
+    Count = counters:get(Applied, 1),
+    Counter ! {stop, self()},
+    Sends =
+        receive
+            {sends, N} -> N
+        end,
+    %% A session process is linked to its feeder and stops with it. Each
+    %% session process would log its exit.
+    ok = logger:set_primary_config(level, none),
+    _ = [exit(Feeder, kill) || Feeder <- Feeders],
+    timer:sleep(500),
+    ok = logger:set_primary_config(level, notice),
+    row(session_overload, [
+        integer_to_list(Sessions),
+        integer_to_list(Window),
+        integer_to_list(round(Count / (Ms / 1000))),
+        integer_to_list(Sends),
+        io_lib:format("~.2f", [Sends / max(1, Count)])
+    ]),
+    C.
+
+%% Submits puts until the trial kills this process. `peace:cast/2' waits
+%% while the window of the session is full.
+session_feeder(S, Applied) ->
+    _ = peace:cast(S, {put, rand:uniform(1000), <<0:800>>}),
+    ok = counters:add(Applied, 1, applied_replies(0)),
+    session_feeder(S, Applied).
+
+applied_replies(N) ->
+    receive
+        {peace_reply, _Ref, {ok, _}} -> applied_replies(N + 1);
+        {peace_reply, _Ref, _Other} -> applied_replies(N)
+    after 0 ->
+        N
+    end.
+
+%% Counts the values that session processes send to servers.
+count_sends(N) ->
+    receive
+        {trace, _Pid, send, {'$gen_cast', {value, _From, _Value, _Session}}, _To} -> count_sends(N + 1);
+        {stop, From} -> From ! {sends, N};
+        _ -> count_sends(N)
+    end.
+
 %% Sends a put to the leader every 10 ms, for `Ms' milliseconds, or until
 %% `Fun' returns. Returns the time of each put in microseconds, and
 %% the result of `Fun'.
@@ -654,6 +845,16 @@ header(large_snapshot) ->
 header(snapshot_storage) ->
     io:format(
         "~n| Machine state | Puts | p50 ms | p99 ms | Max ms | Puts over 20 ms |~n|---|---|---|---|---|---|~n",
+        []
+    );
+header(overload) ->
+    io:format(
+        "~n| Mailbox limit | Puts sent/s | Puts applied/s | Puts refused | Puts without a reply | Largest mailbox | p50 ms | p99 ms | Time to answer every put after the load ms | Leader changed |~n|---|---|---|---|---|---|---|---|---|---|~n",
+        []
+    );
+header(session_overload) ->
+    io:format(
+        "~n| Sessions | Window | Puts applied/s | Values sent | Values sent per put applied |~n|---|---|---|---|---|~n",
         []
     );
 header(catch_up) ->

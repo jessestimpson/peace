@@ -1,0 +1,8 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+
+| Mailbox limit | Puts sent/s | Puts applied/s | Puts refused | Puts without a reply | Largest mailbox | p50 ms | p99 ms | Time to answer every put after the load ms | Leader changed |
+|---|---|---|---|---|---|---|---|---|---|
+| no limit | 99991 | 84769 | 152222 | 0 | 22775 | 156.3 | 321.8 | 126.1 | no |
+| 16384 | 99986 | 75253 | 247331 | 0 | 19328 | 166.7 | 447.6 | 252.2 | no |
+| no limit | 299963 | 7783 | 2438028 | 0 | 2374368 | 264.7 | 52447.8 | 107721.1 | yes |
+| 16384 | 299962 | 13461 | 2865006 | 0 | 18389 | 1454.5 | 1852.0 | 278.9 | no |

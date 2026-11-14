@@ -124,6 +124,12 @@
     %% query with `{error, overloaded}' and does not propose it. The default
     %% is 8192. `infinity' means that there is no limit.
     max_pending => pos_integer() | infinity,
+    %% The number of client requests that a server holds unhandled, in its
+    %% mailbox. A server that holds more refuses the newest requests. A
+    %% leader answers `{error, overloaded}'. The default is 16384.
+    %% `infinity' means that there is no limit. See "The mailbox limit" in
+    %% `peace_server'.
+    max_mailbox => pos_integer() | infinity,
     %% With `quorum', a leader sends each proposal only to a phase-two quorum
     %% of acceptors. The other acceptors learn the value on the heartbeat
     %% (thesis section 4.3.3). The default is `all'. See "Proposing to a
@@ -150,6 +156,8 @@
     snapshot_interval => pos_integer() | infinity,
     max_sessions => pos_integer(),
     session_window => pos_integer(),
+    max_pending => pos_integer() | infinity,
+    max_mailbox => pos_integer() | infinity,
     read_lease_ms => pos_integer(),
     propose_to => all | quorum,
     %% The `unsafe_' keys are for tests that plant a bug, to show that a
@@ -282,7 +290,11 @@ propose(ServerOrServers, Value) ->
 %% <li>`{error, no_leader}', `{error, noproc}',
 %%   `{error, too_many_redirects}' and `{error, overloaded}': the value was
 %%   not submitted. `overloaded' means that the leader holds `max_pending'
-%%   undecided values. The caller can submit the value again later.</li>
+%%   undecided values, or more than `max_mailbox' client requests. The
+%%   caller can submit the value again later. A caller that submits the
+%%   value again must first wait for a random time. Callers that submit
+%%   again at once, or after the same fixed time, keep the leader
+%%   overloaded.</li>
 %% </ul>
 %%
 %% The third argument is either a timeout or a map of options.

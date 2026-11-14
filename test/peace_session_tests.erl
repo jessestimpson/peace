@@ -247,3 +247,50 @@ result(Ref) ->
         {peace_reply, Ref, Result} -> Result
     after 2000 -> error(no_result)
     end.
+
+%% The first `overloaded' reply of a round halves the number of values that
+%% the session process sends. Each reply to a value adds one.
+overloaded_halves_the_limit_test() ->
+    {S, [A | _]} = open(#{window => 4}),
+    [R1, R2, R3, R4] = cast_all(S, [v1, v2, v3, v4]),
+    [{A, L1, v1, _}, {A, L2, v2, _}, {A, _L3, v3, _}, {A, _L4, v4, _}] = [sent() || _ <- [1, 2, 3, 4]],
+    answer(S, L1, {error, overloaded}),
+    %% A second `overloaded' reply of the same round changes nothing.
+    answer(S, L2, {error, overloaded}),
+    [{A, M1, v1, _}, {A, M2, v2, _}] = [sent() || _ <- [1, 2]],
+    nothing = sent(150),
+    %% The limit is 3 after this reply. The values 2, 3 and 4 have no reply.
+    answer(S, M1, {ok, r1, A}),
+    [{A, M3, v3, _}, {A, M4, v4, _}] = [sent() || _ <- [1, 2]],
+    [answer(S, L, {ok, r, A}) || L <- [M2, M3, M4]],
+    [{ok, r1}, {ok, r}, {ok, r}, {ok, r}] = [result(R) || R <- [R1, R2, R3, R4]],
+    close(S).
+
+%% The delay before a new round is at least 25 ms after the first error,
+%% at least 50 ms after the second and at least 100 ms after the third. A
+%% reply to a value ends the sequence.
+backoff_doubles_test() ->
+    {S, [A | _]} = open(#{}),
+    [R1] = cast_all(S, [v1]),
+    {A, L1, v1, _} = sent(),
+    Delay = fun(Label) ->
+        Start = erlang:monotonic_time(millisecond),
+        answer(S, Label, {error, overloaded}),
+        {A, Next, _Value, _} = sent(),
+        {erlang:monotonic_time(millisecond) - Start, Next}
+    end,
+    {D1, L2} = Delay(L1),
+    {D2, L3} = Delay(L2),
+    {D3, L4} = Delay(L3),
+    ?assert(D1 >= 25 andalso D1 < 50 + 40, D1),
+    ?assert(D2 >= 50 andalso D2 < 100 + 40, D2),
+    ?assert(D3 >= 100 andalso D3 < 200 + 40, D3),
+    answer(S, L4, {ok, r1, A}),
+    {ok, r1} = result(R1),
+    [R2] = cast_all(S, [v2]),
+    {A, L5, v2, _} = sent(),
+    {D4, L6} = Delay(L5),
+    ?assert(D4 < 50 + 40, D4),
+    answer(S, L6, {ok, r2, A}),
+    {ok, r2} = result(R2),
+    close(S).

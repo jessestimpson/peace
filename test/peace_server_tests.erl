@@ -132,3 +132,89 @@ write_between_snapshot_steps_test() ->
         {snapshot_written, Writer} -> ok
     end,
     ok = peace_writer:stop(Writer).
+
+%% A server holds more client requests than `max_mailbox'. The server keeps
+%% the oldest requests and refuses the newest. The requests that the server
+%% keeps are applied in the order in which they arrived.
+mailbox_limit_test() ->
+    {Id, Pid} = start_single(peace_server_tests_mailbox, #{max_mailbox => 5}),
+    true = erlang:suspend_process(Pid),
+    Refs = [request(Pid, {value, {put, k, N}}) || N <- lists:seq(1, 20)],
+    true = erlang:resume_process(Pid),
+    Replies = [reply(Ref) || Ref <- Refs],
+    ?assertEqual([{ok, ok, Id} || _ <- lists:seq(1, 5)], lists:sublist(Replies, 5)),
+    ?assertEqual([{error, overloaded}], lists:usort(lists:nthtail(5, Replies))),
+    {ok, Puts, Id} = peace:consistent_query(Id, fun(#{history := H}) -> [N || {_I, {put, k, N}} <- lists:reverse(H)] end),
+    ?assertEqual(lists:seq(1, 5), Puts),
+    %% The server accepts values again.
+    ?assertEqual({ok, ok, Id}, peace:propose(Id, {put, k, 21})),
+    ok = gen_server:stop(Pid).
+
+%% The values of a session that a server keeps are the first values of the
+%% session. No value is answered `session_gap'.
+mailbox_limit_keeps_a_prefix_of_a_session_test() ->
+    {Id, Pid} = start_single(peace_server_tests_prefix, #{max_mailbox => 4}),
+    true = erlang:suspend_process(Pid),
+    Refs = [request(Pid, {value, {put, k, N}, {me, N}}) || N <- lists:seq(1, 10)],
+    true = erlang:resume_process(Pid),
+    Replies = [reply(Ref) || Ref <- Refs],
+    ?assertEqual(
+        [{ok, ok, Id} || _ <- lists:seq(1, 4)] ++ [{error, overloaded} || _ <- lists:seq(5, 10)],
+        Replies
+    ),
+    ok = gen_server:stop(Pid).
+
+%% A server that is not the leader refuses with the leader that it knows.
+mailbox_limit_on_a_follower_test() ->
+    Id = {peace_server_tests_follower, node()},
+    Other = {peace_server_tests_absent, node()},
+    {ok, Pid} = peace_server:start_link(#{
+        id => Id,
+        members => [Id, Other, {peace_server_tests_absent2, node()}],
+        machine => {module, peace_test_machine, #{}},
+        storage => {peace_storage_mem, #{}},
+        max_mailbox => 2
+    }),
+    true = erlang:suspend_process(Pid),
+    Refs = [request(Pid, {value, {put, k, N}}) || N <- lists:seq(1, 6)],
+    true = erlang:resume_process(Pid),
+    Replies = [reply(Ref) || Ref <- Refs],
+    ?assertEqual([{error, {not_leader, undefined}}], lists:usort(Replies)),
+    unlink(Pid),
+    ok = gen_server:stop(Pid).
+
+start_single(Name, Opts) ->
+    Id = {Name, node()},
+    {ok, Pid} = peace_server:start_link(Opts#{
+        id => Id,
+        members => [Id],
+        machine => {module, peace_test_machine, #{}},
+        storage => {peace_storage_mem, #{}},
+        election_timeout_ms => 50
+    }),
+    ok = await_leader(Id, 100),
+    {Id, Pid}.
+
+await_leader(Id, 0) ->
+    error({no_leader, Id});
+await_leader(Id, N) ->
+    case peace:overview(Id) of
+        #{role := leader} ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            await_leader(Id, N - 1)
+    end.
+
+%% Sends a call in the message format of `gen_server'. The test process
+%% sends every request itself, so the requests arrive in order.
+request(Pid, Request) ->
+    Ref = make_ref(),
+    Pid ! {'$gen_call', {self(), Ref}, Request},
+    Ref.
+
+reply(Ref) ->
+    receive
+        {Ref, Reply} -> Reply
+    after 5000 -> error(no_reply)
+    end.

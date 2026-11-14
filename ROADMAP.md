@@ -168,15 +168,21 @@ scope depends on the results of milestone 1.
       2026-11-13. The values of a session are applied in the order of
       their sequence numbers, and the servers keep the last
       `session_window` replies of a session. `peace_session` is a client
-      process with up to `window` values undecided. The throughput of a
-      session process was not measured.
+      process with up to `window` values undecided. The throughput of
+      100 to 1,600 session processes together was measured on 2026-11-14.
+      See "Overload" in bench/README.md.
 - [x] Add backpressure. Done on 2026-11-13. A leader that holds
       `max_pending' undecided values answers `{error, overloaded}'. The
       storage process merges every write that waits, so the writes that
       wait are bounded by the arrivals during one sync.
-- [ ] Bound the mailbox of a server. A leader refuses a value only when it
-      handles the value. Values that arrive faster than the leader handles
-      them wait in the mailbox without a bound.
+- [x] Bound the mailbox of a server. Done on 2026-11-14. A server that
+      holds more than `max_mailbox` client requests keeps the oldest and
+      refuses the newest. A session process waits a random time that
+      doubles, and halves the number of values that it sends, when a leader
+      answers `{error, overloaded}`.
+- [ ] Lower the cost of a refusal. At 3 times the rate that a leader can
+      decide, the leader spends most of its time on refusals. See
+      "Overload" in bench/README.md.
 - [x] Transfer and store snapshots in chunks. Done on 2026-11-13. A server
       sends a snapshot in chunks of `snapshot_chunk_bytes` bytes, and the
       receiver asks for one chunk at a time. The write-ahead log writes a

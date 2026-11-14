@@ -39,13 +39,33 @@
 %%   follows at most 3 such replies in one retry time.</li>
 %% <li>a reply of the current round is another error, such as
 %%   `{error, overloaded}' or `{error, leadership_lost}'. The new round
-%%   starts after 50 ms.</li>
+%%   starts after a delay. See "Overload".</li>
 %% <li>no value received a reply for `retry_ms'. The next server in the list
 %%   is the new target.</li>
 %% </ul>
 %%
 %% An error reply of an earlier round is ignored. An `ok' reply is used
 %% whatever its round is.
+%%
+%% == Overload ==
+%%
+%% A leader that is overloaded answers `{error, overloaded}'. A session
+%% process that submitted the refused values again at once, or after a
+%% fixed time, would add load to the leader, and many session processes
+%% would do so at the same moment. The session process therefore does two
+%% things.
+%%
+%% The delay before the new round is random. The delay is between `D / 2'
+%% and `D'. `D' is 50 ms after the first error, and doubles with each
+%% further error until a value receives a reply. `D' is at most `retry_ms'.
+%%
+%% The session process limits the number of values that it has sent and
+%% that have no reply. The limit starts at `window'. The first
+%% `{error, overloaded}' of a round halves the limit. Each reply to a value
+%% adds 1 to the limit, up to `window'. The limit is at least 1. A value
+%% above the limit has a sequence number and is not sent. This is the
+%% method of TCP congestion avoidance (additive increase, multiplicative
+%% decrease).
 %%
 %% == Eviction ==
 %%
@@ -108,7 +128,8 @@
 
 -type result() :: {ok, Reply :: term()} | {error, term()}.
 
-%% The time before a new round after an error reply.
+%% The longest time before a new round after the first error reply. See
+%% "Overload".
 -define(BACKOFF_MS, 50).
 %% The number of `not_leader' replies that are followed in one retry time.
 -define(MAX_HOPS, 3).
@@ -149,7 +170,15 @@
     tick :: reference() | undefined,
     %% Whether a value received a reply in the current retry time.
     progress = false :: boolean(),
-    hops = 0 :: non_neg_integer()
+    hops = 0 :: non_neg_integer(),
+    %% The number of values that may be sent and have no reply. See
+    %% "Overload".
+    limit :: pos_integer(),
+    %% The highest sequence number that was sent in the current round.
+    sent = 0 :: non_neg_integer(),
+    %% The number of error replies that started a delay since a value last
+    %% received a reply.
+    errors = 0 :: non_neg_integer()
 }).
 
 -type reply_to() :: {call, gen_server:from()} | {cast, pid(), reference()}.
@@ -205,6 +234,7 @@ init({Servers, Opts}) ->
         target = hd(Servers),
         id = Id,
         window = maps:get(window, Opts, ?DEFAULT_SESSION_WINDOW),
+        limit = maps:get(window, Opts, ?DEFAULT_SESSION_WINDOW),
         retry_ms = maps:get(retry_ms, Opts, ?DEFAULT_ELECTION_TIMEOUT_MS)
     }}.
 
@@ -265,14 +295,21 @@ admit(State = #state{next = Next, low = Low, window = Window, waiting = Waiting,
         {{value, {Value, ReplyTo, Admission}}, Rest} ->
             _ = Admission =/= undefined andalso gen_server:reply(Admission, ok),
             State1 = State#state{next = Next + 1, pending = Pending#{Next => {Value, ReplyTo}}, waiting = Rest},
-            %% A value is not sent while a new round is about to start. The
-            %% new round sends the value.
-            _ = State1#state.resend =:= undefined andalso send(Next, State1),
             admit(ensure_tick(State1));
         {empty, _} ->
-            State
+            pump(State)
     end;
 admit(State) ->
+    pump(State).
+
+%% Sends the values that are inside the limit and that were not sent in the
+%% current round, in the order of the sequence numbers. No value is sent
+%% while a new round is about to start. The new round sends the values.
+pump(State = #state{resend = undefined, sent = Sent, low = Low, next = Next, limit = Limit, pending = Pending}) ->
+    Last = min(Next - 1, Low + Limit - 1),
+    _ = [send(Seq, State) || Seq <- lists:seq(max(Sent + 1, Low), Last, 1), is_map_key(Seq, Pending)],
+    State#state{sent = max(Sent, Last)};
+pump(State) ->
     State.
 
 send(Seq, #state{target = Target, id = Id, incarnation = Incarnation, round = Round, pending = Pending}) ->
@@ -280,12 +317,20 @@ send(Seq, #state{target = Target, id = Id, incarnation = Incarnation, round = Ro
     From = {peace_session, self(), {Incarnation, Round, Seq}},
     gen_server:cast(Target, {value, From, Value, {{Id, Incarnation}, Seq}}).
 
-%% Starts a round. Sends every value that has no reply, in the order of the
-%% sequence numbers.
+%% Starts a round. Sends the values that have no reply and that are inside
+%% the limit, in the order of the sequence numbers.
 new_round(State0 = #state{round = Round, low = Low, pending = Pending}) ->
-    State = cancel_resend(State0#state{round = Round + 1, round_low = Low}),
+    State = cancel_resend(State0#state{round = Round + 1, round_low = Low, sent = Low - 1}),
     _ = map_size(Pending) > 0 andalso ?COUNT(session_rounds),
-    lists:foreach(fun(Seq) -> send(Seq, State) end, lists:sort(maps:keys(Pending))),
+    pump(State).
+
+%% Starts the delay before a new round, after an error reply. See
+%% "Overload".
+backoff(State = #state{resend = undefined, errors = Errors, retry_ms = RetryMs}) ->
+    Longest = min(RetryMs, ?BACKOFF_MS bsl min(Errors, 16)),
+    Half = Longest div 2,
+    schedule_resend(Half + rand:uniform(Longest - Half + 1) - 1, State#state{errors = Errors + 1});
+backoff(State) ->
     State.
 
 schedule_resend(Ms, State = #state{resend = undefined}) ->
@@ -338,13 +383,23 @@ reply(_Seq, _Round, {error, {not_leader, Leader}}, State = #state{target = Targe
 reply(_Seq, _Round, {error, {not_leader, _Leader}}, State) ->
     %% The retry time selects the next server.
     State;
+reply(_Seq, _Round, {error, overloaded}, State = #state{resend = undefined, limit = Limit}) ->
+    _ = ?COUNT(session_overloaded),
+    backoff(State#state{limit = max(1, Limit div 2)});
 reply(_Seq, _Round, {error, _Reason}, State) ->
-    schedule_resend(?BACKOFF_MS, State).
+    backoff(State).
 
 complete(Seq, Result, State = #state{pending = Pending0, low = Low0, next = Next}) ->
     {{_Value, ReplyTo}, Pending} = maps:take(Seq, Pending0),
     deliver(ReplyTo, Result),
-    State#state{pending = Pending, low = low(Low0, Next, Pending), progress = true}.
+    #state{limit = Limit, window = Window} = State,
+    State#state{
+        pending = Pending,
+        low = low(Low0, Next, Pending),
+        progress = true,
+        errors = 0,
+        limit = min(Window, Limit + 1)
+    }.
 
 low(Low, Next, Pending) when Low < Next, not is_map_key(Low, Pending) ->
     low(Low + 1, Next, Pending);
@@ -359,7 +414,8 @@ evicted(State = #state{pending = Pending, incarnation = Incarnation, round = Rou
         next = 1,
         low = 1,
         round = Round + 1,
-        round_low = 1
+        round_low = 1,
+        sent = 0
     }).
 
 deliver({call, From}, Result) ->

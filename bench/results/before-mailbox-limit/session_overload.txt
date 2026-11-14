@@ -1,0 +1,6 @@
+OTP 28, 10 schedulers on the controller, default emulator flags on the server nodes
+| Sessions | Window | Puts applied/s | Values sent | Values sent per put applied |
+|---|---|---|---|---|
+| 100 | 64 | 77641 | 782401 | 1.01 |
+| 400 | 64 | 46630 | 1573191 | 3.37 |
+| 1600 | 64 | 5988 | 1756343 | 29.33 |

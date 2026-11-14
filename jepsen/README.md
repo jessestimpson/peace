@@ -145,6 +145,7 @@ Erlang/OTP 28.
 | `majority`, read leases of 100 ms, clock rate spread 100% | 5 | partition | 180 s | 2,239 | 1,274 | 14 | 22 | linearizable |
 | `majority`, snapshot every 20 indexes, chunks of 64 bytes (run on 2026-11-13) | 5 | partition, kill, pause, members | 300 s | 1,474 | 4,146 | 82 | 89 | linearizable |
 | `majority`, with `--sessions` (run on 2026-11-13) | 5 | partition, kill, pause, members | 300 s | 2,083 | 2,917 | 151 | 77 | linearizable |
+| `majority`, with `--sessions`, after the mailbox limit and the session backoff (run on 2026-11-14) | 5 | partition, kill, pause, members | 300 s | 1,995 | 3,114 | 105 | 80 | linearizable |
 
 Most failed operations are refused connections and `no_leader` answers
 while nodes are down or isolated. The other failed operations are
