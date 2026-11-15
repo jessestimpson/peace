@@ -41,7 +41,7 @@ A cluster that runs it:
 ```erlang
 {ok, _} = application:ensure_all_started(peace),
 Ids = [{counter, N} || N <- ['a@host', 'b@host', 'c@host']],
-{ok, _Started, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
+{ok, _Formed, []} = peace:start_cluster(Ids, {module, counter, []}, #{}),
 
 {ok, 5, Leader} = peace:propose(Ids, {add, 5}),
 {ok, 5, _} = peace:consistent_query(Leader, fun(Count) -> Count end),
@@ -113,7 +113,7 @@ restarts. The `storage => {Module, Args}` option selects the backend:
 |---|---|
 | `{peace_storage_wal, #{dir => Dir}}` | **Default.** A write-ahead log with a checksum on every record. Durable. The default `Dir` is the application environment variable `data_dir` of `peace`, which defaults to `"peace_data"`. |
 | `{peace_storage_dets, #{dir => Dir}}` | One dets file per server. Durable and slower than the write-ahead log. |
-| `{peace_storage_mem, #{}}` | Stores nothing. State is lost when the process stops. Safe only if a restarted server never rejoins under the same id. For tests. |
+| `{peace_storage_mem, #{}}` | Stores nothing. State is lost when the process stops. A restarted server has a new incarnation and is no longer a member. See "Member identity". For tests. |
 
 A backend implements the [peace_storage](src/peace_storage.erl) behaviour.
 The behaviour has three callbacks, and two optional callbacks that store a
@@ -290,13 +290,76 @@ phase-two quorum of the new one. This prevents the two configurations from
 deciding different values. The change is recorded in the log, so it
 completes even if the leader that started it fails.
 
-Start a new server before adding it, with `members` set to the current
-cluster. It waits until a configuration includes it.
+Start a new server before adding it. A server that starts without stored
+state has no configuration. It waits until a configuration includes it.
 
 ```erlang
-ok = peace:start_server(#{id => D, members => [A, B, C], machine => Machine}),
+ok = peace:start_server(#{id => D, machine => Machine}),
 {ok, ok, _} = peace:change_members([A, B, C], [B, C, D], majority).
 ```
+
+### Member identity
+
+A server is addressed by `{Name, Node}`. A member of a cluster is identified
+by `{Name, Node, Incarnation}`. The API takes and returns addresses.
+
+| Rule | Detail |
+|---|---|
+| Creation | A server creates its incarnation, 16 random bytes, when it starts and recovers no stored state. |
+| Storage | The incarnation is stored with the acceptor state, before the server handles any message. |
+| Messages | Every message between servers names the incarnation of the sender and of the destination. A server drops a message for another incarnation. |
+| Quorums | A configuration names incarnations. A leader counts an answer only from an incarnation that the configuration names. |
+
+A server that has lost its stored state therefore never answers as the
+member that it was. The thesis assumes that the persistent state of a
+participant is unchanged after a restart (section 1.6). For a server that
+has lost its state, peace uses the fail-stop model of section 3.12 of the
+thesis: the acceptor that failed does not return, and a membership change
+restores the fault tolerance.
+
+Formation is separate from start:
+
+| Function | Effect |
+|---|---|
+| `peace:start_server(Config)` | Starts a server. With stored state, the server continues as the member that it was. Without stored state, the server has a new incarnation and no configuration. |
+| `peace:form_cluster(Servers, Quorum)` | Asks every server for its incarnation and stores the first configuration on every server. Every server must be running. A server stores the configuration only if it has none. |
+| `peace:start_cluster(Servers, Machine, Opts)` | Starts the servers and calls `form_cluster`. |
+
+A server does not take its first configuration from its start arguments. A
+server that restarts with the same arguments and without its stored state
+would otherwise answer as a member without the promises of that member.
+
+`peace:replace_member(Servers, Address)` replaces the member at an address
+with the server that now runs at that address. The new server keeps the
+position of the member in the quorum system, for example its row in a
+grid. The change goes through a joint configuration.
+
+```erlang
+%% The server at B lost its disk. It starts with a new incarnation.
+ok = peace:start_server(#{id => B, machine => Machine}),
+{ok, ok, _} = peace:replace_member([A, C], B).
+```
+
+A server that is started with `rejoin => Servers` and without stored state
+asks for the replacement itself. The leader sends a challenge to the
+incarnation that asked and replaces the member only after that incarnation
+answers. A delayed request of an incarnation that no longer runs therefore
+replaces no member. `rejoin` is off by default: a disk that is not mounted
+when a node starts looks like lost state, and several servers with that
+fault would each replace their member and leave their data unused.
+
+Limitations of member identity:
+
+- A replacement needs a leader. The old configuration must still have a
+  phase-one quorum and a phase-two quorum without the member that is
+  replaced. Under `{counting, 4, 2}` over 5 servers, the loss of the state
+  of the leader and of one other server stops the cluster.
+- A data directory that is restored from a backup keeps its incarnation and
+  has lost the promises made after the backup. peace does not detect this.
+- A server does not start on stored state that was written before this
+  version, because that state has no incarnation.
+- `form_cluster` is not atomic. Two calls at the same time must use the
+  same quorum system.
 
 ### Proposing to a phase-two quorum
 
@@ -327,7 +390,7 @@ peace is verified at six levels.
 | Unit tests | The protocol core and the supporting modules | `make test` | seconds |
 | Deterministic simulation | The real server processes under faults | `make dst` | about 8 minutes |
 | Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 4 minutes |
-| Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 2 minutes |
+| Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 7 minutes |
 | Jepsen test | A key-value store on five Docker nodes under partitions, kills, pauses and membership changes | `make jepsen` | minutes per run |
 | Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
@@ -344,14 +407,20 @@ agreement, and that every value a server treats as decided was decided.
 [formal/Reconfig.tla](formal/Reconfig.tla) is a separate model of membership
 change. It was written and checked before the code.
 
-Both models include:
+[formal/Replace.tla](formal/Replace.tla) extends the membership model with
+acceptors that lose their state and with the replace request and its
+challenge. The model was written after the code.
+
+The models include:
 
 - **Mutations.** Each mutation removes one safeguard. TLC must find a
   counterexample for each one. The mutations are: quorums that do not
   intersect, an acceptor that ignores its promise, a deposed leader that
   keeps sending its commit index, a candidate that leads while behind a
-  snapshot, membership change without a joint configuration, and a candidate
-  that asks only the configuration it has applied.
+  snapshot, membership change without a joint configuration, a candidate
+  that asks only the configuration it has applied, an acceptor that loses
+  its state and keeps its identity, and a leader that replaces a member
+  without a challenge.
 - **Reachability checks.** Each one confirms that the model can reach a
   state the properties depend on, such as a decided value.
 
@@ -388,6 +457,13 @@ Workloads:
 | Membership | The cluster moves between five configurations of five servers |
 | dets | The dets backend runs alongside the simulated disk, and the two are compared each time a server reopens its file |
 | Write-ahead log | The write-ahead log backend runs in the same way, on eta's simulated disk. A killed node loses the file data and the directory operations that it did not sync. |
+| Storage loss | Every restart of a server loses the disk of the server. The server starts with a new incarnation and asks to replace the member that it was. The runs also deliver replace requests of incarnations that no longer run. |
+
+Every run forms its cluster inside the simulation: the first operation
+starts the servers, and the second operation collects the incarnations and
+stores the configuration, while faults occur. The operation then asks one
+server to campaign, so that the first election does not wait for an
+election timeout.
 
 In every workload, servers take a snapshot every five indexes and clients
 retry with sessions. A server sends a snapshot in chunks of 48 bytes and
@@ -401,19 +477,24 @@ tests run the faults workload, the faults workload with a leader that holds
 at most two undecided values, and the churn workload.
 
 One test runs the faults workload with `max_mailbox` set to 2, with both
-kinds of client. A server reads the length of its mailbox from the Erlang
+kinds of client. The test also runs session processes with `max_mailbox`
+set to 1 and in the churn workload, because a leader refuses a value of a
+session process more often in those runs. A server reads the length of its mailbox from the Erlang
 runtime system, which the simulation does not replace. The test therefore
 also checks that three runs of one seed produce the same trace.
 
-Nine invariants are checked after every step. They include agreement across
+Ten invariants are checked after every step. They include agreement across
 the whole run, that a server's memory never holds state its disk does not,
-that a linearizable read returns every value acknowledged before it, and
-that the values of a session process are applied in the order of submission.
+that a linearizable read returns every value acknowledged before it, that
+the values of a session process are applied in the order of submission, and
+that a leader accepts a replacement only from a server that ran after the
+leader started its epoch.
 
-Eleven planted bugs confirm that the suite can fail:
+Twelve planted bugs confirm that the suite can fail:
 
 - quorums that do not intersect
-- a disk that loses its contents on restart
+- a server that loses its disk on restart and keeps its incarnation
+- a leader that replaces a member without a challenge
 - a dets backend that does not write promises
 - a write-ahead log that never syncs
 - a deposed leader that does not step down
@@ -452,15 +533,16 @@ Trace validation rejects some runs that pass the simulation's invariants:
 
 | Planted bug | Rejected by the model | Caught by invariants |
 |---|---|---|
-| Quorums that do not intersect | 30 of 30 runs | 6 |
-| Disk that loses its contents | 25 of 30 | 25 |
-| No snapshot guard | 16 of 60 | 15 |
-| Deposed leader does not step down | 2 of 60 | 0 |
+| Quorums that do not intersect | 30 of 30 runs | 9 |
+| Server that loses its disk and keeps its incarnation | 22 of 30 | 22 |
+| No snapshot guard | 13 of 60 | 10 |
+| Deposed leader does not step down | 3 of 60 | 0 |
 
 Limitations:
 
 - It covers only what `FlexiblePaxos.tla` models. Membership change, read
-  leases and sessions are not covered.
+  leases, sessions, the formation of a cluster and the replacement of a
+  member are not covered. The trace names a member by its address.
 - The model's message set contains every message sent. An action passes if
   the messages that justify it were sent, even if the server had not yet
   received them.
@@ -490,17 +572,17 @@ Results:
 
 | Workload | Runs | Operations checked | Result |
 |---|---|---|---|
-| Faults, 3 servers | 40 | 2,594 | linearizable |
-| Churn, 5 servers | 30 | 1,111 | linearizable |
-| `{counting, 4, 2}`, 5 servers | 30 | 1,452 | linearizable |
-| Read leases, clocks 6% fast | 30 | 1,354 | linearizable |
-| Membership change | 30 | 1,531 | linearizable |
+| Faults, 3 servers | 40 | 2,281 | linearizable |
+| Churn, 5 servers | 30 | 1,321 | linearizable |
+| `{counting, 4, 2}`, 5 servers | 30 | 1,642 | linearizable |
+| Read leases, clocks 6% fast | 30 | 1,136 | linearizable |
+| Membership change | 30 | 1,052 | linearizable |
 
 Three planted bugs confirm that Porcupine can reject a history:
 
 | Planted bug | Result |
 |---|---|
-| Clients retry without a session | rejected at seed 3 |
+| Clients retry without a session | rejected at seed 10 |
 | Acceptors ignore read leases | rejected at seed 18 |
 | Quorums that do not intersect | rejected at seed 6 |
 
@@ -516,6 +598,11 @@ Limitations:
 - An append with an unknown outcome is checked only if a read returned its
   value.
 - The histories come from the simulation, not from real nodes.
+- Porcupine has a time limit of 60 seconds for one history. The test
+  repeats a check that does not finish with a limit of 600 seconds. One
+  history of the `{counting, 4, 2}` workload needed 191 seconds. In that
+  run many operations overlap, because clients submitted them before the
+  first leader was elected.
 
 ### Unit tests
 
@@ -546,6 +633,10 @@ The tests in [test/](test/) cover:
   refused, and the kept values of a session are a prefix
 - a server whose storage write fails: the server stops, sends nothing and is
   not restarted
+- member identity: formation, a server without a configuration, a
+  replacement that keeps a grid row, the replace request and its challenge,
+  a request of an incarnation that no longer runs, a message for another
+  incarnation, and stored state that a server refuses to start on
 
 ### Test-only configuration
 
@@ -561,10 +652,10 @@ make test       # unit tests
 make bench      # benchmarks on separate Erlang nodes, about 20 minutes
 make dst        # deterministic simulation, about 8 minutes
 make trace      # trace validation, about 4 minutes
-make porcupine  # linearizability checking with Porcupine, about 2 minutes
+make porcupine  # linearizability checking with Porcupine, about 7 minutes
 make tlc        # quick TLC configs, a few minutes
 make ind        # inductive invariant with Apalache, about 3 minutes
-make tlc-long   # TLC configs with tens of millions of states, about 2 hours
+make tlc-long   # TLC configs with tens of millions of states, about 2.5 hours
 make tlc-soak   # the three-index membership config, about 8 hours
 ```
 
@@ -596,6 +687,7 @@ Requirements:
 | [formal/FlexiblePaxos.tla](formal/FlexiblePaxos.tla) | TLA+ model of the protocol. Comments in `peace_core` name the model action each clause implements. |
 | [formal/FlexiblePaxosInd.tla](formal/FlexiblePaxosInd.tla) | The protocol model restated for Apalache, with the inductive invariant |
 | [formal/Reconfig.tla](formal/Reconfig.tla) | TLA+ model of membership change |
+| [formal/Replace.tla](formal/Replace.tla) | TLA+ model of the replacement of a member that lost its state |
 | [formal/TraceFlexiblePaxos.tla](formal/TraceFlexiblePaxos.tla) | TLA+ spec used for trace validation |
 
 ## Limitations

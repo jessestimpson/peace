@@ -20,6 +20,7 @@ fi
 # The name of the config determines the module that TLC checks.
 case "$CFG" in
   Reconfig*) MODULE="MCReconfig.tla" ;;
+  Replace*) MODULE="MCReplace.tla" ;;
   *) MODULE="MCFlexiblePaxos.tla" ;;
 esac
 OUT="$(mktemp)"

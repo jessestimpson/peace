@@ -93,15 +93,32 @@
 %% Recording. The tracer of the server calls these functions during the run.
 %% ---------------------------------------------------------------------------
 
+%% The model has a fixed set of acceptors, and the harness names a server by
+%% its address. The trace therefore names a member by its address. The
+%% incarnation of a member is removed from everything that is recorded.
+%% Each address has one incarnation in a run of trace validation. The only
+%% such run that loses a disk is a run of the `amnesia' mode, in which a
+%% server keeps its incarnation.
+address({Name, Node, Incarnation}) when is_atom(Name), is_atom(Node), is_binary(Incarnation), byte_size(Incarnation) =:= 16 ->
+    {Name, Node};
+address(Term) when is_tuple(Term) ->
+    list_to_tuple([address(Element) || Element <- tuple_to_list(Term)]);
+address(Term) when is_list(Term) ->
+    [address(Element) || Element <- Term];
+address(Term) when is_map(Term) ->
+    maps:from_list([{address(Key), address(Value)} || {Key, Value} <- maps:to_list(Term)]);
+address(Term) ->
+    Term.
+
 %% Returns the parts of an event that the derivation needs.
 event({msg, Peer, {propose, Epoch, _Entries, Commit, _Stamp}}) ->
-    {propose, Peer, Epoch, Commit};
+    {propose, address(Peer), address(Epoch), Commit};
 event({msg, Peer, {promise, Epoch, Entries, _Snap}}) ->
-    {promise, Peer, Epoch, [I || {I, learned, _Value} <- Entries]};
+    {promise, address(Peer), address(Epoch), [I || {I, learned, _Value} <- Entries]};
 event({msg, Peer, {learned, _Entries}}) ->
-    {learned, Peer};
+    {learned, address(Peer)};
 event({msg, Peer, {install, _Index, _Snapshot}}) ->
-    {install, Peer};
+    {install, address(Peer)};
 event(init) ->
     init;
 event(_Other) ->
@@ -113,19 +130,19 @@ view(undefined) ->
     undefined;
 view(Core) ->
     #{
-        promised => peace_core:promised(Core),
-        log => peace_core:log(Core),
+        promised => address(peace_core:promised(Core)),
+        log => address(peace_core:log(Core)),
         snap => peace_core:snapshot_index(Core),
-        epoch => maps:get(epoch, peace_core:overview(Core))
+        epoch => address(maps:get(epoch, peace_core:overview(Core)))
     }.
 
 sends(Effects) ->
     lists:usort(
         lists:filtermap(
             fun
-                ({send, _To, {prepare, Epoch, _From}}) -> {true, {prepare, Epoch}};
-                ({send, _To, {propose, Epoch, _Entries, Commit, _Stamp}}) -> {true, {propose, Epoch, Commit}};
-                ({send, To, {accept, Epoch, Indexes, _Stamp}}) -> {true, {accept, To, Epoch, Indexes}};
+                ({send, _To, {prepare, Epoch, _From}}) -> {true, {prepare, address(Epoch)}};
+                ({send, _To, {propose, Epoch, _Entries, Commit, _Stamp}}) -> {true, {propose, address(Epoch), Commit}};
+                ({send, To, {accept, Epoch, Indexes, _Stamp}}) -> {true, {accept, address(To), address(Epoch), Indexes}};
                 (_Effect) -> false
             end,
             Effects

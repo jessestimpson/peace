@@ -133,6 +133,7 @@
     gen :: non_neg_integer(),
     fd :: file:io_device(),
     promised :: undefined | peace:epoch(),
+    meta :: undefined | peace_storage:meta(),
     entries :: #{peace:index() => peace_core:entry()},
     chunk :: pos_integer(),
     ckpt :: undefined | #ckpt{}
@@ -157,13 +158,13 @@ open({Name, Node}, Args = #{dir := Base}) ->
             {error, {missing_checkpoint, Dir}};
         false ->
             case read_checkpoint(Dir, Gen) of
-                {ok, Promised0, Snapshot, Entries0} ->
+                {ok, Promised0, Meta0, Snapshot, Entries0} ->
                     _ = [
                         file:delete(path(Dir, G, Ext))
                      || {G, Ext} <- [{G, ".ckpt"} || G <- Ckpts] ++ [{G, ".wal"} || G <- Wals], G =/= Gen
                     ],
-                    case replay(path(Dir, Gen, ".wal"), {Promised0, Entries0}) of
-                        {ok, {Promised, Entries}} ->
+                    case replay(path(Dir, Gen, ".wal"), {Promised0, Meta0, Entries0}) of
+                        {ok, {Promised, Meta, Entries}} ->
                             {ok, Fd} = open_log(Io, Dir, Gen),
                             W = #wal{
                                 dir = Dir,
@@ -171,6 +172,7 @@ open({Name, Node}, Args = #{dir := Base}) ->
                                 gen = Gen,
                                 fd = Fd,
                                 promised = Promised,
+                                meta = Meta,
                                 entries = Entries,
                                 chunk = maps:get(checkpoint_chunk_bytes, Args, ?CHUNK_BYTES)
                             },
@@ -186,12 +188,12 @@ open({Name, Node}, Args = #{dir := Base}) ->
 write(#{snapshot := _}, #wal{ckpt = #ckpt{}}) ->
     {error, checkpoint_in_progress};
 write(Batch = #{snapshot := _}, W) ->
-    {Promised, Entries} = apply_batch(Batch, {W#wal.promised, W#wal.entries}),
-    finish(snapshot_begin(Batch, W#wal{promised = Promised, entries = Entries}));
+    {Promised, Meta, Entries} = apply_batch(Batch, {W#wal.promised, W#wal.meta, W#wal.entries}),
+    finish(snapshot_begin(Batch, W#wal{promised = Promised, meta = Meta, entries = Entries}));
 write(Batch, W) when map_size(Batch) =:= 0 ->
     {ok, W};
-write(Batch, W = #wal{io = Io, fd = Fd, promised = Promised0, entries = Entries0}) ->
-    Record = record(maps:with([promised, entries], Batch)),
+write(Batch, W = #wal{io = Io, fd = Fd, promised = Promised0, meta = Meta0, entries = Entries0}) ->
+    Record = record(maps:with([promised, meta, entries], Batch)),
     case io_write(Io, Fd, Record) of
         ok ->
             %% A record that is written without a sync is covered by the
@@ -203,8 +205,8 @@ write(Batch, W = #wal{io = Io, fd = Fd, promised = Promised0, entries = Entries0
                 end,
             case Synced of
                 ok ->
-                    {Promised, Entries} = apply_batch(Batch, {Promised0, Entries0}),
-                    {ok, W#wal{promised = Promised, entries = Entries}};
+                    {Promised, Meta, Entries} = apply_batch(Batch, {Promised0, Meta0, Entries0}),
+                    {ok, W#wal{promised = Promised, meta = Meta, entries = Entries}};
                 {error, Reason} ->
                     {error, {sync, Reason}}
             end;
@@ -250,7 +252,7 @@ snapshot_continue(W = #wal{dir = Dir, io = Io, gen = Gen0, fd = Fd0, promised = 
     #ckpt{gen = Gen, tmp = Tmp, fd = TmpFd, index = Index, chunks = [], size = Size} = Ckpt,
     Entries = maps:filter(fun(I, _) -> I > Index end, W#wal.entries),
     try
-        ok = io_write(Io, TmpFd, record({checkpoint, Promised, Index, Size, Entries})),
+        ok = io_write(Io, TmpFd, record({checkpoint, Promised, Index, Size, Entries, W#wal.meta})),
         ok = io_sync(Io, TmpFd),
         ok = file:close(TmpFd),
         ok = io_rename(Io, Tmp, path(Dir, Gen, ".ckpt")),
@@ -270,13 +272,13 @@ finish({done, W}) -> {ok, W};
 finish({error, Reason}) -> {error, Reason}.
 
 read_checkpoint(_Dir, 0) ->
-    {ok, undefined, undefined, #{}};
+    {ok, undefined, undefined, undefined, #{}};
 read_checkpoint(Dir, Gen) ->
     File = path(Dir, Gen, ".ckpt"),
     case file:read_file(File) of
         {ok, <<Header:12/binary, Rest/binary>>} when Header =:= ?HEADER ->
             case read_chunks(Rest, []) of
-                {ok, Promised, Snapshot, Entries} -> {ok, Promised, Snapshot, Entries};
+                {ok, Promised, Meta, Snapshot, Entries} -> {ok, Promised, Meta, Snapshot, Entries};
                 damaged -> {error, {damaged_checkpoint, File}}
             end;
         {ok, _} ->
@@ -291,20 +293,27 @@ read_chunks(Bin, Chunks) ->
     case next_record(Bin) of
         {ok, {chunk, Part}, Rest} ->
             read_chunks(Rest, [Part | Chunks]);
+        {ok, {checkpoint, Promised, Index, Size, Entries, Meta}, <<>>} ->
+            read_snapshot(Chunks, Promised, Index, Size, Entries, Meta);
         {ok, {checkpoint, Promised, Index, Size, Entries}, <<>>} ->
-            Ordered = lists:reverse(Chunks),
-            try iolist_size(Ordered) =:= Size andalso {ok, peace_chunks:decode(Ordered)} of
-                false -> damaged;
-                {ok, Snapshot} -> {ok, Promised, {Index, Snapshot}, Entries}
-            catch
-                error:badarg -> damaged
-            end;
+            %% A checkpoint that a version of this module without `meta'
+            %% wrote.
+            read_snapshot(Chunks, Promised, Index, Size, Entries, undefined);
         {ok, {Promised, Snapshot, Entries}, <<>>} when Chunks =:= [] ->
             %% A checkpoint that an earlier version of this module wrote. It
             %% holds the snapshot in one record.
-            {ok, Promised, Snapshot, Entries};
+            {ok, Promised, undefined, Snapshot, Entries};
         _ ->
             damaged
+    end.
+
+read_snapshot(Chunks, Promised, Index, Size, Entries, Meta) ->
+    Ordered = lists:reverse(Chunks),
+    try iolist_size(Ordered) =:= Size andalso {ok, peace_chunks:decode(Ordered)} of
+        false -> damaged;
+        {ok, Snapshot} -> {ok, Promised, Meta, {Index, Snapshot}, Entries}
+    catch
+        error:badarg -> damaged
     end.
 
 %% ---------------------------------------------------------------------------
@@ -400,16 +409,18 @@ record(Term) ->
 %% Internals
 %% ---------------------------------------------------------------------------
 
-apply_batch(Batch, {Promised0, Entries0}) ->
+apply_batch(Batch, {Promised0, Meta0, Entries0}) ->
     {
         maps:get(promised, Batch, Promised0),
+        maps:get(meta, Batch, Meta0),
         maps:merge(Entries0, maps:from_list(maps:get(entries, Batch, [])))
     }.
 
-stored(#wal{promised = Promised, entries = Entries}, Snapshot) ->
+stored(#wal{promised = Promised, meta = Meta, entries = Entries}, Snapshot) ->
     maps:from_list(
         [{entries, Entries}] ++
             [{promised, Promised} || Promised =/= undefined] ++
+            [{meta, Meta} || Meta =/= undefined] ++
             [{snapshot, Snapshot} || Snapshot =/= undefined]
     ).
 

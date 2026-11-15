@@ -157,6 +157,27 @@
 %% `peace_dst_trace' converts the rows into actions of
 %% `formal/FlexiblePaxos.tla', and `peace_dst_trace_tests' runs TLC on them.
 %%
+%% == Storage loss ==
+%%
+%% With `storage_loss' on, the disk of a server is empty after every
+%% restart. A restarted server therefore has a new incarnation and no
+%% configuration. Every server is started with `rejoin', so the restarted
+%% server asks the cluster to replace the member that it was. See "Member
+%% identity" in `peace_server'.
+%%
+%% The `rumour' operation of such a run delivers a replace request of an
+%% incarnation that no longer runs, when one exists. The message represents
+%% a request that was delayed in the network.
+%%
+%% The invariant `replacement_is_live' applies to every run. A leader
+%% holds a server as verified only if the server ran at some time after
+%% the leader became leader.
+%%
+%% == Formation ==
+%%
+%% The first operation of a run starts every server. The second operation
+%% forms the cluster of the founders. See `peace_dst_client:form/3'.
+%%
 %% == Planted bugs ==
 %%
 %% `mode' selects one planted bug. The suite uses the planted bugs to show
@@ -166,7 +187,13 @@
 %% <li>`unsafe_quorums' - the quorum system is `{counting, 2, 1}' over three
 %%   servers, and the quorum validation of the server is switched off. These
 %%   are the same constants as `formal/FPaxosUnsafeQuorums.cfg'.</li>
-%% <li>`amnesia' - the disk of a server is empty after a restart.</li>
+%% <li>`amnesia' - the disk of a server is empty after a restart, and the
+%%   server has the same incarnation as before. The server answers as the
+%%   member that it was, without its promises.</li>
+%% <li>`no_challenge' - with `storage_loss', a leader accepts a replace
+%%   request without a challenge. A request of an incarnation that no
+%%   longer runs then replaces a member. This mode shows that
+%%   `replacement_is_live' can fail.</li>
 %% <li>`lossy_disk' - with `disk => dets', the dets backend runs behind a
 %%   layer that does not write promises. This mode shows that
 %%   `disk_recovers' can fail.</li>
@@ -294,6 +321,14 @@ init(_Seed, Config) ->
         tab => Tab,
         n => N,
         ids => Ids,
+        founders => Founders,
+        quorum =>
+            case Mode of
+                unsafe_quorums -> {counting, 2, 1};
+                _ -> maps:get(quorum, Config, majority)
+            end,
+        formed => false,
+        storage_loss => storage_loss(Mode, Config),
         configs => Configs,
         faults => maps:get(faults, Config, true),
         churn => maps:get(churn, Config, false),
@@ -338,6 +373,8 @@ processes(#{n := N, ops := Ops, sups := Sups, pipes := Pipes}) ->
 %% operation makes no random draw.
 generate(#{booted := false}, Rand) ->
     {boot, Rand};
+generate(#{formed := false}, Rand) ->
+    {form, Rand};
 generate(S = #{reconfigure := true}, Rand0) ->
     %% A run with `reconfigure' on makes one more random draw per operation
     %% than a run with `reconfigure' off. The extra draw is made only in
@@ -354,11 +391,23 @@ generate(S = #{reconfigure := true}, Rand0) ->
 generate(S, Rand) ->
     generate1(S, Rand).
 
-generate1(#{n := N, faults := Faults, churn := Churn}, Rand0) ->
+generate1(#{n := N, faults := Faults, churn := Churn, storage_loss := Loss}, Rand0) ->
     {Roll, Rand1} = rand:uniform_s(Rand0),
     {I, Rand2} = rand:uniform_s(N, Rand1),
     Op =
         if
+            %% A run with `storage_loss' kills and restarts servers, and
+            %% delivers replace requests of servers that no longer run.
+            %% A crash is rare, because every crash is the permanent loss of
+            %% one member. A cluster that loses a phase-one quorum of its
+            %% members and its leader decides nothing more.
+            Loss, Roll < 0.60 -> {value, I};
+            Loss, Roll < 0.72 -> {query, I};
+            Loss, Roll < 0.75 -> {isolate, I};
+            Loss, Roll < 0.82 -> heal;
+            Loss, Roll < 0.84 -> {crash, I};
+            Loss, Roll < 0.93 -> {restart, I};
+            Loss -> {rumour, I};
             Churn, Roll < 0.45 -> {value, I};
             Churn, Roll < 0.53 -> {query, I};
             Churn, Roll < 0.68 -> {elect, I};
@@ -453,23 +502,43 @@ execute({split, I, J}, S = #{n := N}) ->
     ),
     bump(splits),
     S;
-execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N}) ->
+execute(form, S = #{founders := Founders, quorum := Quorum}) ->
+    spawn_op(clients, fun() -> peace_dst_client:form(Founders, Quorum, 40) end, S#{formed := true});
+execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N, storage_loss := Loss}) ->
     Decided = lists:sort([{Index, Value} || [Index, Value] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
-    case lists:nthtail(max(0, length(Decided) - 4), Decided) of
-        [] ->
-            S;
-        Latest ->
+    To = lists:nth(I, Ids),
+    From = lists:nth(I rem N + 1, Ids),
+    %% The message is sent from the node of the receiver. The message
+    %% represents a message that was already in flight before the cuts that
+    %% exist now were made.
+    case {Loss, retired(Tab, From), lists:nthtail(max(0, length(Decided) - 4), Decided), view(To), view(From)} of
+        {true, [Retired | _], _, _, _} ->
+            bump(stale_requests),
+            spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, Retired, any, replace_request) end, S);
+        {_, _, Latest = [_ | _], {live, ToCore}, {live, FromCore}} ->
             bump(rumours),
-            To = lists:nth(I, Ids),
-            From = lists:nth(I rem N + 1, Ids),
-            %% The message is sent from the node of the receiver. The message
-            %% represents a message that was already in flight before the
-            %% cuts that exist now were made.
-            spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, From, {learned, Latest}) end, S)
+            {Sender, Receiver} = {peace_core:id(FromCore), peace_core:id(ToCore)},
+            spawn_op(
+                node_name(I), fun() -> peace_dst_client:deliver(To, Sender, Receiver, {learned, Latest}) end, S
+            );
+        _ ->
+            S
     end;
 execute(boot, S = #{n := N}) ->
     lists:foldl(fun(I, Acc) -> execute({restart, I}, Acc) end, S#{booted := true}, lists:seq(1, N));
-execute({restart, I}, S = #{configs := Configs}) ->
+execute({restart, I}, S = #{storage_loss := true, n := N}) ->
+    %% A run with `storage_loss' restarts the first server at or after `I'
+    %% that does not run, so that most servers that lose their disk ask to
+    %% be replaced before the run ends.
+    Down = [J || K <- lists:seq(0, N - 1), J <- [(I - 1 + K) rem N + 1], server_pid(J) =:= undefined],
+    case Down of
+        [J | _] -> restart(J, S);
+        [] -> S
+    end;
+execute({restart, I}, S) ->
+    restart(I, S).
+
+restart(I, S = #{configs := Configs}) ->
     case server_pid(I) of
         undefined ->
             Config = maps:get(I, Configs),
@@ -492,7 +561,9 @@ check(#{tab := Tab, ids := Ids}) ->
     _ = [ok = peace_dst_storage:decided(Tab, Id, Batch) || Id <- Ids, Batch <- inflight(Id)],
     Record = decided_record(Tab),
     ok = note_leaders(Views),
+    ok = note_alive(Tab, Views),
     first_violation([
+        fun() -> replacement_is_live(Tab, Views) end,
         fun() -> disk_recovers(Tab) end,
         fun() -> storage_matches_memory(Tab, Views, Disks) end,
         fun() -> promise_never_regresses(Tab, Disks) end,
@@ -678,17 +749,70 @@ snapshots({Name, Node}) ->
             end
     end.
 
+%% The promise is that of one incarnation. A server that has lost its
+%% storage has a new incarnation, and that incarnation has promised
+%% nothing.
 promise_never_regresses(Tab, Disks) ->
     Regressed = [
         {Id, #{was => Was, now => Now}}
      || {Id, Now, _Stored} <- Disks,
-        Was <- [ets:lookup_element(Tab, {high_promise, Id}, 2, Now)],
-        true = ets:insert(Tab, {{high_promise, Id}, max(Was, Now)}),
+        Key <- [{high_promise, Id, incarnation(Tab, Id)}],
+        Was <- [ets:lookup_element(Tab, Key, 2, Now)],
+        true = ets:insert(Tab, {Key, max(Was, Now)}),
         Now < Was
     ],
     case Regressed of
         [] -> ok;
         _ -> violation(promise_never_regresses, #{servers => Regressed})
+    end.
+
+incarnation(Tab, Id) ->
+    case ets:lookup(Tab, {Id, meta}) of
+        [{_, #{incarnation := Incarnation}}] -> Incarnation;
+        [] -> none
+    end.
+
+%% Records, at each check:
+%%   - the last check at which each member ran,
+%%   - the first check at which each epoch had a leader, and
+%%   - for each address, the members that ran and no longer run.
+note_alive(Tab, Views) ->
+    Now = ets:update_counter(Tab, checks, 1, {checks, 0}),
+    lists:foreach(
+        fun
+            ({Id, {live, Core}}) ->
+                Member = peace_core:id(Core),
+                Earlier = [M || [M] <- ets:match(Tab, {{alive, '$1'}, '_'}), peace_core:address(M) =:= Id, M =/= Member],
+                true = ets:insert(Tab, [{{alive, Member}, Now}, {{retired, Id}, lists:sort(Earlier)}]),
+                case peace_core:overview(Core) of
+                    #{role := leader, epoch := Epoch} -> _ = ets:insert_new(Tab, {{led, Epoch}, Now});
+                    _ -> ok
+                end;
+            (_) ->
+                ok
+        end,
+        Views
+    ).
+
+%% Returns the members that ran at the address `Id' and no longer run.
+retired(Tab, Id) ->
+    ets:lookup_element(Tab, {retired, Id}, 2, []).
+
+%% A leader holds a server as verified only after the server has answered a
+%% challenge of that leader. The server therefore ran at some time after
+%% the leader became leader. A server that stopped earlier must not replace
+%% a member.
+replacement_is_live(Tab, Views) ->
+    Wrong = [
+        #{leader => Id, epoch => Epoch, verified => Member}
+     || {Id, {live, Core}} <- Views,
+        #{role := leader, epoch := Epoch, verified := Verified} <- [peace_core:overview(Core)],
+        Member <- Verified,
+        ets:lookup_element(Tab, {alive, Member}, 2, 0) < ets:lookup_element(Tab, {led, Epoch}, 2, 0)
+    ],
+    case Wrong of
+        [] -> ok;
+        _ -> violation(replacement_is_live, #{servers => Wrong})
     end.
 
 %% The check reads the disks and not the servers, so that the check includes
@@ -775,7 +899,7 @@ current_members(Ids) ->
         Sorted ->
             {_Commit, Furthest} = lists:last(Sorted),
             Members = peace_core:members(proplists:get_value(Furthest, Live)),
-            [{Id, Core} || {Id, Core} <- Live, lists:member(Id, Members)]
+            [{Id, Core} || {Id, Core} <- Live, lists:member(peace_core:id(Core), Members)]
     end.
 
 %% Returns the configurations that a run changes between. Over five servers,
@@ -911,8 +1035,21 @@ stored_promised(Tab, Id) ->
 %% The cluster
 %% ---------------------------------------------------------------------------
 
+storage_loss(Mode, Config) ->
+    Mode =:= no_challenge orelse maps:get(storage_loss, Config, false).
+
 server_config(I, Id, Founders, Mode, Tab, Config) ->
-    Server = server_config1(I, Id, Founders, Mode, Tab, Config),
+    Server0 = server_config1(I, Id, Founders, Mode, Tab, Config),
+    Server =
+        case storage_loss(Mode, Config) of
+            true ->
+                Server0#{
+                    storage => {peace_dst_storage, #{tab => Tab, amnesia => true}},
+                    rejoin => [id(J) || J <- lists:seq(1, maps:get(servers, Config, 3))]
+                };
+            false ->
+                Server0
+        end,
     case Config of
         %% The tracer records every step of every server, in the order in
         %% which the steps were taken. `peace_dst_trace' checks the steps
@@ -937,7 +1074,7 @@ server_config(I, Id, Founders, Mode, Tab, Config) ->
             Server
     end.
 
-server_config1(I, Id, Founders, Mode, Tab, Config) ->
+server_config1(I, Id, _Founders, Mode, Tab, Config) ->
     Storage =
         case {maps:get(disk, Config, model), Mode} of
             {model, _} -> #{tab => Tab};
@@ -953,9 +1090,7 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         end,
     Base = #{
         id => Id,
-        members => Founders,
         machine => {module, peace_dst_machine, []},
-        quorum => maps:get(quorum, Config, majority),
         storage => {peace_dst_storage, Storage},
         %% The election timeout is short relative to the rate of the
         %% workload. A run injects its operations within a few virtual
@@ -994,7 +1129,9 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         no_joint ->
             Leased#{unsafe_no_joint => true};
         unsafe_quorums ->
-            Base#{quorum => {counting, 2, 1}, unsafe_no_quorum_check => true};
+            Base#{unsafe_no_quorum_check => true};
+        no_challenge ->
+            Leased#{unsafe_no_challenge => true};
         no_conflict_step_down ->
             Base#{unsafe_no_conflict_step_down => true};
         no_snapshot_guard ->
@@ -1008,7 +1145,7 @@ server_config1(I, Id, Founders, Mode, Tab, Config) ->
         unsynced_wal ->
             Base;
         amnesia ->
-            Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}}
+            Base#{storage => {peace_dst_storage, #{tab => Tab, amnesia => true}}, unsafe_fixed_incarnation => true}
     end.
 
 %% A server that was starting when the previous run was torn down dies with
@@ -1146,5 +1283,24 @@ record_stats(Tab) ->
         configurations,
         length([ok || [{'$cfg', _Tag, {final, _}}] <- ets:match(Tab, {{decided, '_'}, '$1'})])
     ),
+    %% A member that a decided configuration names and that is not the first
+    %% incarnation at its address replaced a member.
+    Named = lists:usort([
+        M
+     || [{'$cfg', _Tag, {final, {Members, _Spec}}}] <- ets:match(Tab, {{decided, '_'}, '$1'}), M <- Members
+    ]),
+    Seen = lists:sort([{peace_core:address(M), At, M} || [M, At] <- ets:match(Tab, {{alive, '$1'}, '$2'})]),
+    First = maps:values(
+        lists:foldl(fun({Address, _At, M}, Acc) -> maps:put(Address, maps:get(Address, Acc, M), Acc) end, #{}, Seen)
+    ),
+    bump(replaced, length([M || {_Address, _At, M} <- Seen, lists:member(M, Named), not lists:member(M, First)])),
+    %% The number of epochs that had a leader in this run, less the first.
+    %% A suite that does not use the statistics has no table.
+    Led =
+        case ets:whereis(?STATS) of
+            undefined -> 0;
+            _ -> length(ets:match(?STATS, {{led, '_', '_'}, '_'}))
+        end,
+    bump(leader_changes, max(0, Led - 1)),
     catch ets:match_delete(?STATS, {{led, '_', '_'}, '_'}),
     ok.

@@ -100,7 +100,7 @@ start_link(Id = {Name, _Node}, Mod, Args) ->
 %% @doc Sends a write. The storage process answers with
 %% `{written, Pid, Seq}' after the write, and every write before it, has
 %% returned.
--spec write(pid(), pos_integer(), peace_storage:batch()) -> ok.
+-spec write(pid(), non_neg_integer(), peace_storage:batch()) -> ok.
 write(Pid, Seq, Batch) ->
     gen_server:cast(Pid, {write, Seq, Batch}).
 
@@ -236,7 +236,7 @@ merge(Batches) ->
     {Fields, Entries} = lists:foldl(
         fun(Batch, {Fields0, Entries0}) ->
             {
-                maps:merge(Fields0, maps:with([promised, snapshot], Batch)),
+                maps:merge(Fields0, maps:with([promised, meta, snapshot], Batch)),
                 lists:foldl(fun({I, Entry}, Acc) -> Acc#{I => Entry} end, Entries0, maps:get(entries, Batch, []))
             }
         end,

@@ -84,18 +84,23 @@
 
 -export_type([spec/0]).
 
+%% A quorum system holds members. `validate/2' also accepts a quorum system
+%% over addresses, which `peace:start_cluster/3' checks before the
+%% incarnations are known.
+-type id() :: peace:member() | peace:server_id().
+
 -type spec() ::
     majority
     | {counting, Q1 :: pos_integer(), Q2 :: pos_integer()}
-    | {grid, Rows :: [[peace:server_id()]]}
+    | {grid, Rows :: [[id()]]}
     | {module, module(), Arg :: term()}.
 
 %% The callbacks for a custom quorum system. Both callbacks must be monotone:
 %% a superset of a quorum is a quorum. `Set' is always a duplicate-free
 %% subset of `Members'.
--callback is_phase_one_quorum(Arg :: term(), Members :: [peace:server_id()], Set :: [peace:server_id()]) ->
+-callback is_phase_one_quorum(Arg :: term(), Members :: [peace:member()], Set :: [peace:member()]) ->
     boolean().
--callback is_phase_two_quorum(Arg :: term(), Members :: [peace:server_id()], Set :: [peace:server_id()]) ->
+-callback is_phase_two_quorum(Arg :: term(), Members :: [peace:member()], Set :: [peace:member()]) ->
     boolean().
 
 %% Above this many members, exhaustive validation is too expensive. The
@@ -104,7 +109,7 @@
 
 %% @doc Returns whether promises from the members of `Set' are enough to
 %% become leader.
--spec is_phase_one_quorum(spec(), [peace:server_id()], [peace:server_id()]) -> boolean().
+-spec is_phase_one_quorum(spec(), [peace:member()], [peace:member()]) -> boolean().
 is_phase_one_quorum(majority, Members, Set) ->
     2 * count(Members, Set) > length(Members);
 is_phase_one_quorum({counting, Q1, _Q2}, Members, Set) ->
@@ -116,7 +121,7 @@ is_phase_one_quorum({module, Mod, Arg}, Members, Set) ->
 
 %% @doc Returns whether acceptances from the members of `Set' are enough for
 %% a value to be decided.
--spec is_phase_two_quorum(spec(), [peace:server_id()], [peace:server_id()]) -> boolean().
+-spec is_phase_two_quorum(spec(), [peace:member()], [peace:member()]) -> boolean().
 is_phase_two_quorum(majority, Members, Set) ->
     2 * count(Members, Set) > length(Members);
 is_phase_two_quorum({counting, _Q1, Q2}, Members, Set) ->
@@ -128,7 +133,7 @@ is_phase_two_quorum({module, Mod, Arg}, Members, Set) ->
 
 %% @doc Checks that a quorum system is well formed, is safe, and can make
 %% progress when every member is up.
--spec validate(spec(), [peace:server_id()]) -> ok | {error, term()}.
+-spec validate(spec(), [id()]) -> ok | {error, term()}.
 validate(Spec, Members) ->
     case Members =/= [] andalso length(lists:usort(Members)) =:= length(Members) of
         false ->

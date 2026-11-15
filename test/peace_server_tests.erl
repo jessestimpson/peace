@@ -167,10 +167,8 @@ mailbox_limit_keeps_a_prefix_of_a_session_test() ->
 %% A server that is not the leader refuses with the leader that it knows.
 mailbox_limit_on_a_follower_test() ->
     Id = {peace_server_tests_follower, node()},
-    Other = {peace_server_tests_absent, node()},
     {ok, Pid} = peace_server:start_link(#{
         id => Id,
-        members => [Id, Other, {peace_server_tests_absent2, node()}],
         machine => {module, peace_test_machine, #{}},
         storage => {peace_storage_mem, #{}},
         max_mailbox => 2
@@ -183,15 +181,61 @@ mailbox_limit_on_a_follower_test() ->
     unlink(Pid),
     ok = gen_server:stop(Pid).
 
+%% A server handles a message only if the message names its incarnation.
+message_for_another_incarnation_test() ->
+    {Id = {Name, Node}, Pid} = start_single(peace_server_tests_incarnation, #{}),
+    #{member := Me, promised := Promised} = peace:overview(Id),
+    Peer = {peace_server_tests_peer, Node, <<"peer">>},
+    Propose = {propose, {99, Peer}, [], 0, 0},
+    Pid ! {peace_msg, Peer, {Name, Node, <<"another incarnation">>}, Propose},
+    Pid ! {peace_msg, Peer, any, Propose},
+    ?assertMatch(#{promised := Promised, role := leader}, peace:overview(Id)),
+    Pid ! {peace_msg, Peer, Me, Propose},
+    ?assertMatch(#{promised := {99, Peer}}, peace:overview(Id)),
+    ok = gen_server:stop(Pid).
+
+%% A server keeps its incarnation while it keeps its stored state. A server
+%% does not start on stored state that it cannot be the owner of.
+stored_identity_test() ->
+    Dir = filename:join(filename:basedir(user_cache, "peace_tests"), "identity_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Storage = {peace_storage_dets, #{dir => Dir}},
+    Config = fun(Name) -> #{id => {Name, node()}, machine => {module, peace_test_machine, #{}}, storage => Storage} end,
+    Write = fun(Name, Batch) ->
+        {ok, Tab, _} = peace_storage_dets:open({Name, node()}, #{dir => Dir}),
+        {ok, Tab} = peace_storage_dets:write(Batch, Tab),
+        ok = peace_storage_dets:close(Tab)
+    end,
+    try
+        Kept = peace_server_tests_kept,
+        {ok, Pid1} = peace_server:start(Config(Kept)),
+        #{member := Member = {Kept, _, Incarnation}} = peace:overview({Kept, node()}),
+        ?assertEqual(16, byte_size(Incarnation)),
+        ok = gen_server:stop(Pid1),
+        {ok, Pid2} = peace_server:start(Config(Kept)),
+        ?assertMatch(#{member := Member}, peace:overview({Kept, node()})),
+        ok = gen_server:stop(Pid2),
+        %% The stored state of a server on another node.
+        ok = Write(peace_server_tests_moved, #{meta => #{node => 'other@host', incarnation => <<1>>}}),
+        ?assertEqual(
+            {error, {stored_state_of_another_node, 'other@host'}},
+            peace_server:start(Config(peace_server_tests_moved))
+        ),
+        %% A promise that was stored without an incarnation.
+        ok = Write(peace_server_tests_old, #{promised => {1, x}}),
+        ?assertEqual({error, stored_state_without_incarnation}, peace_server:start(Config(peace_server_tests_old)))
+    after
+        file:del_dir_r(Dir)
+    end.
+
 start_single(Name, Opts) ->
     Id = {Name, node()},
     {ok, Pid} = peace_server:start_link(Opts#{
         id => Id,
-        members => [Id],
         machine => {module, peace_test_machine, #{}},
         storage => {peace_storage_mem, #{}},
         election_timeout_ms => 50
     }),
+    {ok, [Id], []} = peace:form_cluster([Id], majority),
     ok = await_leader(Id, 100),
     {Id, Pid}.
 

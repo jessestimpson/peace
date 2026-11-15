@@ -22,6 +22,7 @@
 
 -define(PROMISED, '$promised').
 -define(SNAPSHOT, '$snapshot').
+-define(META, '$meta').
 
 open({Name, Node}, #{dir := Dir}) ->
     File = filename:join(Dir, lists:concat([Name, "@", Node, ".peace"])),
@@ -36,6 +37,8 @@ open({Name, Node}, #{dir := Dir}) ->
                 Acc#{promised => Epoch};
             ({?SNAPSHOT, Snapshot}, Acc) ->
                 Acc#{snapshot => Snapshot};
+            ({?META, Meta}, Acc) ->
+                Acc#{meta => Meta};
             ({Index, Entry}, Acc = #{entries := Entries}) when is_integer(Index) ->
                 Acc#{entries := Entries#{Index => Entry}}
         end,
@@ -45,7 +48,7 @@ open({Name, Node}, #{dir := Dir}) ->
     {ok, Tab, Stored}.
 
 write(Batch, Tab) ->
-    Promised = [{?PROMISED, B} || {promised, B} <- maps:to_list(Batch)],
+    Promised = [{?PROMISED, B} || {promised, B} <- maps:to_list(Batch)] ++ [{?META, M} || {meta, M} <- maps:to_list(Batch)],
     Snapshot = [{?SNAPSHOT, S} || {snapshot, S} <- maps:to_list(Batch)],
     Entries = maps:get(entries, Batch, []),
     case Promised ++ Snapshot ++ Entries of

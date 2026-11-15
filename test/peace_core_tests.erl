@@ -763,6 +763,134 @@ propose_to_quorum_follows_the_configuration_test() ->
     ?assertEqual([d], sent_index(a, 3, S2)).
 
 %% ---------------------------------------------------------------------------
+%% Member identity
+%% ---------------------------------------------------------------------------
+
+%% Servers without a configuration store the configuration that forms the
+%% cluster.
+form_test() ->
+    New = {[a, b, c], majority},
+    S0 = join([a, b, c], new([], majority)),
+    ?assertEqual([], members(a, S0)),
+    S1 = lists:foldl(fun(Id, S) -> ev(Id, {form, {f, Id}, New}, S) end, S0, [a, b, c]),
+    ?assertEqual([ok, ok, ok], [proplists:get_value({f, Id}, replies(S1)) || Id <- [a, b, c]]),
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, run(ev(a, force_election, S1)))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S2))),
+    %% The formation can be repeated. Another configuration is refused.
+    S3 = ev(a, {form, f2, {[a, b], majority}}, ev(a, {form, f1, New}, S2)),
+    ?assertEqual(ok, proplists:get_value(f1, replies(S3))),
+    ?assertEqual({error, already_formed}, proplists:get_value(f2, replies(S3))),
+    %% The configuration is stored.
+    ?assertEqual([a, b, c], members(a, restart(a, S3))).
+
+form_is_refused_test() ->
+    S0 = join([a, d], new([], majority)),
+    S1 = ev(a, {form, f1, {[b, c], majority}}, S0),
+    ?assertEqual({error, {not_named, a}}, proplists:get_value(f1, replies(S1))),
+    S2 = ev(a, {form, f2, {[a, b, c], {counting, 1, 1}}}, S1),
+    ?assertMatch({error, {invalid_quorum, _}}, proplists:get_value(f2, replies(S2))),
+    ?assertEqual([], members(a, S2)),
+    %% A server that learned a configuration from a cluster is not formed
+    %% again.
+    S3 = run(ev(a, force_election, join([d], new([a, b, c], majority)))),
+    S4 = run(ev(a, heartbeat_timeout, run(ev(a, {reconfigure, r1, {[a, b, d], majority}}, S3)))),
+    ?assertEqual([a, b, d], members(d, S4)),
+    S5 = ev(d, {form, f3, {[d], majority}}, S4),
+    ?assertEqual({error, already_formed}, proplists:get_value(f3, replies(S5))).
+
+%% A server without a configuration does not campaign.
+server_without_configuration_test() ->
+    S0 = join([d], new([a, b, c], majority)),
+    S1 = run(ev(d, force_election, run(ev(d, election_timeout, S0)))),
+    ?assertEqual(follower, role(d, S1)),
+    ?assertEqual([], maps:get(sent, S1, [])).
+
+%% A server replaces the member that has its address. The new server takes
+%% the position of the member in the quorum system.
+replace_test() ->
+    {B1, B2} = {{b, n, 1}, {b, n, 2}},
+    Grid = {grid, [[a, B1], [c, d]]},
+    S0 = run(ev(a, force_election, join([B2], new([a, B1, c, d], Grid)))),
+    S1 = run(ev(a, {value, c1, {put, k, 1}}, S0)),
+    %% B1 no longer runs.
+    Dead = [{X, B1} || X <- [a, c, d, B2]] ++ [{B1, X} || X <- [a, c, d, B2]],
+    S2 = run(ev(a, {replace, r1, [B2]}, block(Dead, S1))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(r1, replies(S2))),
+    ?assertEqual({final, {[a, c, d, B2], {grid, [[a, B2], [c, d]]}}}, peace_core:config(core(a, S2))),
+    %% The new server receives the values that were decided before it.
+    S3 = run(ev(a, heartbeat_timeout, S2)),
+    ?assertEqual(#{k => 1}, kv(B2, S3)),
+    ?assertEqual([a, c, d, B2], members(B2, S3)),
+    %% A value is decided with the row of the new server.
+    S4 = run(ev(a, {value, c2, {put, k, 2}}, block(Dead ++ [{a, c}, {a, d}], S3))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(c2, replies(S4))),
+    %% A server that is a member is not replaced again. A server whose
+    %% address names no member is refused.
+    S5 = run(ev(a, {replace, r3, [{x, n, 1}]}, ev(a, {replace, r2, [B2]}, S4))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(r2, replies(S5))),
+    ?assertEqual({error, {not_a_member, {x, n}}}, proplists:get_value(r3, replies(S5))),
+    %% A follower names the leader.
+    S6 = ev(c, {replace, r4, [B2]}, S5),
+    ?assertEqual({error, {not_leader, a}}, proplists:get_value(r4, replies(S6))).
+
+%% A server that starts without a configuration and with `rejoin' asks the
+%% cluster to replace the member that has its address. The leader replaces
+%% the member after the server has answered a challenge.
+rejoin_test() ->
+    {B1, B2} = {{b, n, 1}, {b, n, 2}},
+    Dead = [{X, B1} || X <- [a, c, B2]] ++ [{B1, X} || X <- [a, c, B2]],
+    S0 = block(Dead, run(ev(a, force_election, join([B2], new([a, B1, c], majority, #{rejoin => [a, c]}))))),
+    S1 = run(ev(B2, election_timeout, S0#{sent => []})),
+    ?assertMatch(
+        [{challenge_ok, Nonce}, {challenge, Nonce}, replace_request, replace_request],
+        [Msg || {_From, _To, Msg} <- maps:get(sent, S1)]
+    ),
+    %% The leader replaces the member on its next heartbeat.
+    ?assertEqual([a, c, B1], members(a, S1)),
+    S2 = run(ev(a, heartbeat_timeout, S1)),
+    ?assertEqual({final, {[a, c, B2], majority}}, peace_core:config(core(a, S2))),
+    S3 = run(ev(a, heartbeat_timeout, S2)),
+    ?assertEqual([a, c, B2], members(B2, S3)),
+    %% A member does not ask.
+    S4 = run(ev(c, election_timeout, S3#{sent := []})),
+    ?assertEqual([], [Msg || {_From, _To, Msg = replace_request} <- maps:get(sent, S4)]).
+
+%% A replace request of an incarnation that no longer runs replaces no
+%% member, because that incarnation does not answer the challenge.
+request_of_a_retired_incarnation_test() ->
+    Config = retired(#{}),
+    ?assertEqual({final, {[a, c, {b, n, 2}], majority}}, Config).
+
+%% The planted bug `unsafe_no_challenge' shows what the challenge prevents.
+%% The request of the retired incarnation replaces the member that runs.
+request_without_challenge_test() ->
+    Config = retired(#{unsafe_no_challenge => true}),
+    ?assertEqual({final, {[a, c, {b, n, 1}], majority}}, Config).
+
+%% {b, n, 2} is a member and runs. A replace request of {b, n, 1}, which
+%% no longer runs, arrives late. Returns the configuration of the leader.
+retired(Extra) ->
+    {B1, B2} = {{b, n, 1}, {b, n, 2}},
+    S0 = run(ev(a, force_election, new([a, B2, c], majority, Extra))),
+    S1 = run(ev(a, {msg, B1, replace_request}, block([{a, B1}], S0))),
+    %% An answer that names another challenge is ignored.
+    S2 = run(ev(a, {msg, B1, {challenge_ok, {none, 1}}}, S1)),
+    peace_core:config(core(a, run(ev(a, heartbeat_timeout, run(ev(a, heartbeat_timeout, S2)))))).
+
+%% A member is given to `reconfigure' as a member or as its address. A
+%% reply names the address of the leader.
+reconfigure_with_addresses_test() ->
+    [A, B, C, D] = [{N, n, 1} || N <- [a, b, c, d]],
+    S0 = run(ev(A, force_election, join([D], new([A, B, C], majority)))),
+    S1 = run(ev(A, {reconfigure, r1, {[{a, n}, {b, n}, D], majority}}, S0)),
+    ?assertEqual({ok, ok, {a, n}}, proplists:get_value(r1, replies(S1))),
+    ?assertEqual({final, {[A, B, D], majority}}, peace_core:config(core(A, S1))),
+    S2 = run(ev(A, {reconfigure, r2, {[{a, n}, {x, n}], majority}}, S1)),
+    ?assertEqual({error, {unknown_member, {x, n}}}, proplists:get_value(r2, replies(S2))),
+    S3 = run(ev(B, {value, c1, {put, k, 1}}, S2)),
+    ?assertEqual({error, {not_leader, {a, n}}}, proplists:get_value(c1, replies(S3))).
+
+%% ---------------------------------------------------------------------------
 %% Test helpers: a simulated network held in a map
 %% ---------------------------------------------------------------------------
 
@@ -782,10 +910,17 @@ new(Ids, Quorum, Extra) ->
         replies => []
     }.
 
+%% Starts a member of a cluster that was formed with the members `Ids'.
+%% With no members, the server has only the configuration that it stored.
+start(Id, [], _Quorum, Stored) ->
+    start(Id, Stored);
 start(Id, Ids, Quorum, Stored) ->
+    start(Id, maps:merge(#{meta => #{initial => {lists:usort(Ids), Quorum}}}, Stored)).
+
+start(Id, Stored) ->
     {Core, _Effects} = peace_core:init(
         maps:merge(
-            #{id => Id, members => Ids, machine => ?TEST_MACHINE, quorum => Quorum},
+            #{id => Id, machine => ?TEST_MACHINE},
             case get(extra_config) of
                 undefined -> #{};
                 Extra -> Extra
@@ -795,11 +930,11 @@ start(Id, Ids, Quorum, Stored) ->
     ),
     Core.
 
-%% Starts servers that are not members of the cluster. Each new server is
-%% configured with the members of the cluster.
-join(New, S = #{ids := Ids, quorum := Quorum, cores := Cores, store := Store}) ->
+%% Starts servers that are not members of the cluster. A new server has no
+%% configuration.
+join(New, S = #{cores := Cores, store := Store}) ->
     S#{
-        cores := maps:merge(Cores, maps:from_list([{Id, start(Id, Ids, Quorum, #{})} || Id <- New])),
+        cores := maps:merge(Cores, maps:from_list([{Id, start(Id, #{})} || Id <- New])),
         store := maps:merge(Store, maps:from_list([{Id, #{entries => #{}}} || Id <- New]))
     }.
 
@@ -835,6 +970,10 @@ ev(Id, Event, S = #{cores := Cores}) ->
     Stored = [E || {persist, Batch} <- Effects, E <- peace_core:stored_events(Id, Batch)],
     lists:foldl(fun(E, Acc) -> ev(Id, E, Acc) end, S1, Stored).
 
+effect(Id, {send, {any, Address}, Msg}, S) ->
+    %% In this harness the address of a server without an incarnation is
+    %% its id.
+    effect(Id, {send, Address, Msg}, S);
 effect(Id, {send, To, Msg}, S0 = #{net := Net, blocked := Blocked}) ->
     %% `sent' holds every message sent, whether or not the message is
     %% delivered. The newest message is first.
@@ -851,7 +990,7 @@ effect(Id, {persist, Batch}, S = #{store := Store}) ->
             _ -> Stored0
         end,
     Entries1 = maps:merge(Entries0, maps:from_list(maps:get(entries, Batch, []))),
-    Stored2 = maps:merge(Stored1, maps:with([snapshot], Batch)),
+    Stored2 = maps:merge(Stored1, maps:with([snapshot, meta], Batch)),
     {Floor, _} = maps:get(snapshot, Stored2, {0, none}),
     Stored3 = Stored2#{entries := maps:filter(fun(I, _) -> I > Floor end, Entries1)},
     S#{store := Store#{Id := Stored3}};

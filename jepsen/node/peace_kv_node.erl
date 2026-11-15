@@ -19,6 +19,11 @@
 %% `{peace_kv, node()}'. A node that is started again recovers its state
 %% from the default storage backend, the write-ahead log.
 %%
+%% A node whose server has no configuration tries to form the cluster with
+%% `peace:form_cluster/2', once a second, until the cluster is formed. Every
+%% node does this. The attempts of the nodes store the same configuration,
+%% because each server keeps its incarnation on disk.
+%%
 %% The optional argument `-peace_kv_node read_lease_ms N' sets the
 %% `read_lease_ms' option of the cluster.
 %%
@@ -83,13 +88,12 @@ start() ->
     Config = maps:merge(
         #{
             id => server(),
-            members => Members,
-            machine => peace_kv:machine(),
-            quorum => quorum(arg(quorum, "majority"))
+            machine => peace_kv:machine()
         },
         maps:from_list(Lease ++ Rate ++ Interval ++ Chunks)
     ),
     ok = peace:start_server(Config),
+    _ = spawn(fun() -> form(Members, quorum(arg(quorum, "majority"))) end),
     case arg(sessions, "false") of
         "true" ->
             %% The session process tries the server of this node first. The
@@ -103,6 +107,23 @@ start() ->
     end,
     {ok, _} = peace_kv_http:start(list_to_integer(arg(port, "8080"))),
     ok.
+
+%% Forms the cluster, unless the server of this node has a configuration.
+form(Members, Quorum) ->
+    case peace:overview(server()) of
+        #{members := []} ->
+            case peace:form_cluster(Members, Quorum) of
+                {ok, _Formed, []} ->
+                    ok;
+                {error, {already_formed, _}} ->
+                    ok;
+                _ ->
+                    timer:sleep(1000),
+                    form(Members, Quorum)
+            end;
+        _ ->
+            ok
+    end.
 
 %% The peace server of this node.
 server() ->

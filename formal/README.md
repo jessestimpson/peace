@@ -8,6 +8,7 @@ them.
 | `FlexiblePaxos.tla` | The protocol in [`src/peace_core.erl`](../src/peace_core.erl) | TLC |
 | `FlexiblePaxosInd.tla` | The same protocol, with an inductive invariant | Apalache, and TLC for refinement |
 | `Reconfig.tla` | Membership change | TLC |
+| `Replace.tla` | Replacement of a member that lost its state | TLC |
 | `TraceFlexiblePaxos.tla` | One run of the code, checked against `FlexiblePaxos.tla` | TLC |
 
 Section numbers refer to Heidi Howard's thesis,
@@ -18,7 +19,7 @@ Section numbers refer to Heidi Howard's thesis,
 | Command | What it runs | Time |
 |---|---|---|
 | `./check_all.sh quick` | Small configs, mutations and reachability checks | a few minutes |
-| `./check_all.sh long` | Configs with millions of states | about 2 hours |
+| `./check_all.sh long` | Configs with millions of states | about 2.5 hours |
 | `./check_all.sh soak` | The three-index membership config | about 8 hours |
 | `./check.sh <Config> pass` | One config that must hold | |
 | `./check.sh <Config> fail` | One config that must violate an invariant | |
@@ -373,6 +374,58 @@ Result of `ReconfigThreeIndexes` on 2026-11-11:
 - TLC estimates the probability that a fingerprint collision hid a state at
   0.009 from the observed fingerprints and 0.11 from its conservative
   formula. This is a higher probability than for the other runs.
+
+### Replacement of a member
+
+`Replace.tla` extends `Reconfig.tla`. It models a member that loses its
+state and the replacement of that member. See "Member identity" in
+`peace_core`. The model was written after the code.
+
+The thesis assumes that the persistent state of a participant is unchanged
+after a restart (§1.6). §3.12, "Fail-stop model", describes a participant
+that does not restart, with reconfiguration to restore the fault tolerance.
+The model uses the fail-stop model for an acceptor that loses its state.
+
+The module adds:
+
+- `alive`, the set of acceptors that run. An acceptor in the model is one
+  incarnation of a server.
+- `Lose(a)`. Acceptor `a` loses its state. `a` then stops and never runs
+  again.
+- `Request`, `Challenge` and `Answer`. A leader introduces a joint entry
+  only if every acceptor that the entry adds has answered a challenge of
+  the epoch of the leader.
+- The invariant `ReplacementIsLive`. An acceptor that a joint entry adds
+  ran at some time after the epoch that introduced the entry started.
+
+A message is never removed from the message set, so a request of an
+acceptor that no longer runs can be received at any later time.
+
+`MCReplace.tla` sets the constants:
+
+- Four acceptors. `a0` does not run and stands for the incarnation that
+  lost its state. `a3` runs and stands for the new incarnation.
+- Two configurations with majority quorums: `a0`, `a1`, `a2`, and `a1`,
+  `a2`, `a3`.
+- Two epochs, one value, two indexes, and co-located roles.
+
+| Config | Expected | Result | Set |
+|---|---|---|---|
+| `Replace` | holds: `LearnedAgree` and `ReplacementIsLive`, with every running acceptor able to lose its state | 32.6 million states, 22 minutes | long |
+| `ReplaceNoChallenge` | fails: a leader introduces the entry on the request alone, and `ReplacementIsLive` is violated | violated in seconds | quick |
+| `ReplaceSameIdentity` | fails: an acceptor that loses its state continues with the same identity, and `LearnedAgree` is violated | violated after about 5.7 million states, 4 minutes | long |
+| `ReplaceReachableFinal` | fails: the replacement completes while `a0` never answers | seconds | quick |
+
+Limitations of the replacement model:
+
+- The model does not contain the start of a new incarnation. The acceptor
+  `a3` runs from the initial state.
+- The model does not contain the formation of a cluster.
+- The model does not contain a replacement that an operator requests.
+  peace makes such a replacement without a challenge.
+- An acceptor can answer a challenge and then lose its state. The leader
+  then adds an acceptor that no longer runs. `ReplacementIsLive` allows
+  this case.
 
 ### An error in the first version
 

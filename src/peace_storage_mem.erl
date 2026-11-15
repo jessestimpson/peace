@@ -3,10 +3,14 @@
 %% server process.
 %%
 %% A server that uses this backend and restarts has lost every promise that
-%% it made. Paxos does not tolerate an acceptor that loses its promises. This
-%% backend is safe only if a restarted server never rejoins under the same
-%% id. Use this backend for tests. Use `peace_storage_wal' for everything
-%% else.
+%% it made. Paxos does not tolerate an acceptor that loses its promises. A
+%% restarted server therefore has a new incarnation and no configuration,
+%% and is not the member that it was. The cluster replaces the member with
+%% `peace:replace_member/3', or the server asks for the replacement if it
+%% is started with `rejoin'. See "Member identity" in `peace_server'.
+%%
+%% Every restart of a server is the permanent loss of one member. Use this
+%% backend for tests. Use `peace_storage_wal' for everything else.
 -module(peace_storage_mem).
 
 -behaviour(peace_storage).

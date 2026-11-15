@@ -287,6 +287,40 @@ amnesia_is_caught_test_() ->
         ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
     end}.
 
+%% Every restart of a server loses the disk of the server. The restarted
+%% server has a new incarnation and asks the cluster to replace the member
+%% that it was. The runs also deliver replace requests of incarnations that
+%% no longer run.
+storage_loss_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 40), fun(Seed) -> opts(Seed, #{servers => 5, storage_loss => true}) end),
+        sweep(lists:seq(1, 20), fun(Seed) ->
+            opts(Seed, #{servers => 5, storage_loss => true, quorum => {grid, grid()}})
+        end),
+        Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
+        ?debugFmt("storage loss: ~p", [maps:with([runs, acknowledged, replaced, stale_requests, crashes], Stats)]),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(replaced, Stats, 0) >= Runs div 4, maps:with([replaced, runs, crashes], Stats)),
+        ?assert(maps:get(stale_requests, Stats, 0) > 0, Stats)
+    end}.
+
+%% A grid over the first four of five servers, by address. The fifth server
+%% is a row of its own.
+grid() ->
+    [[peace_dst:id(1), peace_dst:id(2)], [peace_dst:id(3), peace_dst:id(4)], [peace_dst:id(5)]].
+
+%% This test shows that the suite detects a leader that accepts a replace
+%% request without a challenge.
+no_challenge_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        {_Seed, Result} = first_violation(lists:seq(1, 300), fun(Seed) ->
+            opts(Seed, #{mode => no_challenge, servers => 5})
+        end),
+        ?assertMatch({violation, #{property := replacement_is_live}}, maps:get(outcome, Result))
+    end}.
+
 %% This test runs the shipped dets backend under the same faults. Every
 %% server that reopens its file recovers the state that the server wrote,
 %% across kills, snapshots and truncation.
@@ -447,6 +481,14 @@ mailbox_limit_test_() ->
         ok = peace_dst:reset_stats(),
         sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{max_mailbox => 2}) end),
         sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{max_mailbox => 2, retry => pipeline}) end),
+        %% In the sweep above, the servers that refuse a value of a session
+        %% process are mostly servers that are not the leader. The next two
+        %% sweeps make a leader refuse such values: a limit of one message,
+        %% and the churn workload.
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{max_mailbox => 1, retry => pipeline}) end),
+        sweep(lists:seq(1, 20), fun(Seed) ->
+            opts(Seed, #{max_mailbox => 2, retry => pipeline, servers => 5, churn => true})
+        end),
         Stats = #{acknowledged := Acked, runs := Runs} = peace_dst:stats(),
         ?assert(Acked >= Runs * 3, Stats),
         ?assert(maps:get(shed_passes, Stats, 0) >= Runs, Stats),
@@ -499,7 +541,7 @@ first_violation([Seed | Seeds], OptsFun) ->
 %% Asserts that the sweep exercised the behaviour that the sweep is meant to
 %% exercise:
 %%   - clients received acknowledgements of values and answers to queries;
-%%   - leadership changed;
+%%   - leadership changed in at least one run in twenty, on average;
 %%   - servers were cut off, killed and restarted;
 %%   - servers took snapshots;
 %%   - servers received snapshots from other servers, in more than one
@@ -509,14 +551,17 @@ exercised(Stats) ->
         runs := Runs,
         acknowledged := Acked,
         queries_answered := Queries,
-        leaderships := Leaderships,
         isolations := Isolations,
         crashes := Crashes,
         restarts := Restarts
     } = Stats,
     ?assert(Acked >= Runs * 3, Stats),
     ?assert(Queries >= Runs, Stats),
-    ?assert(Leaderships > Runs, Stats),
+    %% `leader_changes' counts, in each run, the epochs that had a leader
+    %% after the first such epoch. With `{counting, 4, 2}' over five
+    %% servers, an election needs four servers, and the leader changed
+    %% about once in ten runs when this limit was set.
+    ?assert(maps:get(leader_changes, Stats, 0) >= Runs div 20, Stats),
     ?assert(Isolations >= Runs, Stats),
     ?assert(Crashes >= Runs, Stats),
     ?assert(Restarts >= Runs div 2, Stats),

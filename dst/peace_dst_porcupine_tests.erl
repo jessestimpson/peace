@@ -25,14 +25,25 @@ check(Name, Seed, Config) ->
     true = ets:delete(Table),
     File = filename:join(["_build", "histories", Name ++ ".json"]),
     ok = peace_dst_history:write(File, Events),
-    Output = os:cmd("dst/check_history.sh " ++ File ++ " 2>&1"),
-    {Verdict, Operations} =
-        case string:lexemes(Output, " \n") of
-            ["ok", N, "operations"] -> {ok, list_to_integer(N)};
-            ["ILLEGAL", N, "operations"] -> {illegal, list_to_integer(N)};
-            _ -> {error, 0}
-        end,
+    {Verdict, Operations, Output} = porcupine(File, "60s"),
     {Verdict, maps:get(outcome, Result), Operations, Output}.
+
+%% Porcupine prints "unknown" when a check does not finish within the time
+%% limit. The check is then repeated with a limit of 600 seconds. A history
+%% in which many operations overlap takes longer than 60 seconds to check.
+porcupine(File, Limit) ->
+    Output = os:cmd("dst/check_history.sh " ++ File ++ " " ++ Limit ++ " 2>&1"),
+    case string:lexemes(Output, " \n") of
+        ["ok", N, "operations"] ->
+            {ok, list_to_integer(N), Output};
+        ["ILLEGAL", N, "operations"] ->
+            {illegal, list_to_integer(N), Output};
+        ["unknown", _N, "operations"] when Limit =:= "60s" ->
+            ?debugFmt("~s: no verdict in 60 seconds, repeating with 600 seconds", [File]),
+            porcupine(File, "600s");
+        _ ->
+            {error, 0, Output}
+    end.
 
 %% Every run must be linearizable according to Porcupine and correct
 %% according to the invariants. Returns the number of operations checked.

@@ -46,6 +46,10 @@
 
 -export([
     start_cluster/3,
+    form_cluster/2,
+    form_cluster/3,
+    replace_member/2,
+    replace_member/3,
     start_server/1,
     stop_server/1,
     propose/2,
@@ -71,6 +75,7 @@
 
 -export_type([
     server_id/0,
+    member/0,
     epoch/0,
     index/0,
     role/0,
@@ -79,9 +84,17 @@
     cluster_opts/0
 ]).
 
-%% A server is identified by a locally registered name and a node, as in ra.
+%% A server is addressed by a locally registered name and a node, as in ra.
+%% Every function of this module takes and returns addresses.
 -type server_id() :: {Name :: atom(), node()}.
--type epoch() :: {Round :: non_neg_integer(), server_id() | none}.
+
+%% A member of a cluster is identified by its address and its incarnation.
+%% A server creates its incarnation when it starts and recovers no stored
+%% state. A server that has lost its stored state is therefore another
+%% member than it was. See "Member identity" in `peace_server' and
+%% `replace_member/3'.
+-type member() :: {Name :: atom(), node(), Incarnation :: binary()}.
+-type epoch() :: {Round :: non_neg_integer(), member() | none}.
 -type index() :: pos_integer().
 -type role() :: follower | candidate | leader.
 
@@ -145,12 +158,19 @@
     read_lease_ms => pos_integer()
 }.
 
+%% A server does not take the members of its cluster from this map. See
+%% `form_cluster/3'.
 -type server_config() :: #{
     id := server_id(),
-    members := [server_id()],
+    %% `peace_server' sets this key from the stored incarnation.
+    member => member(),
     machine := peace_machine:machine(),
-    quorum => peace_quorum:spec(),
     storage => peace_storage:storage(),
+    %% The addresses of servers of a cluster. A server that starts without
+    %% stored state asks these servers to replace the member that has its
+    %% address. Without this key the server waits for `replace_member/3'.
+    %% See `replace_member/3'.
+    rejoin => [server_id()],
     election_timeout_ms => pos_integer(),
     heartbeat_ms => pos_integer(),
     snapshot_interval => pos_integer() | infinity,
@@ -169,6 +189,8 @@
     unsafe_no_lease_fence => boolean(),
     unsafe_no_joint => boolean(),
     unsafe_no_session_order => boolean(),
+    unsafe_no_challenge => boolean(),
+    unsafe_fixed_incarnation => boolean(),
     %% The rate of this server's clock, as `{Num, Den}'. This key is read
     %% only in a test build.
     test_clock_rate => {pos_integer(), pos_integer()},
@@ -197,30 +219,138 @@
 %% Starting and stopping
 %% ---------------------------------------------------------------------------
 
-%% @doc Starts one server on each member's node. Returns the servers that
-%% started and the servers that did not start.
+%% @doc Starts one server on each node and forms a cluster of the servers.
 %%
-%% The `peace' application must be running on every node. A cluster is usable
-%% as soon as a phase-one quorum of its members is running. The first
-%% election happens when an election timeout expires, or immediately if
-%% `trigger_election/1' is called.
+%% The `peace' application must be running on every node. Every server must
+%% start, because the configuration of the cluster names the incarnation of
+%% every member. The first election happens when an election timeout
+%% expires, or immediately if `trigger_election/1' is called.
+%%
+%% The function can be called again with the same arguments after it has
+%% failed. A server that is already running is not started again.
 -spec start_cluster([server_id()], peace_machine:machine(), cluster_opts()) ->
-    {ok, Started :: [server_id()], NotStarted :: [server_id()]} | {error, term()}.
+    {ok, Formed :: [server_id()], NotFormed :: [server_id()]} | {error, term()}.
 start_cluster(ServerIds, Machine, Opts) ->
-    case peace_quorum:validate(maps:get(quorum, Opts, majority), ServerIds) of
+    Quorum = maps:get(quorum, Opts, majority),
+    case peace_quorum:validate(Quorum, ServerIds) of
         ok ->
-            Results = [
-                {Id, start_on(Node, Opts#{id => Id, members => ServerIds, machine => Machine})}
-             || Id = {_Name, Node} <- ServerIds
-            ],
-            Started = [Id || {Id, ok} <- Results],
-            NotStarted = [Id || {Id, Result} <- Results, Result =/= ok],
-            case Started of
-                [] -> {error, cluster_not_formed};
-                _ -> {ok, Started, NotStarted}
+            Config = maps:remove(quorum, Opts),
+            Results = [{Id, start_on(Node, Config#{id => Id, machine => Machine})} || Id = {_Name, Node} <- ServerIds],
+            case [Id || {Id, Result} <- Results, Result =/= ok, Result =/= {error, already_started}] of
+                [] -> form_cluster(ServerIds, Quorum);
+                NotStarted -> {error, {not_started, NotStarted}}
             end;
         {error, Reason} ->
             {error, {invalid_quorum, Reason}}
+    end.
+
+%% @equiv form_cluster(ServerIds, Quorum, 5000)
+-spec form_cluster([server_id()], peace_quorum:spec()) ->
+    {ok, Formed :: [server_id()], NotFormed :: [server_id()]} | {error, term()}.
+form_cluster(ServerIds, Quorum) ->
+    form_cluster(ServerIds, Quorum, ?DEFAULT_CALL_TIMEOUT_MS).
+
+%% @doc Forms a cluster of servers that are running and that have no
+%% configuration. `start_cluster/3' calls this function.
+%%
+%% The function:
+%%
+%% <ol>
+%% <li>asks every server for its incarnation,</li>
+%% <li>builds the configuration from the incarnations and `Quorum', and</li>
+%% <li>stores the configuration on every server.</li>
+%% </ol>
+%%
+%% Formation is separate from `start_server/1' for this reason. A server
+%% that restarts with the same arguments and without its stored state must
+%% not become the member that it was, because that member made promises
+%% that the restarted server does not have. A server therefore takes its
+%% first configuration only from this function, and stores it.
+%%
+%% A quorum system that names members, such as `{grid, Rows}', is given
+%% with addresses. A custom quorum module receives the members as
+%% `member()' terms.
+%%
+%% The function fails, and stores nothing, if a server does not answer or
+%% if a server already has another configuration. The function can be
+%% called again after it has stored the configuration on only some of the
+%% servers. The servers on which the configuration is stored can decide
+%% values if they contain the quorums.
+-spec form_cluster([server_id()], peace_quorum:spec(), timeout()) ->
+    {ok, Formed :: [server_id()], NotFormed :: [server_id()]} | {error, term()}.
+form_cluster(ServerIds, Quorum, Timeout) ->
+    Answers = [{Id, server_call(Id, identity, Timeout)} || Id <- ServerIds],
+    case [Id || {Id, Answer} <- Answers, element(1, Answer) =/= ok] of
+        [] ->
+            Map = maps:from_list([{Id, Member} || {Id, {ok, Member, _Config}} <- Answers]),
+            Members = lists:usort(maps:values(Map)),
+            New = {Members, to_members(Quorum, Map)},
+            Other = [
+                Id
+             || {Id, {ok, _Member, Config}} <- Answers, Config =/= none, Config =/= {final, New}
+            ],
+            case {Other, peace_quorum:validate(element(2, New), Members)} of
+                {[], ok} ->
+                    Results = [{Id, server_call(Id, {form, New}, Timeout)} || Id <- ServerIds],
+                    case [Id || {Id, ok} <- Results] of
+                        [] -> {error, {cluster_not_formed, Results}};
+                        Formed -> {ok, Formed, ServerIds -- Formed}
+                    end;
+                {[], {error, Reason}} ->
+                    {error, {invalid_quorum, Reason}};
+                _ ->
+                    {error, {already_formed, Other}}
+            end;
+        NotRunning ->
+            {error, {not_running, NotRunning}}
+    end.
+
+%% Replaces the addresses that a quorum system names with members.
+to_members({grid, Rows}, Map) when is_list(Rows) ->
+    {grid, [[maps:get(Id, Map, Id) || Id <- Row] || Row <- Rows, is_list(Row)]};
+to_members(Quorum, _Map) ->
+    Quorum.
+
+%% @equiv replace_member(ServerOrServers, New, 5000)
+-spec replace_member(server_id() | [server_id()], server_id()) -> propose_ret().
+replace_member(ServerOrServers, New) ->
+    replace_member(ServerOrServers, New, ?DEFAULT_CALL_TIMEOUT_MS).
+
+%% @doc Replaces the member at the address `New' with the server that now
+%% runs at that address.
+%%
+%% A server that starts without stored state has a new incarnation and no
+%% configuration. The cluster still names the earlier incarnation, which no
+%% longer exists. This function asks the leader to put the running server
+%% in the place of that member. The running server keeps the position of
+%% the member in the quorum system, for example its row in a grid. The
+%% leader makes the change through a joint configuration, as
+%% `change_members/4' does, and the running server then receives the
+%% decided values from the leader.
+%%
+%% `ServerOrServers' are servers of the cluster. `New' must be running.
+%%
+%% A server that is started with `rejoin' asks for the replacement itself.
+%% The leader then sends a challenge to the incarnation that asked, and
+%% replaces the member only after that incarnation answers. The challenge
+%% prevents a delayed request of an incarnation that no longer exists from
+%% replacing a member that runs.
+%%
+%% Use `rejoin' only where a server without stored state is certain to have
+%% lost its state. A disk that is not mounted when the node starts looks
+%% like lost state. Several servers with that fault would each replace
+%% their member and leave the data on their disks unused. For that reason a
+%% server does not ask by default.
+%%
+%% The old configuration must still have a phase-one quorum and a
+%% phase-two quorum without the member that is replaced.
+-spec replace_member(server_id() | [server_id()], server_id(), timeout()) -> propose_ret().
+replace_member(ServerOrServers, New, Timeout) ->
+    case server_call(New, identity, Timeout) of
+        {ok, Member, _Config} ->
+            leader_call(servers(ServerOrServers), {replace, [Member]}, Timeout, ?MAX_HOPS, no_leader);
+        Other ->
+            Other
     end.
 
 start_on(Node, Config) when Node =:= node() ->
@@ -233,8 +363,15 @@ start_on(Node, Config) ->
     end.
 
 %% @doc Starts a server on this node, under the `peace' application. This
-%% function also restarts a stopped server. With a durable storage backend,
-%% the restarted server resumes from its stored state.
+%% function also restarts a stopped server.
+%%
+%% <ul>
+%% <li>A server that recovers stored state resumes from that state, as the
+%%   member that it was.</li>
+%% <li>A server that recovers no stored state creates a new incarnation and
+%%   has no configuration. Such a server becomes a member through
+%%   `form_cluster/3', `change_members/4' or `replace_member/3'.</li>
+%% </ul>
 -spec start_server(server_config()) -> ok | {error, term()}.
 start_server(Config = #{id := {_Name, Node}}) when Node =:= node() ->
     case peace_sup:start_server(Config) of
@@ -498,10 +635,11 @@ change_members(ServerOrServers, Members, Quorum) ->
 %% configuration is in force.
 %%
 %% A server that is being added must be running before the change. Start the
-%% new server with `members' set to the current members of the cluster,
-%% without the new server:
-%% `start_server(#{id => New, members => Current, ...})'. The new server
-%% then waits until it is told about the change. A server that is removed
+%% new server with `start_server/1'. The new server has no configuration
+%% and waits until it is told about the change. This function asks each
+%% server in `Members' that answers for its incarnation. An address whose
+%% server does not answer stands for the member that has that address. A
+%% server that is removed
 %% stops taking part and may then be stopped. If the leader is removed, the
 %% leader completes the change and then steps down.
 %%
@@ -517,7 +655,12 @@ change_members(ServerOrServers, Members, Quorum) ->
 -spec change_members(server_id() | [server_id()], [server_id()], peace_quorum:spec(), timeout()) ->
     propose_ret().
 change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) ->
-    leader_call(servers(ServerOrServers), {reconfigure, {Members, Quorum}}, Timeout, ?MAX_HOPS, no_leader).
+    Map = maps:from_list([
+        {Id, Member}
+     || Id <- Members, {ok, Member, _Config} <- [server_call(Id, identity, Timeout)]
+    ]),
+    New = {[maps:get(Id, Map, Id) || Id <- Members], to_members(Quorum, Map)},
+    leader_call(servers(ServerOrServers), {reconfigure, New}, Timeout, ?MAX_HOPS, no_leader).
 
 %% @doc Returns a map that describes the current view of one server. The map
 %% is intended for people and for tests.

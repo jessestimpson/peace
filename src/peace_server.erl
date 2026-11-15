@@ -50,11 +50,14 @@
 -define(TRACE(Event, Core),
     ?ETA_LOG({peace, peace_core:id(Core), log_event(Event), peace_core:role(Core)})
 ).
+log_event({msg, Peer, Msg}) when is_atom(Msg) -> {msg, Peer, Msg};
 log_event({msg, Peer, Msg}) -> {msg, Peer, element(1, Msg)};
 log_event({value, _From, _Value}) -> value;
 log_event({value, _From, _Value, _Session}) -> value;
 log_event({query, _From, _Fun}) -> query;
 log_event({reconfigure, _From, _New}) -> reconfigure;
+log_event({form, _From, _New}) -> form;
+log_event({replace, _From, _News}) -> replace;
 log_event(Event) -> Event.
 %% A simulated run reads the state that a server published when its last
 %% callback returned. `await/1' waits inside a callback while the storage
@@ -157,18 +160,78 @@ start(Config = #{id := {Name, _Node}}) ->
 %% gen_server
 %% ---------------------------------------------------------------------------
 
-init(Config = #{id := Id, members := Members}) ->
+init(Config = #{id := Id}) ->
     ?ETA_LABEL(Id),
-    case check_quorum(Config, Members) of
+    case check_lease(Config) of
         ok ->
             {StorageMod, StorageArgs} = maps:get(storage, Config, default_storage()),
             case peace_writer:start_link(Id, StorageMod, StorageArgs) of
-                {ok, Writer, Stored} -> init(Config, Writer, Stored);
+                {ok, Writer, Stored} -> identify(Config, Writer, Stored);
                 {error, Reason} -> {stop, {storage_failed, Reason}}
             end;
         {error, Reason} ->
-            {stop, {invalid_quorum, Reason}}
+            {stop, Reason}
     end.
+
+%% == Member identity ==
+%%
+%% A member is identified by `{Name, Node, Incarnation}'. `{Name, Node}' is
+%% the address of the server. The incarnation is 16 random bytes. A server
+%% creates its incarnation when it starts and recovers no stored state, and
+%% stores the incarnation before it handles any message. The incarnation
+%% therefore changes when the stored state of the server is lost.
+%%
+%% Every message between servers names the incarnation of the sender and of
+%% the destination. A server drops a message that names another incarnation
+%% as the destination. A server that has lost its stored state therefore
+%% never answers as the member that it was. `replace_request' is the only
+%% message that is sent to an address without an incarnation.
+%%
+%% A server does not start if its storage holds:
+%%
+%% <ul>
+%% <li>the state of a server on another node, or</li>
+%% <li>a promise, an entry or a snapshot without an incarnation.</li>
+%% </ul>
+identify(Config = #{id := Id = {Name, Node}}, Writer, Stored) ->
+    Blank = maps:without([meta], Stored) =:= #{} orelse maps:without([meta], Stored) =:= #{entries => #{}},
+    case Stored of
+        #{meta := #{node := Node, incarnation := Incarnation}} ->
+            init(Config#{member => {Name, Node, Incarnation}}, Writer, Stored);
+        #{meta := #{node := Other}} ->
+            {stop, {stored_state_of_another_node, Other}};
+        _ when not Blank ->
+            {stop, stored_state_without_incarnation};
+        _ ->
+            Meta = #{node => Node, incarnation => new_incarnation(Config)},
+            %% The incarnation is stored before this server handles any
+            %% message.
+            ok = peace_writer:write(Writer, 0, #{meta => Meta}),
+            receive
+                {written, Writer, 0} -> ok
+            end,
+            case maps:get(rejoin, Config, []) of
+                [] ->
+                    logger:notice("peace server ~p started without stored state and has no configuration", [Id]);
+                Rejoin ->
+                    logger:notice(
+                        "peace server ~p started without stored state and asks ~p to replace the member at its address",
+                        [Id, Rejoin]
+                    )
+            end,
+            init(Config#{member => {Name, Node, maps:get(incarnation, Meta)}}, Writer, Stored#{meta => Meta})
+    end.
+
+%% The call to `crypto' is module-qualified, so that a simulation can
+%% substitute a seeded source.
+-ifdef(TEST).
+%% A test build may set `unsafe_fixed_incarnation'. A server then has the
+%% same incarnation after it loses its stored state. This is a planted bug.
+new_incarnation(#{unsafe_fixed_incarnation := true}) -> <<0:128>>;
+new_incarnation(_Config) -> crypto:strong_rand_bytes(16).
+-else.
+new_incarnation(_Config) -> crypto:strong_rand_bytes(16).
+-endif.
 
 %% The default backend is the write-ahead log, in the directory that the
 %% application environment variable `data_dir' names.
@@ -201,18 +264,32 @@ handle_call({value, Value, Session}, From, State) ->
     {noreply, request({value, From, Value, Session}, State)};
 handle_call({reconfigure, New}, From, State) ->
     {noreply, event({reconfigure, From, New}, State)};
+handle_call({form, New}, From, State) ->
+    {noreply, event({form, From, New}, State)};
+handle_call({replace, News}, From, State) ->
+    {noreply, event({replace, From, News}, State)};
+handle_call(identity, _From, State = #state{core = Core}) ->
+    %% The member that this server is, and the configuration in force at
+    %% this server, or `none'.
+    Config =
+        case peace_core:formed(Core) of
+            true -> peace_core:config(Core);
+            false -> none
+        end,
+    {reply, {ok, peace_core:id(Core), Config}, State};
 handle_call({consistent_query, Fun}, From, State) ->
     {noreply, request({query, From, Fun}, State)};
 handle_call({local_query, Fun}, _From, State = #state{core = Core}) ->
     Reply =
         try
-            {ok, Fun(peace_core:machine_state(Core)), peace_core:leader(Core)}
+            {ok, Fun(peace_core:machine_state(Core)), peace_core:address(peace_core:leader(Core))}
         catch
             Class:Reason -> {error, {query_failed, Class, Reason}}
         end,
     {reply, Reply, State};
 handle_call(members, _From, State = #state{core = Core}) ->
-    {reply, {ok, peace_core:members(Core), peace_core:leader(Core)}, State};
+    Addresses = lists:usort([peace_core:address(M) || M <- peace_core:members(Core)]),
+    {reply, {ok, Addresses, peace_core:address(peace_core:leader(Core))}, State};
 handle_call(overview, _From, State = #state{core = Core}) ->
     {reply, peace_core:overview(Core), State};
 handle_call(_Other, _From, State) ->
@@ -249,30 +326,21 @@ handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
             %% The timer was cancelled or replaced after it fired.
             {noreply, State}
     end;
-handle_info({peace_msg, Peer, Msg}, State) ->
-    {noreply, event({msg, Peer, Msg}, State)};
+handle_info({peace_msg, Peer, To, Msg}, State) ->
+    case for_me(To, Msg, State) of
+        true -> {noreply, event({msg, Peer, Msg}, State)};
+        false -> {noreply, State}
+    end;
 handle_info({written, Writer, Seq}, State = #state{writer = Writer}) ->
     {noreply, handle_stored(written(Seq, State))};
 handle_info({snapshot_written, Writer}, State = #state{writer = Writer, snapshots = [_Stored | Snapshots]}) ->
     {noreply, State#state{snapshots = Snapshots}};
-handle_info({peace_chunk, Peer, {offer, Id}}, State = #state{core = Core, transfer = Transfer0}) ->
-    Now = now_ms(State#state.clock),
-    {Transfer, Sends} = peace_transfer:offered(Peer, Id, peace_core:commit_index(Core), Now, Transfer0),
-    {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
-handle_info({peace_chunk, Peer, {chunk, Id, Offset, Bin}}, State0 = #state{transfer = Transfer0}) ->
-    Now = now_ms(State0#state.clock),
-    {Transfer, Sends, Install} = peace_transfer:chunk(Peer, Id, Offset, Bin, Now, Transfer0),
-    State = send_chunks(Sends, State0#state{transfer = Transfer}),
-    case Install of
-        none -> {noreply, State};
-        {install, _Index, _Snapshot} ->
-            _ = ?COUNT(snapshots_received),
-            {noreply, event({msg, Peer, Install}, State)}
+handle_info({peace_chunk, Peer, To, Chunk}, State = #state{core = Core}) ->
+    case To =:= peace_core:id(Core) of
+        true -> {noreply, chunk(Peer, Chunk, State)};
+        %% The chunk is for another incarnation of this server.
+        false -> {noreply, State}
     end;
-handle_info({peace_chunk, Peer, {request, Id, Offset}}, State = #state{transfer = Transfer0}) ->
-    {Transfer, Sends} = peace_transfer:request(Peer, Id, Offset, Transfer0),
-    _ = ?COUNT(chunks_requested),
-    {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
 handle_info({peace_encoded, Index, Chunks, Size, Crc}, State = #state{transfer = Transfer0}) ->
     {Transfer, Sends} = peace_transfer:encoded(Index, Chunks, Size, Crc, Transfer0),
     {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
@@ -292,18 +360,9 @@ terminate(_Reason, #state{writer = Writer}) ->
 %% Internals
 %% ---------------------------------------------------------------------------
 
--ifdef(TEST).
-%% A test build may set `unsafe_no_quorum_check', to start a cluster that
-%% is deliberately broken. The setting skips all of `check_quorum1/2': the
-%% validation of the quorum system and the check of the bound on
-%% `read_lease_ms'.
-check_quorum(#{unsafe_no_quorum_check := true}, _Members) -> ok;
-check_quorum(Config, Members) -> check_quorum1(Config, Members).
--else.
-check_quorum(Config, Members) -> check_quorum1(Config, Members).
--endif.
-
-check_quorum1(Config, Members) ->
+%% The quorum system is checked when the cluster is formed and when the
+%% members change. See `form/3' and `reconfigure/3' in `peace_core'.
+check_lease(Config) ->
     Election = maps:get(election_timeout_ms, Config, ?DEFAULT_ELECTION_TIMEOUT_MS),
     case Config of
         %% This limit is not needed for safety. With a longer lease, a
@@ -312,8 +371,12 @@ check_quorum1(Config, Members) ->
         #{read_lease_ms := Lease} when not is_integer(Lease); Lease < 1; Lease > Election ->
             {error, {read_lease_must_not_exceed_election_timeout, Lease, Election}};
         _ ->
-            peace_quorum:validate(maps:get(quorum, Config, majority), Members)
+            ok
     end.
+
+%% Whether a message is for this incarnation of this server.
+for_me(any, replace_request, _State) -> true;
+for_me(To, _Msg, #state{core = Core}) -> To =:= peace_core:id(Core).
 
 %% Handles one event, and then every event that is already in the mailbox,
 %% up to `?MAX_GROUP' events. The effects of all of these events are
@@ -417,7 +480,7 @@ keep(Event, State = #state{core = Core}) ->
     Reply =
         case peace_core:role(Core) of
             leader -> {error, overloaded};
-            _ -> {error, {not_leader, peace_core:leader(Core)}}
+            _ -> {error, {not_leader, peace_core:address(peace_core:leader(Core))}}
         end,
     effect({reply, element(2, Event), Reply}, State).
 
@@ -480,8 +543,9 @@ is_snapshot(_Effect) -> false.
 drain(0, Acc) ->
     Acc;
 drain(N, {State = #state{backlog_len = 0}, Steps}) ->
+    Me = peace_core:id(State#state.core),
     receive
-        {peace_msg, Peer, Msg} ->
+        {peace_msg, Peer, Me, Msg} ->
             drain(N - 1, step({msg, Peer, Msg}, State, Steps));
         {'$gen_call', From, {value, Value}} ->
             drain(N - 1, step({value, From, Value}, State, Steps));
@@ -502,8 +566,9 @@ drain(N, {State = #state{backlog = Backlog0, backlog_len = Len}, Steps}) ->
     %% The backlog holds requests that are older than every client request
     %% in the mailbox. The messages of peers and of the storage process are
     %% handled first. See "The mailbox limit".
+    Me = peace_core:id(State#state.core),
     receive
-        {peace_msg, Peer, Msg} ->
+        {peace_msg, Peer, Me, Msg} ->
             drain(N - 1, step({msg, Peer, Msg}, State, Steps));
         {written, Writer, Seq} when Writer =:= State#state.writer ->
             drain(N, {written(Seq, State), Steps})
@@ -753,7 +818,7 @@ merge_batches(Batches) ->
     {Fields, Entries} = lists:foldl(
         fun(Batch, {Fields0, Entries0}) ->
             {
-                maps:merge(Fields0, maps:with([promised, snapshot], Batch)),
+                maps:merge(Fields0, maps:with([promised, meta, snapshot], Batch)),
                 lists:foldl(fun({I, Entry}, Acc) -> Acc#{I => Entry} end, Entries0, maps:get(entries, Batch, []))
             }
         end,
@@ -777,7 +842,7 @@ merge_batches(Batches) ->
             Kept ->
                 Fields#{entries => Kept}
         end,
-    {Merged, not is_map_key(promised, Fields)}.
+    {Merged, not (is_map_key(promised, Fields) orelse is_map_key(meta, Fields))}.
 
 effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, transfer = Transfer0}) ->
     %% A snapshot is not sent as one message. See `peace_transfer'.
@@ -787,8 +852,10 @@ effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, trans
         encode -> encode(Index, Snapshot, State#state{transfer = Transfer});
         Send -> send_chunks([Send], State#state{transfer = Transfer})
     end;
+effect({send, {any, Address}, Msg}, State = #state{core = Core}) ->
+    send(Address, {peace_msg, peace_core:id(Core), any, Msg}, State);
 effect({send, To, Msg}, State = #state{core = Core}) ->
-    send(To, {peace_msg, peace_core:id(Core), Msg}, State);
+    send(peace_core:address(To), {peace_msg, peace_core:id(Core), To, Msg}, State);
 effect({reply, undefined, _Reply}, State) ->
     State;
 effect({reply, {peace_session, Pid, Label}, Reply}, State) ->
@@ -810,9 +877,34 @@ effect({machine, Effects}, State) ->
     lists:foreach(fun machine_effect/1, Effects),
     State.
 
+%% Handles a message of a snapshot transfer. See `peace_transfer'.
+chunk(Peer, {offer, Id}, State = #state{core = Core, transfer = Transfer0}) ->
+    Now = now_ms(State#state.clock),
+    {Transfer, Sends} = peace_transfer:offered(Peer, Id, peace_core:commit_index(Core), Now, Transfer0),
+    send_chunks(Sends, State#state{transfer = Transfer});
+chunk(Peer, {chunk, Id, Offset, Bin}, State0 = #state{transfer = Transfer0}) ->
+    Now = now_ms(State0#state.clock),
+    {Transfer, Sends, Install} = peace_transfer:chunk(Peer, Id, Offset, Bin, Now, Transfer0),
+    State = send_chunks(Sends, State0#state{transfer = Transfer}),
+    case Install of
+        none ->
+            State;
+        {install, _Index, _Snapshot} ->
+            _ = ?COUNT(snapshots_received),
+            event({msg, Peer, Install}, State)
+    end;
+chunk(Peer, {request, Id, Offset}, State = #state{transfer = Transfer0}) ->
+    {Transfer, Sends} = peace_transfer:request(Peer, Id, Offset, Transfer0),
+    _ = ?COUNT(chunks_requested),
+    send_chunks(Sends, State#state{transfer = Transfer}).
+
 send_chunks(Sends, State = #state{core = Core}) ->
     Id = peace_core:id(Core),
-    lists:foldl(fun({send, To, Msg}, State1) -> send(To, {peace_chunk, Id, Msg}, State1) end, State, Sends).
+    lists:foldl(
+        fun({send, To, Msg}, State1) -> send(peace_core:address(To), {peace_chunk, Id, To, Msg}, State1) end,
+        State,
+        Sends
+    ).
 
 %% Starts a process that encodes a snapshot. The encoding of a large
 %% snapshot takes long, and this process must not wait for it. The start of

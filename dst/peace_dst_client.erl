@@ -10,7 +10,7 @@
 
 -include("peace_eta.hrl").
 
--export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/3]).
+-export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/4, form/3]).
 
 %% The number of values that a client of `pipeline/3' submits, and the time
 %% that the client waits for the replies.
@@ -20,6 +20,10 @@
 -define(CALL_TIMEOUT_MS, 200).
 -define(RETRY_AFTER_MS, 60).
 -define(ATTEMPTS, 4).
+
+%% The timeout of a call of `form/3', and the time between two attempts.
+-define(FORM_TIMEOUT_MS, 25).
+-define(FORM_RETRY_MS, 10).
 
 %% Submits one value and records the result that the client received. `Op'
 %% is unique to this operation, so the harness can find the value in the
@@ -192,9 +196,93 @@ submit(Fun, Attempts, Again) ->
             {unknown, Other}
     end.
 
-%% Delivers a protocol message to a server as if `From' had sent the
-%% message.
-deliver(To, From, Msg) ->
+%% Delivers a protocol message to the server at the address `To', as if
+%% the member `From' had sent the message to the member `Receiver'.
+deliver(To, From, Receiver, Msg) ->
     ?ETA_LABEL(rumour),
-    _ = erlang:send(To, {peace_msg, From, Msg}, [noconnect]),
+    _ = erlang:send(To, {peace_msg, From, Receiver, Msg}, [noconnect]),
     ok.
+
+%% Forms the cluster of the founders. The client asks every founder for its
+%% incarnation and then stores the configuration on every founder.
+%%
+%% A run lasts less than one second of simulated time, and a cluster that
+%% forms late decides few values. The client is therefore more persistent
+%% than `peace:form_cluster/3':
+%%
+%% <ul>
+%% <li>A call has a timeout of 25 ms, so that a lost message costs little
+%%   time.</li>
+%% <li>The client keeps the incarnation that a founder reported in an
+%%   earlier attempt. A founder that is killed and restarted recovers its
+%%   incarnation from its disk.</li>
+%% <li>The client stores the configuration on the founders that answer, and
+%%   repeats the attempt until every founder has stored it, for at most
+%%   `Attempts' attempts.</li>
+%% <li>The client asks the first founder that stores the configuration to
+%%   campaign.</li>
+%% </ul>
+%%
+%% The client stops if a founder has another configuration, as
+%% `peace:form_cluster/3' does. A founder that lost its disk after some
+%% founders stored the configuration has a new incarnation. A second
+%% configuration with that incarnation would form a second cluster.
+%%
+%% The client calls the servers directly, and not `peace:form_cluster/3',
+%% so that a run can form a cluster with an unsafe quorum system. See the
+%% `unsafe_quorums' mode of `peace_dst'.
+form(Founders, Quorum, Attempts) ->
+    ?ETA_LABEL(former),
+    form(Founders, Quorum, Attempts, #{}, false).
+
+form(_Founders, _Quorum, 0, _Known, _Asked) ->
+    ok;
+form(Founders, Quorum, Attempts, Known0, Asked0) ->
+    Answers = [{Id, call(Id, identity, ?FORM_TIMEOUT_MS)} || Id <- Founders],
+    Known = maps:merge(Known0, maps:from_list([{Id, Member} || {Id, {ok, Member, _Config}} <- Answers])),
+    New = {lists:usort(maps:values(Known)), to_members(Quorum, Known)},
+    Other = [Config || {_Id, {ok, _Member, Config}} <- Answers, Config =/= none, Config =/= {final, New}],
+    case {Other, map_size(Known) =:= length(Founders)} of
+        {[_ | _], _} ->
+            _ = ?ETA_LOG({former, stopped}),
+            ok;
+        {[], true} ->
+            %% Every founder is asked, also after one has not answered.
+            Stored = [{Id, call(Id, {form, New}, ?FORM_TIMEOUT_MS)} || Id <- Founders],
+            %% The first election does not wait for an election timeout, so
+            %% that the cluster has a leader before the faults of the run
+            %% stop a phase-one quorum. The client asks once, the first
+            %% founder that has stored the configuration.
+            Asked =
+                case {Asked0, [Id || {Id, ok} <- Stored]} of
+                    {false, [First | _]} ->
+                        ok = peace:trigger_election(First),
+                        true;
+                    _ ->
+                        Asked0
+                end,
+            case lists:usort([Result || {_Id, Result} <- Stored]) of
+                [ok] ->
+                    _ = ?ETA_LOG({former, formed}),
+                    ok;
+                _ ->
+                    timer:sleep(?FORM_RETRY_MS),
+                    form(Founders, Quorum, Attempts - 1, Known, Asked)
+            end;
+        {[], false} ->
+            timer:sleep(?FORM_RETRY_MS),
+            form(Founders, Quorum, Attempts - 1, Known, Asked0)
+    end.
+
+%% A grid is given with addresses. The configuration names members.
+to_members({grid, Rows}, Known) ->
+    {grid, [[maps:get(Id, Known, Id) || Id <- Row] || Row <- Rows]};
+to_members(Quorum, _Known) ->
+    Quorum.
+
+call(Id, Request, Timeout) ->
+    try
+        gen_server:call(Id, Request, Timeout)
+    catch
+        exit:_ -> {error, down}
+    end.

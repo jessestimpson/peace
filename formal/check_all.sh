@@ -3,7 +3,7 @@
 #   usage: check_all.sh [quick|long|soak|all]
 #          check_all.sh hash <Config>
 # - quick takes a few minutes.
-# - long runs the configs with millions of states. It takes about 2 hours.
+# - long runs the configs with millions of states. It takes about 2.5 hours.
 # - soak takes hours.
 # README.md gives the time that each config took.
 #
@@ -21,14 +21,16 @@ cd "$(dirname "$0")"
 
 QUICK_PASS="FPaxosMajority FPaxosSingleton FPaxosAllAboard FPaxosEvenNodes FPaxosSnapshots ReconfigCoLocated"
 # Mutations: each config must produce a counterexample.
-QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown FPaxosNoSnapshotGuard ReconfigNoJoint ReconfigCoLocatedNoJoint ReconfigCoLocatedNoClosure"
+QUICK_FAIL="FPaxosUnsafeQuorums FPaxosNoFence FPaxosNoConflictStepDown FPaxosNoSnapshotGuard ReconfigNoJoint ReconfigCoLocatedNoJoint ReconfigCoLocatedNoClosure ReplaceNoChallenge"
 # Reachability: each config must reach the state that the invariant of the
 # config says is never reached.
-QUICK_REACH="FPaxosReachableDecided FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict FPaxosReachableSnapshot ReconfigCoLocatedReachableFinal ReconfigCoLocatedReachableRaised ReconfigReachableAfterFinal"
-LONG_PASS="FPaxosThreeEpochs FPaxosGrid FPaxosFiveAcceptors FPaxosSingletonTwoIndexes FPaxosMajorityTwoIndexes Reconfig"
+QUICK_REACH="FPaxosReachableDecided FPaxosReachableAllLearned FPaxosReachableRecovery FPaxosReachableConflict FPaxosReachableSnapshot ReconfigCoLocatedReachableFinal ReconfigCoLocatedReachableRaised ReconfigReachableAfterFinal ReplaceReachableFinal"
+LONG_PASS="FPaxosThreeEpochs FPaxosGrid FPaxosFiveAcceptors FPaxosSingletonTwoIndexes FPaxosMajorityTwoIndexes Reconfig Replace"
 # Membership change with separate roles: one mutation, which takes about 6
 # minutes, and two reachability checks, which take seconds.
-LONG_FAIL="ReconfigNoClosure ReconfigReachableFinal ReconfigReachableRaised"
+# ReplaceSameIdentity is a mutation of the replacement model. It takes about
+# 4 minutes.
+LONG_FAIL="ReconfigNoClosure ReconfigReachableFinal ReconfigReachableRaised ReplaceSameIdentity"
 SOAK_PASS="ReconfigThreeIndexes"
 
 LEDGER="checked.tsv"
@@ -48,6 +50,7 @@ inputs_hash() { # config
   local modules
   case "$1" in
     Reconfig*) modules="MCReconfig.tla Reconfig.tla" ;;
+    Replace*) modules="MCReplace.tla Replace.tla Reconfig.tla" ;;
     *) modules="MCFlexiblePaxos.tla FlexiblePaxos.tla" ;;
   esac
   # shellcheck disable=SC2086

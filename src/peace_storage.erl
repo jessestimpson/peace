@@ -10,7 +10,9 @@
 %%   acceptor knows that the entry was decided).</li>
 %% </ul>
 %%
-%% A server stores a third thing, a snapshot. A snapshot is the machine
+%% A server also stores its identity, as `meta'. See `meta()'.
+%%
+%% A server stores a further thing, a snapshot. A snapshot is the machine
 %% state, the session table and the applied configuration as of some index.
 %% The snapshot replaces the log entries that have been deleted. The log is
 %% no longer kept at or below the index of the snapshot.
@@ -40,13 +42,25 @@
 
 -export([open/3, write/3, close/2, snapshot_begin/3, snapshot_continue/2]).
 
--export_type([storage/0, stored/0, batch/0]).
+-export_type([storage/0, stored/0, batch/0, meta/0]).
 
 -type storage() :: {module(), Args :: term()}.
+
+%% The identity of a server and the configuration that formed its cluster.
+%% See "Member identity" in `peace_server'.
+%%   - `node' and `incarnation' are written once, when a server starts and
+%%     recovers no `meta'.
+%%   - `initial' is written once, when the cluster is formed.
+-type meta() :: #{
+    node := node(),
+    incarnation := binary(),
+    initial => peace_core:simple()
+}.
 
 %% The data that a server recovers when it starts.
 -type stored() :: #{
     promised => peace:epoch(),
+    meta => meta(),
     entries => #{peace:index() => peace_core:entry()},
     snapshot => {peace:index(), peace_core:snapshot()}
 }.
@@ -89,6 +103,8 @@
 %% `write/2'.
 -type batch() :: #{
     promised => peace:epoch(),
+    %% Replaces the stored `meta'.
+    meta => meta(),
     entries => [{peace:index(), peace_core:entry()}],
     snapshot => {peace:index(), peace_core:snapshot()},
     sync => boolean()

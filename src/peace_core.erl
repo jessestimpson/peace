@@ -380,6 +380,104 @@
 %% server that is outside a decided final configuration stops campaigning.
 %% If that server was the leader, it steps down.
 %%
+%% == Member identity ==
+%%
+%% The thesis assumes a fixed set of participants, and assumes that the
+%% persistent state of a participant is unchanged after a restart (section
+%% 1.6). Section 3.12, "Fail-stop model", describes the alternative: a
+%% participant that fails does not restart, and reconfiguration restores
+%% the fault tolerance. peace uses the fail-stop model for a server that
+%% has lost its stored state. This part is not in the thesis.
+%%
+%% A member is identified by `{Name, Node, Incarnation}'. `{Name, Node}' is
+%% the address of the server. `peace_server' creates the incarnation when
+%% a server starts and recovers no stored state. A server that has lost its
+%% state is therefore another acceptor than it was. The acceptor that it
+%% was never answers again, and the new acceptor has promised nothing. See
+%% "Member identity" in `peace_server'. This module treats a member as an
+%% opaque term, except in `address/1'. A reply to a client names the
+%% address of a server.
+%%
+%% === A server without a configuration ===
+%%
+%% A server that starts without stored state has no configuration. Such a
+%% server:
+%%
+%% <ul>
+%% <li>does not campaign;</li>
+%% <li>answers a `prepare' or a `prevote' of any server. Its answer counts
+%%   only for a configuration that names its incarnation;</li>
+%% <li>accepts proposals, and so learns a configuration that names it.</li>
+%% </ul>
+%%
+%% A server campaigns only after it has applied a configuration, because a
+%% candidate needs a phase-one quorum of the configuration that it has
+%% applied. A server gets its first configuration in one of three ways:
+%%
+%% <ul>
+%% <li>The event `{form, From, {Members, Quorum}}' stores the configuration
+%%   that forms a cluster. The server stores it only if the server has no
+%%   configuration and the configuration names the server. The same
+%%   configuration can be stored again. See `peace:form_cluster/3'.</li>
+%% <li>A leader adds the server with a membership change.</li>
+%% <li>A leader replaces a member with the server.</li>
+%% </ul>
+%%
+%% The configuration that forms a cluster is not in the start arguments of
+%% a server. A server that restarts with the same arguments and without
+%% its stored state would otherwise answer as the member that it was.
+%%
+%% === Replacement ===
+%%
+%% The event `{replace, From, [New]}' asks the leader to replace members.
+%% Each server in the list replaces the member that has the same address
+%% and another incarnation. The new server takes the position of the member
+%% in the quorum system: its place in the rows of a grid, and whatever a
+%% custom quorum module returns from the optional callback
+%% `replace_member/3'. The change goes through the joint configuration.
+%%
+%% The replacement is safe by the rule for candidates above. A candidate
+%% that has not applied the final entry needs a phase-one quorum of the old
+%% configuration, and that quorum contains a server that holds each decided
+%% value. A candidate that has applied the final entry holds those values.
+%% `formal/Replace.tla' models the replacement.
+%%
+%% A server that has no configuration and that was started with `rejoin'
+%% asks for its replacement itself:
+%%
+%% <ol>
+%% <li>On each election timeout, the server sends `replace_request' to the
+%%   addresses in `rejoin'.</li>
+%% <li>A leader that receives the request from a server that has the
+%%   address of a member, and that is not that member, sends
+%%   `{challenge, Nonce}' to the incarnation that asked. The nonce holds
+%%   the epoch of the leader.</li>
+%% <li>The server answers `{challenge_ok, Nonce}'.</li>
+%% <li>On its next heartbeat, the leader replaces the members whose
+%%   replacements have answered. The servers that answer within one
+%%   heartbeat interval are replaced by one change.</li>
+%% </ol>
+%%
+%% The challenge is needed because incarnations are not ordered. A request
+%% can arrive after the incarnation that sent it has lost its state again
+%% and after a later incarnation has become the member. Without the
+%% challenge, the leader would replace the member that runs with a server
+%% that no longer exists. With the challenge, the incarnation that asked
+%% must run after the leader started its epoch.
+%%
+%% Limitations:
+%%
+%% <ul>
+%% <li>A server can answer a challenge and then lose its state before the
+%%   leader replaces the member. The leader then adds an incarnation that
+%%   no longer runs. The next incarnation at the address asks again.</li>
+%% <li>A leader does not send a challenge for the event `replace'. The
+%%   caller of `peace:replace_member/3' reads the incarnation from the
+%%   server that runs.</li>
+%% <li>A replacement needs a leader, and the old configuration needs its
+%%   quorums without the member that is replaced.</li>
+%% </ul>
+%%
 %% == The acceptance of the leader ==
 %%
 %% A leader is also an acceptor. A leader writes each of its proposals to
@@ -407,9 +505,10 @@
 
 -include("peace.hrl").
 
--export([init/2, init/3, handle/2, handle/3, stored_events/2]).
+-export([init/2, init/3, handle/2, handle/3, stored_events/2, address/1]).
 -export([
     id/1,
+    formed/1,
     role/1,
     leader/1,
     members/1,
@@ -439,7 +538,11 @@
 -type tag() :: {peace:epoch(), peace:index()}.
 
 %% The members and the specification of their quorums.
--type simple() :: {[peace:server_id()], peace_quorum:spec()}.
+-type simple() :: {[peace:member()], peace_quorum:spec()}.
+
+%% The configuration of a server that has no configuration. See "Member
+%% identity".
+-define(NO_CONFIG, {final, {[], majority}}).
 -type config() :: {final, simple()} | {joint, Old :: simple(), New :: simple()}.
 
 -type value() ::
@@ -480,7 +583,13 @@
     | {prevote_ok, peace:epoch()}
     | {catchup, From :: peace:index()}
     | {learned, [{peace:index(), value()}]}
-    | {install, peace:index(), snapshot()}.
+    | {install, peace:index(), snapshot()}
+    | replace_request
+    | {challenge, nonce()}
+    | {challenge_ok, nonce()}.
+
+%% A nonce identifies one challenge of one leader. See "Member identity".
+-type nonce() :: {peace:epoch(), pos_integer()}.
 
 -type event() ::
     election_timeout
@@ -490,18 +599,41 @@
     | {value, from(), peace_machine:value(), session() | undefined}
     | {query, from(), fun((peace_machine:state()) -> term())}
     | {reconfigure, from(), simple()}
+    | {form, from(), simple()}
+    | {replace, from(), [peace:member()]}
     | {stored, peace:epoch(), [peace:index()]}
-    | {msg, peace:server_id(), msg()}.
+    | {msg, peace:member(), msg()}.
 
+%% A message to `{any, Address}' is sent to the server at that address,
+%% whatever its incarnation is. Only `replace_request' is sent in that way.
 -type effect() ::
     {persist, peace_storage:batch()}
-    | {send, peace:server_id(), msg()}
+    | {send, peace:member() | {any, peace:server_id()}, msg()}
     | {reply, from(), term()}
     | {timer, election | heartbeat, reset | cancel}
     | {machine, peace_machine:effects()}.
 
 -record(core, {
-    id :: peace:server_id(),
+    id :: peace:member(),
+    %% Durable. The stored identity of this server and the configuration
+    %% that formed its cluster. See `peace_storage:meta()'.
+    meta = #{} :: map(),
+    %% The addresses that this server sends a replace request to while it
+    %% has no configuration. See "Member identity".
+    rejoin = [] :: [peace:server_id()],
+    %% Leader: `challenges' holds the challenge that was sent to each server
+    %% that asked to replace a member. `verified' holds, for each address,
+    %% the last server that answered its challenge. `nonce' counts the
+    %% challenges of this leader.
+    challenges = #{} :: #{peace:member() => nonce()},
+    verified = #{} :: #{peace:server_id() => peace:member()},
+    nonce = 0 :: non_neg_integer(),
+    %% Whether a leader sends a challenge before it replaces a member. This
+    %% field is false only in tests that show why the challenge is needed.
+    use_challenge = true :: boolean(),
+    %% Whether `form/3' validates the quorum system. This field is false
+    %% only in tests that form a cluster with an unsafe quorum system.
+    quorum_check = true :: boolean(),
     %% `acfg' is the configuration as of the commit index. `cfgs' holds the
     %% configuration entries in the log above the commit index, keyed by
     %% index. See "Membership".
@@ -513,11 +645,11 @@
     use_joint = true :: boolean(),
     session_order = true :: boolean(),
     %% Candidate: the servers that it has sent a prepare to.
-    asked = [] :: [peace:server_id()],
+    asked = [] :: [peace:member()],
     machine :: peace_machine:machine(),
     mstate :: peace_machine:state(),
     role = follower :: peace:role(),
-    leader :: peace:server_id() | undefined,
+    leader :: peace:member() | undefined,
     %% Durable. The highest epoch promised. This field is TLA+ `promised'.
     promised = ?NO_EPOCH :: peace:epoch(),
     %% The highest epoch that this server has seen from any source. The
@@ -544,24 +676,24 @@
     %% Candidate: `from' is the first index that it asked about. `promises'
     %% holds the promises received so far.
     from = 1 :: peace:index(),
-    promises = #{} :: #{peace:server_id() => list()},
+    promises = #{} :: #{peace:member() => list()},
     %% Follower during a pre-vote: the epoch that it would use, and the
     %% servers that have answered that they would promise that epoch.
-    prevote :: {peace:epoch(), [peace:server_id()]} | undefined,
+    prevote :: {peace:epoch(), [peace:member()]} | undefined,
     %% Leader: the servers that have answered since the election timer last
     %% fired.
-    heard = [] :: [peace:server_id()],
+    heard = [] :: [peace:member()],
     %% Leader, when proposing to a quorum: `preferred' holds the peers that
     %% new proposals are sent to. `waiting' holds the indexes that were
     %% already undecided at the last heartbeat.
     to_quorum = false :: boolean(),
-    preferred = [] :: [peace:server_id()],
+    preferred = [] :: [peace:member()],
     waiting = [] :: [peace:index()],
     %% Leader: `next' is the next free index. `acks' holds, for each
     %% undecided index, the servers that have accepted it. `pending' holds,
     %% for each index, the caller that is waiting for it.
     next = 1 :: peace:index(),
-    acks = #{} :: #{peace:index() => [peace:server_id()]},
+    acks = #{} :: #{peace:index() => [peace:member()]},
     pending = #{} :: #{peace:index() => {tag(), from(), kind()}},
     %% Whether a leader steps down when it learns a decided value that
     %% differs from its own proposal. This field is false only in tests
@@ -581,7 +713,7 @@
     %% Leader: `echoes' holds, for each peer, the latest clock reading of
     %% the leader that the peer has returned. `barrier' is the last index
     %% that the phase one of this leader recovered.
-    echoes = #{} :: #{peace:server_id() => integer()},
+    echoes = #{} :: #{peace:member() => integer()},
     barrier = 0 :: non_neg_integer()
 }).
 
@@ -601,8 +733,14 @@ init(Config, Stored) ->
 %% @doc The same as `init/2', with the clock reading. The clock reading
 %% matters only when read leases are on.
 -spec init(peace:server_config(), peace_storage:stored(), integer()) -> {core(), [effect()]}.
-init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now) ->
-    Initial = {final, {lists:usort(Members0), maps:get(quorum, Config, majority)}},
+init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
+    Id = maps:get(member, Config, Address),
+    Meta = maps:get(meta, Stored, #{}),
+    Initial =
+        case Meta of
+            #{initial := Simple} -> {final, Simple};
+            _ -> ?NO_CONFIG
+        end,
     {Snap, {MState, Sessions, ACfg}} =
         maps:get(snapshot, Stored, {0, {peace_machine:init(Machine), #{}, Initial}}),
     %% A crash can happen after a snapshot is written and before the entries
@@ -613,6 +751,10 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
     LeaseMs = maps:get(read_lease_ms, Config, undefined),
     C0 = #core{
         id = Id,
+        meta = Meta,
+        rejoin = maps:get(rejoin, Config, []),
+        use_challenge = not ?PLANTED(unsafe_no_challenge, Config),
+        quorum_check = not ?PLANTED(unsafe_no_quorum_check, Config),
         acfg = ACfg,
         cfgs = maps:filtermap(
             fun
@@ -636,7 +778,7 @@ init(Config = #{id := Id, members := Members0, machine := Machine}, Stored, Now)
             case {maps:get(snapshot_interval, Config, ?DEFAULT_SNAPSHOT_INTERVAL), Config} of
                 {infinity, _} -> 0;
                 {Interval, #{snapshot_offset := Offset}} -> Offset rem Interval;
-                {Interval, _} -> erlang:phash2(maps:get(id, Config), Interval)
+                {Interval, _} -> erlang:phash2(Address, Interval)
             end,
         max_pending = maps:get(max_pending, Config, ?DEFAULT_MAX_PENDING),
         promised = Promised,
@@ -688,7 +830,7 @@ event(election_timeout, C) ->
 event(force_election, C = #core{role = leader}) ->
     {C, []};
 event(force_election, C) ->
-    case fenced(C) orelse not is_member(C) of
+    case fenced(C) orelse not electable(C) of
         true -> {C, []};
         false -> campaign(C)
     end;
@@ -703,7 +845,10 @@ event(heartbeat_timeout, C0 = #core{role = leader, acks = Acks, waiting = Waitin
             true -> [];
             false -> peers(C1) -- Targets
         end,
-    {C1#core{waiting = Open}, [{timer, heartbeat, reset} | broadcast(C1, Quiet)]};
+    {C2, Replace} = replace_verified(C1#core{waiting = Open}),
+    %% The write of the replacement is listed before every message.
+    {Persist, Rest} = lists:partition(fun(Effect) -> element(1, Effect) =:= persist end, Replace),
+    {C2, Persist ++ [{timer, heartbeat, reset} | broadcast(C1, Quiet)] ++ Rest};
 event(heartbeat_timeout, C) ->
     {C, []};
 event({value, From, Value}, C) ->
@@ -717,7 +862,7 @@ event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
         true ->
             Result =
                 try
-                    {ok, Fun(MState), Id}
+                    {ok, Fun(MState), address(Id)}
                 catch
                     Class:Reason -> {error, {query_failed, Class, Reason}}
                 end,
@@ -727,6 +872,10 @@ event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
     end;
 event({reconfigure, From, New}, C) ->
     reconfigure(From, New, C);
+event({form, From, New}, C) ->
+    form(From, New, C);
+event({replace, From, News}, C) ->
+    replace(From, News, C);
 %% The acceptance of the leader of its own proposals. See "The acceptance of
 %% the leader". The event is ignored if this server is no longer the leader
 %% of `Epoch', because the proposals of that epoch are no longer open.
@@ -750,25 +899,41 @@ event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:=
     %% A server outside the configuration must not be able to depose the
     %% leader. A server that was removed and has not learned of its removal
     %% is the kind of server that sends such a prepare or prevote.
-    case lists:member(Peer, members(C)) of
+    %%
+    %% A server that has no configuration answers every server. Such a
+    %% server has promised nothing under its incarnation, and its answer
+    %% counts only for a configuration that names its incarnation. See
+    %% "Member identity".
+    Members = members(C),
+    case Members =:= [] orelse lists:member(Peer, Members) of
         true -> msg(Msg, Peer, C);
         false -> {C, []}
     end;
 event({msg, Peer, Msg}, C) ->
     msg(Msg, Peer, C).
 
--spec id(core()) -> peace:server_id().
+-spec id(core()) -> peace:member().
 id(#core{id = Id}) -> Id.
+
+%% @doc Returns the address of a member. The address is the name and the
+%% node, without the incarnation.
+-spec address(peace:member() | undefined) -> peace:server_id() | undefined.
+address({Name, Node, _Incarnation}) -> {Name, Node};
+address(Other) -> Other.
+
+%% @doc Returns whether this server has a configuration.
+-spec formed(core()) -> boolean().
+formed(C) -> members(C) =/= [].
 
 -spec role(core()) -> peace:role().
 role(#core{role = Role}) -> Role.
 
--spec leader(core()) -> peace:server_id() | undefined.
+-spec leader(core()) -> peace:member() | undefined.
 leader(#core{leader = Leader}) -> Leader.
 
 %% @doc Returns every member of the configuration in force. During a
 %% configuration change, this is every member of both configurations.
--spec members(core()) -> [peace:server_id()].
+-spec members(core()) -> [peace:member()].
 members(C) ->
     lists:usort(lists:append([Members || {Members, _Spec} <- parts(in_force(C))])).
 
@@ -820,10 +985,11 @@ learned(#core{log = Log}) ->
 -spec overview(core()) -> map().
 overview(C = #core{}) ->
     #{
-        id => C#core.id,
+        id => address(C#core.id),
+        member => C#core.id,
         role => C#core.role,
-        leader => C#core.leader,
-        members => members(C),
+        leader => address(C#core.leader),
+        members => lists:usort([address(M) || M <- members(C)]),
         config => in_force(C),
         promised => C#core.promised,
         epoch => C#core.epoch,
@@ -838,6 +1004,7 @@ overview(C = #core{}) ->
         sessions => maps:size(C#core.sessions),
         last_index => C#core.last,
         undecided => maps:size(C#core.acks),
+        verified => lists:sort(maps:values(C#core.verified)),
         pending => maps:size(C#core.pending),
         machine_state => C#core.mstate
     }.
@@ -875,10 +1042,27 @@ holds_lease(_C) ->
 %% The pre-vote is not in the TLA+ model. The model lets any server campaign
 %% at any time.
 prevote(C = #core{}) ->
-    case fenced(C) orelse not is_member(C) of
-        true -> {C, [{timer, election, reset}]};
+    case fenced(C) orelse not electable(C) of
+        true -> {C, [{timer, election, reset}] ++ rejoin(C)};
         false -> prevote1(C)
     end.
+
+%% A server campaigns only if it is a member and it has applied a
+%% configuration. A candidate needs a phase-one quorum of the configuration
+%% that it has applied. A server that has applied no configuration does not
+%% know which configuration was in force for the first index.
+electable(C = #core{acfg = ACfg}) ->
+    is_member(C) andalso ACfg =/= ?NO_CONFIG.
+
+%% A server that has no configuration and that was started with `rejoin'
+%% asks to replace the member that has its address. See "Member identity".
+rejoin(C = #core{rejoin = Rejoin, commit = 0}) when Rejoin =/= [] ->
+    case members(C) of
+        [] -> [{send, {any, Address}, replace_request} || Address <- Rejoin];
+        _ -> []
+    end;
+rejoin(_C) ->
+    [].
 
 prevote1(C0 = #core{id = Id, promised = Promised, seen = Seen}) ->
     {Round, _} = max(Promised, Seen),
@@ -1079,7 +1263,7 @@ note(Entries, C = #core{cfgs = Cfgs0}) ->
 %% Returns the `stored' events for a storage write that has returned. The
 %% write of a server contains a proposal of that server exactly when the
 %% epoch of the entry names the server.
--spec stored_events(peace:server_id(), peace_storage:batch()) -> [event()].
+-spec stored_events(peace:member(), peace_storage:batch()) -> [event()].
 stored_events(Id, Batch) ->
     ByEpoch = lists:foldl(
         fun
@@ -1185,7 +1369,7 @@ propose(From, Kind, What, C = #core{role = leader}) ->
         false -> propose1(From, Kind, What, C)
     end;
 propose(From, _Kind, _What, C = #core{leader = Leader}) ->
-    {C, [{reply, From, {error, {not_leader, Leader}}}]}.
+    {C, [{reply, From, {error, {not_leader, address(Leader)}}}]}.
 
 propose1(
     From,
@@ -1442,6 +1626,42 @@ msg1({accept, Epoch, Indexes, Stamp}, Peer, C = #core{role = leader, epoch = Epo
     settle(Indexes, C#core{acks = Acks, heard = lists:usort([Peer | C#core.heard]), echoes = Echoes});
 msg1({accept, _Epoch, _Indexes, _Stamp}, _Peer, C) ->
     {C, []};
+%% A server asks to replace the member that has its address. The leader
+%% sends a challenge to the incarnation that asked. See "Member identity".
+msg1(replace_request, Peer, C = #core{role = leader, epoch = Epoch, challenges = Challenges}) ->
+    case replaceable(Peer, C) of
+        false ->
+            {C, []};
+        true when not C#core.use_challenge ->
+            {C#core{verified = (C#core.verified)#{address(Peer) => Peer}}, []};
+        true ->
+            case Challenges of
+                #{Peer := Nonce} ->
+                    %% The server asked again, so the challenge or its answer
+                    %% was probably lost.
+                    {C, [{send, Peer, {challenge, Nonce}}]};
+                _ ->
+                    N = C#core.nonce + 1,
+                    Nonce = {Epoch, N},
+                    {C#core{nonce = N, challenges = Challenges#{Peer => Nonce}}, [{send, Peer, {challenge, Nonce}}]}
+            end
+    end;
+msg1(replace_request, _Peer, C) ->
+    {C, []};
+%% `peace_server' gives this server a message only if the message names the
+%% incarnation of this server. The answer therefore shows that this
+%% incarnation runs now.
+msg1({challenge, Nonce}, Peer, C) ->
+    {C, [{send, Peer, {challenge_ok, Nonce}}]};
+msg1({challenge_ok, Nonce}, Peer, C = #core{role = leader, challenges = Challenges, verified = Verified}) ->
+    case Challenges of
+        #{Peer := Nonce} ->
+            {C#core{challenges = maps:remove(Peer, Challenges), verified = Verified#{address(Peer) => Peer}}, []};
+        _ ->
+            {C, []}
+    end;
+msg1({challenge_ok, _Nonce}, _Peer, C) ->
+    {C, []};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, snap = Snap}) when From >= 1, From =< Snap ->
     %% The entries have been removed. The state that the entries produced
     %% is still held. The state as of the commit index serves as well as
@@ -1565,7 +1785,9 @@ follow(C0 = #core{role = Role, pending = Pending}, Leader) ->
         acks = #{},
         pending = #{},
         heard = [],
-        echoes = #{}
+        echoes = #{},
+        challenges = #{},
+        verified = #{}
     }),
     Effects =
         Failed ++
@@ -1676,11 +1898,119 @@ sessions_in(Sessions) ->
 %% Membership
 %% ---------------------------------------------------------------------------
 
-reconfigure(From, _New, C = #core{role = Role, leader = Leader}) when Role =/= leader ->
-    {C, [{reply, From, {error, {not_leader, Leader}}}]};
-reconfigure(From, {Members0, Spec}, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs, use_joint = UseJoint}) ->
+%% Stores the configuration that forms the cluster. See "Member identity".
+form(From, {Members0, Spec}, C = #core{id = Id, meta = Meta, acfg = ACfg, cfgs = Cfgs, commit = Commit}) ->
     New = {lists:usort(Members0), Spec},
-    case {ACfg, map_size(Cfgs), peace_quorum:validate(Spec, Members0)} of
+    case Meta of
+        #{initial := New} ->
+            {C, [{reply, From, ok}]};
+        #{initial := _Other} ->
+            {C, [{reply, From, {error, already_formed}}]};
+        _ when ACfg =/= ?NO_CONFIG; map_size(Cfgs) > 0; Commit > 0 ->
+            %% This server learned a configuration from the log of a
+            %% cluster.
+            {C, [{reply, From, {error, already_formed}}]};
+        _ ->
+            Valid =
+                case C#core.quorum_check of
+                    true -> peace_quorum:validate(Spec, Members0);
+                    false -> ok
+                end,
+            case {lists:member(Id, Members0), Valid} of
+                {false, _} ->
+                    {C, [{reply, From, {error, {not_named, Id}}}]};
+                {true, {error, Reason}} ->
+                    {C, [{reply, From, {error, {invalid_quorum, Reason}}}]};
+                {true, ok} ->
+                    Meta1 = Meta#{initial => New},
+                    C1 = C#core{meta = Meta1, acfg = {final, New}},
+                    {C1, [{persist, #{meta => Meta1}}, {reply, From, ok}, {timer, election, reset}]}
+            end
+    end.
+
+%% Replaces members. Each server in `News' takes the place of the member
+%% that has the same address and another incarnation. See "Member identity".
+replace(From, _News, C = #core{role = Role, leader = Leader}) when Role =/= leader ->
+    {C, [{reply, From, {error, {not_leader, address(Leader)}}}]};
+replace(From, News, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs}) ->
+    case {ACfg, map_size(Cfgs)} of
+        {{final, {Members, Spec}}, 0} ->
+            Pairs = [{Old, New} || New <- lists:usort(News), Old <- Members, replaces(New, Old), not lists:member(New, Members)],
+            case {Pairs, [New || New <- News, not lists:member(New, Members), not replaceable(New, C)]} of
+                {_, [Unknown | _]} ->
+                    {C, [{reply, From, {error, {not_a_member, address(Unknown)}}}]};
+                {[], []} ->
+                    {C, [{reply, From, {ok, ok, address(Id)}}]};
+                _ ->
+                    Swap = fun(M) -> proplists:get_value(M, Pairs, M) end,
+                    reconfigure(From, {lists:map(Swap, Members), swap_spec(Spec, Pairs)}, C)
+            end;
+        _ ->
+            {C, [{reply, From, {error, reconfiguration_in_progress}}]}
+    end.
+
+%% Whether `New' has the address of a member and is not that member.
+replaceable(New, C) ->
+    lists:any(fun(Old) -> replaces(New, Old) end, members(C)) andalso not lists:member(New, members(C)).
+
+replaces(New, Old) ->
+    New =/= Old andalso address(New) =:= address(Old) andalso address(New) =/= New.
+
+%% Gives each new server the position of the member that it replaces.
+swap_spec({grid, Rows}, Pairs) ->
+    {grid, [[proplists:get_value(M, Pairs, M) || M <- Row] || Row <- Rows]};
+swap_spec({module, Mod, Arg}, Pairs) ->
+    case erlang:function_exported(Mod, replace_member, 3) of
+        true -> {module, Mod, lists:foldl(fun({Old, New}, A) -> Mod:replace_member(A, Old, New) end, Arg, Pairs)};
+        false -> {module, Mod, Arg}
+    end;
+swap_spec(Spec, _Pairs) ->
+    Spec.
+
+%% A leader replaces the members whose replacements have answered a
+%% challenge. The leader does this on the heartbeat, so that the servers
+%% that answer within one heartbeat interval are replaced by one change.
+replace_verified(C = #core{role = leader, verified = Verified, acfg = {final, _}, cfgs = Cfgs}) when
+    map_size(Verified) > 0, map_size(Cfgs) =:= 0
+->
+    %% A server whose address no longer names a member is left out, so
+    %% that it does not stop the replacement of the other servers.
+    News = [New || New <- maps:values(Verified), replaceable(New, C)],
+    replace(undefined, News, C#core{verified = #{}});
+replace_verified(C) ->
+    {C, []}.
+
+%% A member is given as a member, or as the address of a member of the
+%% configuration in force. The address stands for that member.
+resolve_members({Members0, Spec}, C) ->
+    Current = members(C),
+    Resolve = fun(M) ->
+        case [Old || Old <- Current, Old =/= M, address(Old) =:= M] of
+            [Old] -> Old;
+            _ -> M
+        end
+    end,
+    Spec1 =
+        case Spec of
+            {grid, Rows} when is_list(Rows) -> {grid, [lists:map(Resolve, Row) || Row <- Rows, is_list(Row)]};
+            _ -> Spec
+        end,
+    {lists:map(Resolve, Members0), Spec1}.
+
+reconfigure(From, _New, C = #core{role = Role, leader = Leader}) when Role =/= leader ->
+    {C, [{reply, From, {error, {not_leader, address(Leader)}}}]};
+reconfigure(From, Asked, C = #core{id = Id0, acfg = ACfg, cfgs = Cfgs, use_joint = UseJoint}) ->
+    Id = address(Id0),
+    {Members0, Spec} = resolve_members(Asked, C),
+    New = {lists:usort(Members0), Spec},
+    %% An address that is left names no member. A server that is added is
+    %% given with its incarnation.
+    Valid =
+        case [M || M = {Name, Node} <- Members0, is_atom(Name), is_atom(Node)] of
+            [] -> peace_quorum:validate(Spec, Members0);
+            [Unknown | _] -> {error, {unknown_member, Unknown}}
+        end,
+    case {ACfg, map_size(Cfgs), Valid} of
         {{final, New}, 0, _} ->
             {C, [{reply, From, {ok, ok, Id}}]};
         {{final, Old}, 0, ok} when UseJoint ->
@@ -1690,6 +2020,8 @@ reconfigure(From, {Members0, Spec}, C = #core{id = Id, acfg = ACfg, cfgs = Cfgs,
             {C1#core{reconf = From}, Effects};
         {{final, _Old}, 0, ok} ->
             propose(From, value, {cfg, {final, New}}, C);
+        {{final, _Old}, 0, {error, Reason = {unknown_member, _}}} ->
+            {C, [{reply, From, {error, Reason}}]};
         {_, _, {error, Reason}} ->
             {C, [{reply, From, {error, {invalid_quorum, Reason}}}]};
         _ ->
@@ -1753,7 +2085,7 @@ resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) -
             Answer =
                 case Reply of
                     {'$error', Reason} -> {error, Reason};
-                    _ -> {ok, Reply, Id}
+                    _ -> {ok, Reply, address(Id)}
                 end,
             {C#core{pending = Pending1}, [{reply, From, Answer}]};
         {{Tag, _From, silent}, Pending1} ->
@@ -1763,7 +2095,7 @@ resolve(I, Tag, Reply, C = #core{pending = Pending, id = Id, mstate = MState}) -
         {{Tag, From, {query, Fun}}, Pending1} ->
             Result =
                 try
-                    {ok, Fun(MState), Id}
+                    {ok, Fun(MState), address(Id)}
                 catch
                     Class:Reason -> {error, {query_failed, Class, Reason}}
                 end,

@@ -63,9 +63,14 @@ stored(Tab, Id) ->
             undefined -> Stored0;
             Epoch -> Stored0#{promised => Epoch}
         end,
+    Stored2 =
+        case ets:lookup(Tab, {Id, meta}) of
+            [{_, Meta}] -> Stored1#{meta => Meta};
+            [] -> Stored1
+        end,
     case ets:lookup(Tab, {Id, snapshot}) of
-        [{_, Snapshot}] -> Stored1#{snapshot => Snapshot};
-        [] -> Stored1
+        [{_, Snapshot}] -> Stored2#{snapshot => Snapshot};
+        [] -> Stored2
     end.
 
 write(Batch, {Tab, Id, Disk0, Snapshot}) ->
@@ -80,7 +85,7 @@ write(Batch, {Tab, Id, {Mod, Disk0, Node}}) ->
     {ok, _} = write(Batch, {Tab, Id, none}),
     {ok, {Tab, Id, {Mod, Disk, Node}}};
 write(Batch, State = {Tab, Id, none}) ->
-    Promised = [{{Id, promised}, B} || {promised, B} <- maps:to_list(Batch)],
+    Promised = [{{Id, promised}, B} || {promised, B} <- maps:to_list(Batch)] ++ [{{Id, meta}, M} || {meta, M} <- maps:to_list(Batch)],
     Entries = [{{Id, I}, Entry} || {I, Entry} <- maps:get(entries, Batch, [])],
     true = ets:insert(Tab, Promised ++ Entries),
     %% The record that the harness keeps of decided values is updated here,

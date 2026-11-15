@@ -329,8 +329,8 @@ boot(C = #{peers := Peers}, {_Name, Node}) ->
 
 %% Starts a server on its node. Returns when the server has opened its
 %% storage and recovered its state.
-start_server(#{ids := Ids, opts := Opts}, Id = {_Name, Node}) ->
-    ok = erpc:call(Node, peace, start_server, [Opts#{id => Id, members => Ids, machine => peace_kv:machine()}]).
+start_server(#{opts := Opts}, Id = {_Name, Node}) ->
+    ok = erpc:call(Node, peace, start_server, [maps:remove(quorum, Opts#{id => Id, machine => peace_kv:machine()})]).
 
 await_leader(#{ids := Ids}) ->
     await_leader1(Ids, 2000).

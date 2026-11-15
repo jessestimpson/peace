@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Checks one client history of a simulated run with Porcupine.
-#   usage: check_history.sh <history.json>
+#   usage: check_history.sh <history.json> [time limit, for example 600s]
 # The history is written by dst/peace_dst_history.erl. The script prints
 # "ok", "ILLEGAL" or "unknown", and the number of operations checked. If
 # the history is not linearizable, the script writes a visualization next
-# to the history, with the extension .html.
+# to the history, with the extension .html. The script prints "unknown" if
+# the check does not finish within the time limit. The default is 60s.
 #
 # The script builds the checker in _build/porcupine on first use. The
 # script needs Go.
@@ -16,7 +17,7 @@ if [ ! -x "$BIN" ] || [ dst/porcupine/main.go -nt "$BIN" ]; then
   mkdir -p "$(dirname "$BIN")"
   (cd dst/porcupine && go build -o "$BIN" .)
 fi
-"$BIN" "$FILE" || {
+"$BIN" -timeout "${2:-60s}" "$FILE" || {
   STATUS=$?
   [ "$STATUS" -eq 1 ] && "$BIN" -html "${FILE%.json}.html" "$FILE" >/dev/null || true
   exit "$STATUS"

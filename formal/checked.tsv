@@ -1,31 +1,35 @@
-FPaxosAllAboard	pass	b3fffffb011b277b	2026-11-11	30181 distinct states, 01s
-FPaxosEvenNodes	pass	7f6385ecf1b5eb39	2026-11-11	258955 distinct states, 12s
-FPaxosFiveAcceptors	pass	803a2bb85732cac0	2026-11-11	6404845 distinct states, 27min 29s
-FPaxosGrid	pass	d8ddbe0a216937a6	2026-11-11	13026025 distinct states, 04min 21s
-FPaxosMajority	pass	4341ce25ce9a84c9	2026-11-11	29249 distinct states, 01s
-FPaxosMajorityTwoIndexes	pass	028156edd968c479	2026-11-11	67941821 distinct states, 58min 57s
-FPaxosNoConflictStepDown	fail	afab55e851465f56	2026-11-11	509628 distinct states, 38s
-FPaxosNoFence	fail	2115103e0e86d25d	2026-11-11	6056 distinct states, 00s
-FPaxosNoSnapshotGuard	fail	e2cf799e08937cd1	2026-11-11	29652 distinct states, 00s
-FPaxosReachableAllLearned	fail	b735d7f18181b5e9	2026-11-11	1685 distinct states, 00s
-FPaxosReachableConflict	fail	22354b24d3c1f7f2	2026-11-11	25832 distinct states, 02s
-FPaxosReachableDecided	fail	b6c48b69951625c2	2026-11-11	291 distinct states, 00s
-FPaxosReachableRecovery	fail	b7411a1e53eb8c75	2026-11-11	3774 distinct states, 00s
-FPaxosReachableSnapshot	fail	fb2b458f0e443914	2026-11-11	2071 distinct states, 00s
-FPaxosSingleton	pass	01b336436da51898	2026-11-11	4563 distinct states, 00s
-FPaxosSingletonTwoIndexes	pass	0b24189edd0f5120	2026-11-11	8246665 distinct states, 06min 21s
-FPaxosSnapshots	pass	3f6266173a1f5261	2026-11-11	180165 distinct states, 03s
-FPaxosThreeEpochs	pass	94f2790abe258e2b	2026-11-11	6957989 distinct states, 02min 26s
-FPaxosUnsafeQuorums	fail	6ef8cb3fb6e283ab	2026-11-11	1387 distinct states, 00s
-Reconfig	pass	552ac3d187e4e9b1	2026-11-11	44286932 distinct states, 25min 06s
-ReconfigCoLocated	pass	59c3a8a069dbf5cf	2026-11-10	2164083 distinct states, 03min 02s
-ReconfigCoLocatedNoClosure	fail	34be96ca87c0bef5	2026-11-10	648742 distinct states, 40s
-ReconfigCoLocatedNoJoint	fail	5075ec5499c59d21	2026-11-10	13239 distinct states, 02s
-ReconfigCoLocatedReachableFinal	fail	df08e017ff03e1ae	2026-11-10	16218 distinct states, 02s
-ReconfigCoLocatedReachableRaised	fail	c6db56834d87fa8d	2026-11-10	156 distinct states, 00s
-ReconfigNoClosure	fail	c2b44d6c08d5ab01	2026-11-11	13159177 distinct states, 05min 30s
-ReconfigNoJoint	fail	17ef4c9be87b1f26	2026-11-10	242814 distinct states, 10s
-ReconfigReachableAfterFinal	fail	ac9442cd9c5c2eb2	2026-11-10	178032 distinct states, 15s
-ReconfigReachableFinal	fail	e80bc9f33ac97ddd	2026-11-11	169067 distinct states, 04s
-ReconfigReachableRaised	fail	11ae8dc87b2f0e88	2026-11-11	1161 distinct states, 00s
+FPaxosAllAboard	pass	b7533c874287f87b	2026-11-14	30181 distinct states, 01s
+FPaxosEvenNodes	pass	b3c46074094ee926	2026-11-14	258955 distinct states, 12s
+FPaxosFiveAcceptors	pass	051466c1414f905c	2026-11-14	6404845 distinct states, 23min 52s
+FPaxosGrid	pass	47ee563d291ad9e4	2026-11-14	13026025 distinct states, 03min 07s
+FPaxosMajority	pass	dee674adee93ccb9	2026-11-14	29249 distinct states, 01s
+FPaxosMajorityTwoIndexes	pass	16f872cf21206ea5	2026-11-14	67941821 distinct states, 43min 49s
+FPaxosNoConflictStepDown	fail	6ae427b8332ad449	2026-11-14	604978 distinct states, 56s
+FPaxosNoFence	fail	e3bbfd18a7129cce	2026-11-14	6734 distinct states, 00s
+FPaxosNoSnapshotGuard	fail	439baac3444d69db	2026-11-14	28537 distinct states, 01s
+FPaxosReachableAllLearned	fail	1a0dd54031871b92	2026-11-14	1895 distinct states, 00s
+FPaxosReachableConflict	fail	e09413a4df0e319d	2026-11-14	24831 distinct states, 02s
+FPaxosReachableDecided	fail	64afdce9a4e2d727	2026-11-14	303 distinct states, 00s
+FPaxosReachableRecovery	fail	c6324a2f676452b8	2026-11-14	3994 distinct states, 00s
+FPaxosReachableSnapshot	fail	3735c12b48720dbd	2026-11-14	2173 distinct states, 00s
+FPaxosSingleton	pass	9481c3c671fa826d	2026-11-14	4563 distinct states, 00s
+FPaxosSingletonTwoIndexes	pass	ee5fcef26567111b	2026-11-14	8246665 distinct states, 05min 00s
+FPaxosSnapshots	pass	1e25047d5d8df292	2026-11-14	180165 distinct states, 03s
+FPaxosThreeEpochs	pass	2c29818bec43a954	2026-11-14	6957989 distinct states, 02min 26s
+FPaxosUnsafeQuorums	fail	d50fe03fa51b4e3d	2026-11-14	1901 distinct states, 00s
+Reconfig	pass	2751dd2fe37f71e0	2026-11-14	44286932 distinct states, 23min 44s
+ReconfigCoLocated	pass	f29f80a8fc72af59	2026-11-14	2164083 distinct states, 01min 26s
+ReconfigCoLocatedNoClosure	fail	cda50043b6e0f720	2026-11-14	660663 distinct states, 22s
+ReconfigCoLocatedNoJoint	fail	adb9dfa3a9dd4797	2026-11-14	10563 distinct states, 01s
+ReconfigCoLocatedReachableFinal	fail	56834cdff5ea4de1	2026-11-14	17739 distinct states, 01s
+ReconfigCoLocatedReachableRaised	fail	e9c106dc2b9dc4b9	2026-11-14	178 distinct states, 00s
+ReconfigNoClosure	fail	68ecd16b719e284c	2026-11-14	13464987 distinct states, 05min 26s
+ReconfigNoJoint	fail	23507306b7ff5667	2026-11-14	235755 distinct states, 05s
+ReconfigReachableAfterFinal	fail	24afc2a26b53a30c	2026-11-14	166411 distinct states, 08s
+ReconfigReachableFinal	fail	1ba9db955e1e6d38	2026-11-14	245271 distinct states, 06s
+ReconfigReachableRaised	fail	8ae471492f6e4399	2026-11-14	1483 distinct states, 00s
 ReconfigThreeIndexes	pass	3ef923ea1be409ed	2026-11-11	414108959 distinct states, 08h 06min
+Replace	pass	4707848a32a0a949	2026-11-14	32626928 distinct states, 22min 25s
+ReplaceNoChallenge	fail	fe898c7c1db41471	2026-11-14	1632 distinct states, 00s
+ReplaceReachableFinal	fail	d4dbeded00df8177	2026-11-14	44777 distinct states, 02s
+ReplaceSameIdentity	fail	7454e1d95d8fa707	2026-11-14	7022712 distinct states, 04min 41s

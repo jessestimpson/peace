@@ -18,6 +18,9 @@ peace_test_() ->
         fun session_process_eviction/1,
         fun snapshot_in_chunks/1,
         fun change_members/1,
+        fun rejoin/1,
+        fun grid_formation_and_replacement/1,
+        fun concurrent_formation/1,
         fun machine_effects/1,
         fun unsafe_quorum_is_refused/1,
         fun storage_failure_stops_server/1,
@@ -109,7 +112,7 @@ durable_restart(Ids0) ->
         integer_to_list(erlang:unique_integer([positive]))
     ]),
     Opts = (fast())#{storage => {peace_storage_dets, #{dir => Dir}}},
-    Config = fun(Id) -> Opts#{id => Id, members => Ids, machine => ?TEST_MACHINE} end,
+    Config = fun(Id) -> Opts#{id => Id, machine => ?TEST_MACHINE} end,
     {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
@@ -139,7 +142,7 @@ sessions_snapshots_and_leases(Ids0) ->
         snapshot_interval => 3,
         read_lease_ms => 100
     },
-    Config = fun(Id) -> Opts#{id => Id, members => Ids, machine => ?TEST_MACHINE} end,
+    Config = fun(Id) -> Opts#{id => Id, machine => ?TEST_MACHINE} end,
     {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
@@ -244,8 +247,9 @@ session_results(Refs) ->
      || Ref <- Refs
     ].
 
-%% A server that restarts without data receives a snapshot. The snapshot
-%% is larger than one chunk.
+%% A server that restarts without data has a new incarnation. It replaces
+%% the member that it was and receives a snapshot. The snapshot is larger
+%% than one chunk.
 snapshot_in_chunks(Ids0) ->
     Ids = lists:sublist(Ids0, 3),
     Opts = (fast())#{snapshot_interval => 4, snapshot_chunk_bytes => 64},
@@ -253,11 +257,19 @@ snapshot_in_chunks(Ids0) ->
         {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
         Leader = await_leader(Ids),
         [Behind | _] = Ids -- [Leader],
+        #{member := Before} = peace:overview(Behind),
         ok = peace:stop_server(Behind),
         [{ok, ok, Leader} = peace:propose(Leader, {put, N, binary:copy(<<N>>, 100)}) || N <- lists:seq(1, 20)],
         #{snapshot_index := Snapshot} = peace:overview(Leader),
         ?assert(Snapshot >= 16),
-        ok = peace:start_server(Opts#{id => Behind, members => Ids, machine => ?TEST_MACHINE}),
+        ok = peace:start_server(Opts#{id => Behind, machine => ?TEST_MACHINE}),
+        #{member := After, members := []} = peace:overview(Behind),
+        ?assertNotEqual(Before, After),
+        {ok, ok, Leader} = peace:replace_member(Ids, Behind),
+        ?assertMatch({ok, Ids, Leader}, peace:members(Leader)),
+        #{config := {final, {Members, majority}}} = peace:overview(Leader),
+        ?assert(lists:member(After, Members)),
+        ?assertNot(lists:member(Before, Members)),
         Expected = history(Leader),
         ?assert(erlang:external_size(Expected) > 20 * 64),
         ok = await(fun() ->
@@ -268,6 +280,84 @@ snapshot_in_chunks(Ids0) ->
         end)
     end).
 
+%% A server that is started with `rejoin' and without stored state replaces
+%% the member that it was, without a call by an operator.
+rejoin(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, ?FAST),
+        Leader = await_leader(Ids),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
+        [Lost | _] = Ids -- [Leader],
+        #{member := Before} = peace:overview(Lost),
+        ok = peace:stop_server(Lost),
+        ok = peace:start_server((fast())#{id => Lost, machine => ?TEST_MACHINE, rejoin => Ids}),
+        #{member := After} = peace:overview(Lost),
+        ok = await(fun() ->
+            case peace:overview(Leader) of
+                #{config := {final, {Members, majority}}} ->
+                    case {lists:member(After, Members), lists:member(Before, Members)} of
+                        {true, false} -> {ok, ok};
+                        _ -> retry
+                    end;
+                _ ->
+                    retry
+            end
+        end),
+        ok = await(fun() ->
+            case history(Lost) of
+                [{_, {put, a, 1}}] -> {ok, ok};
+                _ -> retry
+            end
+        end),
+        ?assertMatch({ok, Ids, Leader}, peace:members(Lost))
+    end).
+
+%% A grid quorum system is given with addresses. A server that replaces a
+%% member takes the row of that member.
+grid_formation_and_replacement(Ids0) ->
+    Ids = [A, B, C, D] = lists:sublist(Ids0, 4),
+    Grid = {grid, [[A, B], [C, D]]},
+    ?_test(begin
+        {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, (?FAST)#{quorum => Grid}),
+        Leader = await_leader(Ids),
+        {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
+        [Lost | _] = Ids -- [Leader],
+        ok = peace:stop_server(Lost),
+        ok = peace:start_server((fast())#{id => Lost, machine => ?TEST_MACHINE}),
+        #{member := After} = peace:overview(Lost),
+        {ok, ok, Leader} = peace:replace_member(Ids, Lost),
+        #{config := {final, {Members, {grid, Rows}}}} = peace:overview(Leader),
+        ?assertEqual(lists:sort(Members), lists:sort(lists:append(Rows))),
+        ?assertEqual([[A, B], [C, D]], [[{N, Node} || {N, Node, _} <- Row] || Row <- Rows]),
+        ?assert(lists:member(After, Members)),
+        %% The members can be changed with addresses after the replacement.
+        {ok, ok, _} = peace:change_members(Ids, [A, B, C], majority),
+        ?assertMatch({ok, [A, B, C], _}, peace:members(A))
+    end).
+
+%% Several callers form the same cluster at the same time, as the nodes of
+%% the Jepsen test do. Every call stores the same configuration, because
+%% the incarnations are fixed when the servers start.
+concurrent_formation(Ids) ->
+    ?_test(begin
+        [ok = peace:start_server((fast())#{id => Id, machine => ?TEST_MACHINE}) || Id <- Ids],
+        Self = self(),
+        Callers = [spawn_link(fun() -> Self ! {formed, peace:form_cluster(Ids, {counting, 4, 2})} end) || _ <- Ids],
+        Results = [
+            receive
+                {formed, Result} -> Result
+            after 5000 -> timeout
+            end
+         || _ <- Callers
+        ],
+        ?assertEqual([{ok, Ids, []}], lists:usort(Results)),
+        Leader = await_leader(Ids),
+        {ok, ok, Leader} = peace:propose(Ids, {put, a, 1}),
+        Configs = lists:usort([Config || Id <- Ids, #{config := Config} <- [peace:overview(Id)]]),
+        ?assertMatch([{final, {_, {counting, 4, 2}}}], Configs)
+    end).
+
 %% This test removes one server and adds one server, with real processes.
 change_members(Ids0) ->
     [A, B, C, D | _] = Ids0,
@@ -276,9 +366,9 @@ change_members(Ids0) ->
         {ok, Old, []} = peace:start_cluster(Old, ?TEST_MACHINE, ?FAST),
         Leader = await_leader(Old),
         {ok, ok, Leader} = peace:propose(Old, {put, a, 1}),
-        %% The new server is started with the members of the cluster. The
-        %% new server then waits.
-        ok = peace:start_server((fast())#{id => D, members => Old, machine => ?TEST_MACHINE}),
+        %% The new server is started without a configuration. The new
+        %% server then waits.
+        ok = peace:start_server((fast())#{id => D, machine => ?TEST_MACHINE}),
         [Gone | Stay] = [Leader | Old -- [Leader]],
         New = lists:sort([D | Stay]),
         {ok, ok, Leader} = peace:change_members(Old, New, majority),
@@ -321,15 +411,20 @@ unsafe_quorum_is_refused(Ids0) ->
             {error, {invalid_quorum, {quorums_do_not_intersect, _}}},
             peace:start_cluster(Ids, ?TEST_MACHINE, #{quorum => {counting, 2, 1}})
         ),
-        %% peace_server also validates the quorum system, regardless of
-        %% which caller starts the server.
-        process_flag(trap_exit, true),
+        %% A server also validates the quorum system, regardless of which
+        %% caller forms the cluster.
+        [ok = peace:start_server((fast())#{id => Id, machine => ?TEST_MACHINE}) || Id <- Ids],
+        Members = [Member || Id <- Ids, #{member := Member} <- [peace:overview(Id)]],
         ?assertMatch(
             {error, {invalid_quorum, _}},
-            peace_server:start_link(#{
-                id => hd(Ids), members => Ids, machine => ?TEST_MACHINE, quorum => {counting, 1, 1}
-            })
-        )
+            gen_server:call(hd(Ids), {form, {Members, {counting, 1, 1}}})
+        ),
+        %% A server stores only a configuration that names it.
+        ?assertMatch({error, {not_named, _}}, gen_server:call(hd(Ids), {form, {tl(Members), majority}})),
+        {ok, Ids, []} = peace:form_cluster(Ids, majority),
+        %% The formation can be repeated. Another configuration is refused.
+        {ok, Ids, []} = peace:form_cluster(Ids, majority),
+        ?assertMatch({error, {already_formed, _}}, peace:form_cluster(Ids, {counting, 2, 2}))
     end).
 
 %% ---------------------------------------------------------------------------
@@ -370,7 +465,7 @@ storage_failure_stops_server(Ids0) ->
         ok = peace_failing_storage:fail(Leader, open),
         ?assertMatch(
             {error, {storage_failed, injected}},
-            peace:start_server(Opts#{id => Leader, members => Ids, machine => ?TEST_MACHINE})
+            peace:start_server(Opts#{id => Leader, machine => ?TEST_MACHINE})
         )
     end).
 
@@ -392,7 +487,7 @@ default_storage_is_durable(Ids0) ->
             {ok, ok, Leader} = peace:propose(Leader, {put, a, 1}),
             ?assertEqual(3, length(filelib:wildcard(filename:join([Dir, "*", "*.wal"])))),
             [ok = peace:stop_server(Id) || Id <- Ids],
-            [ok = peace:start_server(Opts#{id => Id, members => Ids, machine => ?TEST_MACHINE}) || Id <- Ids],
+            [ok = peace:start_server(Opts#{id => Id, machine => ?TEST_MACHINE}) || Id <- Ids],
             NewLeader = await_leader(Ids),
             ?assertMatch({ok, 1, NewLeader}, peace:propose(NewLeader, {get, a}))
         after

@@ -72,8 +72,10 @@ Remaining limitations:
 - A checkpoint rewrites the whole machine state. See milestone 4.
 - The log is shortened only by a snapshot. With
   `snapshot_interval => infinity` the log grows without limit.
-- There is no procedure for a member whose storage failed. See "Member
-  identity" and the forced recovery item in milestone 5.
+- A member whose storage failed is replaced with
+  `peace:replace_member/3`. See "Member identity". A cluster that has lost
+  a phase-one quorum has no procedure. See the forced recovery item in
+  milestone 5.
 
 ### Milestone 3: Validation on real nodes
 
@@ -238,9 +240,10 @@ Reasons for the order:
 
 "Memory nodes" is done after all four items.
 
-- [ ] Do the work in "Member identity". The work identifies a member by the
+- [x] Do the work in "Member identity". The work identifies a member by the
       incarnation of its storage, separates the formation of a cluster from
       the start of a server, and adds an operation that replaces a member.
+      Done 2026-11-14.
 - [ ] Add a non-voting stage for a joining server. A server currently counts
       toward quorums before it has caught up, which can delay commits. A
       replacement for a member whose storage was lost starts with no
@@ -374,7 +377,8 @@ None is required for production use.
 ## Member identity
 
 This work is the first of the ordered items in milestone 5. It applies to
-every storage backend. "Memory nodes" depends on it.
+every storage backend. "Memory nodes" depends on it. The work was done on
+2026-11-14. The section describes the design as it was built.
 
 Goal: a server that has lost its acceptor state never answers under the
 identity that it had before the loss. The loss of the state of one server
@@ -394,10 +398,10 @@ Rules for the incarnation:
   stored state for its name.
 - The incarnation is 16 bytes from `crypto:strong_rand_bytes/1`, for every
   storage backend.
-- The incarnation is stored in the same write as the first acceptor state.
-  Each later record of the acceptor state can be checked against it. A
-  stored incarnation without acceptor state, or acceptor state with another
-  incarnation, is treated as no stored state.
+- The incarnation is stored in the storage backend of the server, with the
+  acceptor state. A server stores its incarnation before it handles any
+  message. A server does not start on a promise, an entry or a snapshot
+  that is stored without an incarnation.
 - Every message between members carries the incarnation of the sender and
   of the destination. A server drops a message for another incarnation. A
   leader counts an acknowledgement only from the incarnation that the
@@ -425,7 +429,7 @@ Formation therefore becomes an operation that is separate from start, as
 
 | Operation | When it is used | Effect |
 |---|---|---|
-| Form a cluster | Once, by the operator or by the application | Each named server creates its incarnation. The operation collects the incarnations and stores the initial configuration, with the incarnations, on every named server. |
+| Form a cluster (`peace:form_cluster/3`) | Once, by the operator or by the application | The operation collects the incarnation of every named server and stores the initial configuration, with the incarnations, on every named server. A server stores the configuration only if it has none. The operation stores nothing if a server does not answer or has another configuration. |
 | Start a server, stored state present | Every start after a stop or a crash | The server continues under its stored identity. |
 | Start a server, no stored state | A new server, or a server whose storage was lost | The server creates a new incarnation and starts as a non-member. The server does not use a configuration from its start arguments. |
 
@@ -446,28 +450,35 @@ applied `final(New)` therefore needs a phase-one quorum of `Old`, and that
 quorum contains a server that stores each decided value. A candidate that
 has applied `final(New)` stores those values already.
 
-Rules for the request:
+A replacement is requested in one of two ways:
 
-- A replace request and its reply carry no destination incarnation, because
-  a server without stored state does not know the incarnation of any
-  member. The request names the incarnation of the sender.
+| Way | Who asks | Challenge |
+|---|---|---|
+| `peace:replace_member/3` | The operator. The function reads the incarnation from the server that runs. | No |
+| The option `rejoin` | A server that starts without stored state. The server sends a replace request to the addresses in `rejoin` on each election timeout. | Yes |
+
+Rules for the replace request:
+
+- A replace request carries no destination incarnation, because a server
+  without stored state does not know the incarnation of any member. The
+  request names the incarnation of the sender.
 - Before the leader proposes the replacement, the leader sends a challenge
-  to the incarnation that the request names. The leader proposes the
-  replacement only after that incarnation answers. Reason: incarnations are
-  not ordered. Without the challenge, a delayed request from a retired
-  incarnation would replace the running member with a server that no
-  longer exists.
+  to the incarnation that the request names. The challenge holds the epoch
+  of the leader. The leader proposes the replacement only after that
+  incarnation answers. Reason: incarnations are not ordered. Without the
+  challenge, a delayed request from a retired incarnation would replace
+  the running member with a server that no longer exists.
 - The leader ignores a request from an incarnation that is already a
   member.
-- When several servers ask at the same time, the leader combines the
-  replacements into one membership change. One change shortens the time
-  during which a failure of the leader stops the cluster.
-- For a disk backend, a server without stored state does not send the
-  replace request by default. The server reports the state and waits for
-  the operator. Reason: a data volume that is not mounted when the node
-  starts looks like lost storage. Several nodes with the same fault would
-  each replace their member and discard data that still exists. An option
-  enables the automatic request.
+- The leader replaces, on its next heartbeat, every member whose
+  replacement has answered. The servers that answer within one heartbeat
+  interval are replaced by one membership change. One change shortens the
+  time during which a failure of the leader stops the cluster.
+- A server without stored state does not send the replace request by
+  default. The server logs a notice and waits for the operator. Reason: a
+  data volume that is not mounted when the node starts looks like lost
+  storage. Several nodes with the same fault would each replace their
+  member and discard data that still exists.
 
 ### Availability
 
@@ -539,32 +550,45 @@ Disadvantages, which are the reasons it was not chosen:
 
 ### Work
 
-- [ ] Check what the thesis
+- [x] Check what the thesis
       ([docs/UCAM-CL-TR-935.pdf](docs/UCAM-CL-TR-935.pdf)) assumes about
       stable storage, and state in the documentation where the replacement
-      of a member that lost its state departs from it.
-- [ ] Add the incarnation to the member identity, to the stored acceptor
-      state of every backend, and to every message between members.
-- [ ] Add the operation that forms a cluster, and remove the initial
-      configuration from the start arguments of a server.
-- [ ] Add a configuration operation that replaces one or more members and
-      keeps the position of each old member: grid row and column, weight
-      and tags.
-- [ ] Add the replace request, the challenge and the catch-up from a
-      snapshot for a server that starts without stored state.
-- [ ] Add the option that lets a disk server send the replace request
+      of a member that lost its state departs from it. The thesis assumes
+      a fixed set of participants whose persistent state is unchanged
+      after a restart (section 1.6). Section 3.12, "Fail-stop model",
+      describes a participant that does not restart, with reconfiguration
+      to restore the fault tolerance. peace uses the fail-stop model for a
+      server that has lost its state. See "Member identity" in
+      `peace_core`.
+- [x] Add the incarnation to the member identity, to the stored state of
+      every backend, and to every message between members.
+- [x] Add the operation that forms a cluster, `peace:form_cluster/3`, and
+      remove the initial configuration from the start arguments of a
+      server.
+- [x] Add a configuration operation that replaces one or more members and
+      keeps the position of each old member. The operation keeps the rows
+      of a grid. A custom quorum module can export `replace_member/3`.
+      Tags do not exist yet.
+- [x] Add the replace request, the challenge and the catch-up for a server
+      that starts without stored state.
+- [x] Add the option `rejoin`, which lets a server send the replace request
       without the operator.
-- [ ] Refuse to start a server whose stored state names another node.
-- [ ] Add these cases to the TLA+ membership model:
+- [x] Refuse to start a server whose stored state names another node.
+- [x] Add these cases to the TLA+ membership model, in
+      [formal/Replace.tla](formal/Replace.tla):
   - a replacement in which the old acceptor never answers again;
   - a replace request from a retired incarnation, with and without the
     challenge;
   - an acceptor that loses its state and answers under its old identity.
-    The model checker must report a safety violation for this case.
-- [ ] Add a simulation workload in which servers lose their storage and are
+    The model checker reports a safety violation for this case.
+- [x] Add a simulation workload in which servers lose their storage and are
       replaced. Add two planted bugs: a server that rejoins under its old
       incarnation, and a leader that accepts a replace request without the
       challenge.
+- [ ] Add a Jepsen nemesis that wipes the data directory of a node, and
+      start the nodes with `rejoin`.
+- [ ] Add the incarnation to trace validation. The trace model has a fixed
+      set of acceptors.
 
 ### Limitations
 
@@ -574,6 +598,13 @@ Disadvantages, which are the reasons it was not chosen:
   directory and let the server be replaced.
 - A replace request needs a leader. If the lost servers include a member of
   every phase-one quorum and the leader, no replacement is possible.
+- A server can answer a challenge and lose its state before the leader
+  proposes the replacement. The leader then adds an incarnation that no
+  longer runs. The next incarnation at the address asks again.
+- `peace:form_cluster/3` is not atomic. Two calls at the same time are
+  safe only if they use the same quorum system.
+- A server does not start on stored state that was written before this
+  work, because that state has no incarnation. There is no migration.
 
 Done when: the milestone 2 limitation for a member whose storage failed is
 removed, the new TLA+ cases are checked, and the simulation workload

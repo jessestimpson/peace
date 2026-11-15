@@ -1,7 +1,9 @@
 %% @doc A custom quorum system for the Jepsen test: weighted voting.
 %%
-%% `Arg' is a map from a server id to the weight of that server. A server
-%% that is not in the map has the weight 1. A set of members is a phase-one
+%% `Arg' is a map from the address of a server to the weight of that
+%% server. A server that is not in the map has the weight 1. The weight
+%% belongs to the address, so a server that replaces a member has the
+%% weight of that member. A set of members is a phase-one
 %% quorum and a phase-two quorum if the set holds more than half of the
 %% total weight of the members. Two such sets always intersect.
 %%
@@ -24,4 +26,4 @@ is_quorum(Weights, Members, Set) ->
     2 * weight(Weights, Set) > weight(Weights, Members).
 
 weight(Weights, Ids) ->
-    lists:sum([maps:get(Id, Weights, 1) || Id <- Ids]).
+    lists:sum([maps:get(peace_core:address(Id), Weights, 1) || Id <- Ids]).
