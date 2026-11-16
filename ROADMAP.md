@@ -238,8 +238,6 @@ Reasons for the order:
 - Leadership pinning is after forced recovery because a pin makes the loss
   of a phase-one quorum more likely to lose decided values.
 
-"Memory nodes" is done after all four items.
-
 - [x] Do the work in "Member identity". The work identifies a member by the
       incarnation of its storage, separates the formation of a cluster from
       the start of a server, and adds an operation that replaces a member.
@@ -373,12 +371,20 @@ None is required for production use.
   milestone 1 is for benchmarking and testing.
 - Byzantine fault tolerance. peace tolerates crash faults and message
   faults.
+- Memory nodes: servers that keep their state only in memory, with a rule
+  that forms a cluster again without an operator after most nodes restart
+  (the bootstrap rule). An earlier version of this document planned the
+  work. A TLA+ model refuted the safety argument of that plan: a node that
+  promises to leave a cluster, restarts and loses the promise can be
+  admitted to the cluster again. The idea is tested as a hypothesis in a
+  separate repository, peace_ets. peace supports that repository only
+  through the storage behaviour and `peace_storage_check`, which serve any
+  backend.
 
 ## Member identity
 
 This work is the first of the ordered items in milestone 5. It applies to
-every storage backend. "Memory nodes" depends on it. The work was done on
-2026-11-14. The section describes the design as it was built.
+every storage backend. The work was done on 2026-11-14. The section describes the design as it was built.
 
 Goal: a server that has lost its acceptor state never answers under the
 identity that it had before the loss. The loss of the state of one server
@@ -506,9 +512,9 @@ node restarts, which does not match the lifetime of the acceptor state:
 
 | Event | Creation changes | Acceptor state lost |
 |---|---|---|
-| The node restarts, memory node | yes | yes |
-| The peace application restarts and the node keeps running, memory node | no | yes |
-| The node restarts, disk node | yes | no |
+| The node restarts, server with state in memory | yes | yes |
+| The peace application restarts and the node keeps running, server with state in memory | no | yes |
+| The node restarts, server with state on disk | yes | no |
 
 In the second row, an identity based on creation would let a server answer
 under its old identity without its promises. That is unsafe. The server
@@ -542,11 +548,10 @@ Disadvantages, which are the reasons it was not chosen:
   state does not change. Peers would have to learn the new pid. The
   explicit incarnation checks on messages would still be needed for this
   case and for the sender check.
-- Safety would depend on the detection of a lost table. See "Detection of
-  lost state" in "Memory nodes". Code that erases the `persistent_term`
-  key, or an upgrade that changes the key, would allow a server to answer
-  under its old identity without its state. In the chosen design, the key
-  only affects reporting.
+- Safety would depend on a separate mechanism that detects state lost
+  while the node keeps running. An error in that mechanism would allow a
+  server to answer under its old identity without its state. In the chosen
+  design, the incarnation is stored with the state and is lost with it.
 
 ### Work
 
@@ -609,116 +614,3 @@ Disadvantages, which are the reasons it was not chosen:
 Done when: the milestone 2 limitation for a member whose storage failed is
 removed, the new TLA+ cases are checked, and the simulation workload
 passes.
-
-## Memory nodes
-
-This work is not scheduled. It depends on "Member identity" and on the
-forced recovery item in milestone 5, and is done after the ordered items in
-milestone 5.
-
-Goal: support a state machine whose state is valid only while the nodes
-run. The example is a process registry, where the state contains Erlang
-pids. Such state must not be read back from disk after a node restarts.
-
-Design: a memory node keeps its acceptor state, its log and its snapshot in
-an ETS table and writes nothing to disk. The peace supervisor owns the
-table. The identity of a memory server follows "Member identity".
-
-| Event | Table | Server identity |
-|---|---|---|
-| The server process restarts | The table is kept. | The server keeps its incarnation and recovers its promise and its accepted proposals. |
-| The node restarts, or the peace application restarts | The table is lost. | The server creates a new incarnation and replaces its old member. |
-
-A memory server sends the replace request without the operator.
-
-### Detection of lost state
-
-A `persistent_term` key for each server name records that the server stored
-state during the current lifetime of the node. A `persistent_term` key
-belongs to no process. It lasts until the node stops or until code erases
-it, so it survives a restart of the peace application. The server writes
-the key once in a lifetime of the node, so the global garbage collection
-that an update of a `persistent_term` causes happens once for each server.
-
-| Key for the server | State of the server in the table | Meaning |
-|---|---|---|
-| absent | absent | First start of the server during this lifetime of the node. |
-| present | present | The server process restarted. The state is valid. |
-| present | absent | The state was lost while the node kept running. |
-| absent | present | Code erased the key. The state is valid. The server writes the key again. |
-
-In the third row, the server reports the loss through `logger` and
-`telemetry`. The key only affects reporting. In the first row and in the
-third row the server creates a new incarnation.
-
-### Bootstrap rule
-
-A cluster of memory nodes can lose a phase-one quorum without any
-hardware fault, for example when most nodes restart together. The bootstrap
-rule is forced recovery that the servers start without an operator. The
-rule uses the cluster identity `{Generation, Token}` of forced recovery.
-
-Proposed rule:
-
-- The cluster has a fixed list of nodes and a fixed quorum system over
-  those nodes. A replacement keeps the position of the old member, so the
-  quorum system stays valid.
-- A server promises to leave the cluster of the present generation. After
-  the promise, the server does not answer a message of that generation and
-  does not send a replace request to that cluster.
-- A new cluster with the next generation forms only when the servers that
-  have made the promise contain a phase-one quorum of the fixed quorum
-  system.
-
-Reason for a phase-one quorum: a phase-one quorum has a member in common
-with every phase-two quorum, so the earlier cluster cannot decide another
-value after the promises. A majority of the nodes is not enough under
-Flexible Paxos. Example: under `{counting, 4, 2}` over 5 nodes, 3 new
-incarnations are a majority, and the 2 remaining servers can still decide
-if one of them is the leader. The rule requires 4 of the 5 nodes.
-
-The rule is automatic, so an error in the rule creates two clusters and no
-operator sees the recovery. The rule is added to the TLA+ model before the
-implementation.
-
-### Work
-
-- [ ] Add an ETS storage backend. The supervisor creates one public
-      `ordered_set` table in `init/1`. The key is `{ServerName, Key}`. A
-      group of events is written with one `ets:insert/2` call, which is
-      atomic.
-- [ ] Add the `persistent_term` key that detects state lost while the node
-      kept running. Report the loss through `logger` and `telemetry`.
-- [ ] Add monitor effects for the machine, as in ra:
-      `{monitor, process, Pid}` and `{monitor, node, Node}`. The leader
-      performs them and issues them again from `state_enter/2`. The down
-      signal is proposed as a value, so that every replica removes the pid.
-- [ ] Add the bootstrap rule to the TLA+ model and check it. Then implement
-      it on top of forced recovery.
-- [ ] Decide whether a server that survives from the earlier cluster keeps
-      its state in the new cluster. Forced recovery keeps the state of the
-      surviving servers. For a process registry, the pids on a surviving
-      node are still valid, so discarding the state removes valid entries.
-- [ ] Add an event that tells the application that the state was reset, for
-      the case in which the state is discarded.
-- [ ] Add a simulation workload with memory nodes, kills, replacement on
-      start and the bootstrap rule.
-- [ ] Add a process registry as an example machine.
-
-### Limitations
-
-- A node restart is a permanent failure of one acceptor. If the stopped
-  nodes include a member of every phase-one quorum and the leader, or a
-  member of every phase-two quorum, the cluster cannot decide again until
-  the bootstrap rule forms a new cluster.
-- A quorum system with a large phase-one quorum tolerates few restarts.
-  Under `{counting, 4, 2}` over 5 nodes, a restart of the leader and of one
-  other node stops the cluster. A majority quorum system over 5 nodes
-  tolerates the restart of 2 nodes.
-- The log and the snapshot are copies outside the server process, so the
-  machine state is held in memory twice.
-- A value that makes `apply/3` crash on every server also crashes every new
-  incarnation.
-
-Done when: the process registry passes the simulation workload and a Jepsen
-run with kills, and the bootstrap rule is model checked.

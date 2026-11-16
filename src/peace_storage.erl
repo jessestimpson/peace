@@ -38,6 +38,9 @@
 %%   of the server process. This backend is for tests, and for clusters in
 %%   which losing a member is preferred to waiting for a disk.</li>
 %% </ul>
+%%
+%% A backend can be defined outside peace. `peace_storage_check' checks that
+%% a backend returns after an open exactly what was written.
 -module(peace_storage).
 
 -export([open/3, write/3, close/2, snapshot_begin/3, snapshot_continue/2]).
