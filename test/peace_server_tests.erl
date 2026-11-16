@@ -227,6 +227,125 @@ stored_identity_test() ->
         file:del_dir_r(Dir)
     end.
 
+%% A storage backend supplies the incarnation of a server that recovers no
+%% stored state.
+incarnation_of_the_backend_test() ->
+    Id = {Name, Node} = {peace_server_tests_supplied, node()},
+    {ok, Pid} = peace_server:start(#{
+        id => Id,
+        machine => {module, peace_test_machine, #{}},
+        storage => {peace_incarnation_storage, #{incarnation => {table, 7}}}
+    }),
+    ?assertMatch(#{member := {Name, Node, {table, 7}}}, peace:overview(Id)),
+    ok = gen_server:stop(Pid).
+
+%% `peace:form_cluster/3' forms a cluster with a machine state.
+form_cluster_with_machine_state_test() ->
+    Ids = [{Name, node()} || Name <- [peace_server_tests_f1, peace_server_tests_f2, peace_server_tests_f3]],
+    Pids = [
+        begin
+            {ok, Pid} = peace_server:start(#{
+                id => Id,
+                machine => {module, peace_test_machine, #{}},
+                storage => {peace_storage_mem, #{}},
+                election_timeout_ms => 50
+            }),
+            Pid
+        end
+     || Id <- Ids
+    ],
+    MState = #{kv => #{k => 0}, history => [], notify => undefined},
+    try
+        ?assertEqual({ok, Ids, []}, peace:form_cluster(Ids, majority, #{machine_state => MState})),
+        ?assertMatch({ok, ok, _}, until_leader(fun() -> peace:propose(Ids, {put, j, 1}) end, 100)),
+        ?assertMatch({ok, #{k := 0, j := 1}, _}, peace:consistent_query(Ids, fun(#{kv := KV}) -> KV end)),
+        %% The same formation is accepted again. Another state is refused.
+        ?assertEqual({ok, Ids, []}, peace:form_cluster(Ids, majority, #{machine_state => MState})),
+        ?assertMatch({error, _}, peace:form_cluster(Ids, majority, #{machine_state => MState#{kv := #{}}}))
+    after
+        [gen_server:stop(Pid) || Pid <- Pids]
+    end.
+
+%% `peace:form_cluster/3' with `members' forms a part of a cluster whose
+%% incarnations the caller knows. The servers that are started later take
+%% part without being formed.
+form_cluster_with_members_test() ->
+    Names = [peace_server_tests_m1, peace_server_tests_m2, peace_server_tests_m3],
+    Ids = [First | Rest] = [{Name, node()} || Name <- Names],
+    Members = [{Name, node(), {inc, Name}} || Name <- Names],
+    Start = fun({Name, _} = Id) ->
+        {ok, Pid} = peace_server:start(#{
+            id => Id,
+            machine => {module, peace_test_machine, #{}},
+            storage => {peace_incarnation_storage, #{incarnation => {inc, Name}}},
+            election_timeout_ms => 50
+        }),
+        Pid
+    end,
+    MState = #{kv => #{k => 0}, history => [], notify => undefined},
+    Pid1 = Start(First),
+    try
+        Opts = #{members => Members, machine_state => MState},
+        ?assertEqual({ok, [First], []}, peace:form_cluster([First], majority, Opts)),
+        %% One member of three decides nothing.
+        ?assertMatch({error, _}, peace:propose(First, {put, j, 1}, 300)),
+        Pids = [Start(Id) || Id <- Rest],
+        try
+            ?assertMatch({ok, ok, _}, until_leader(fun() -> peace:propose(Ids, {put, j, 2}) end, 100)),
+            %% A server that was not formed receives the machine state.
+            Query = fun(Id) -> peace:local_query(Id, fun(#{kv := KV}) -> KV end) end,
+            ?assertEqual(ok, until(fun() -> [maps:get(k, KV, none) || Id <- Ids, {ok, KV, _} <- [Query(Id)]] =:= [0, 0, 0] end, 100)),
+            %% A configuration that does not name the server is refused.
+            Other = [{peace_server_tests_m1, node(), other} | tl(Members)],
+            ?assertMatch({error, _}, peace:form_cluster([First], majority, #{members => Other}))
+        after
+            [gen_server:stop(Pid) || Pid <- Pids]
+        end
+    after
+        gen_server:stop(Pid1)
+    end.
+
+until(_Fun, 0) ->
+    timeout;
+until(Fun, N) ->
+    case Fun() of
+        true ->
+            ok;
+        false ->
+            timer:sleep(20),
+            until(Fun, N - 1)
+    end.
+
+%% `peace:activate/1' makes a passive server an ordinary member.
+activate_test() ->
+    {Id, Pid} = start_single_unformed(peace_server_tests_passive, #{passive => true}),
+    ?assertMatch(#{passive := true}, peace:overview(Id)),
+    ?assertMatch({error, {cluster_not_formed, [{Id, {error, passive}}]}}, peace:form_cluster([Id], majority)),
+    ?assertEqual(ok, peace:activate(Id)),
+    ?assertMatch(#{passive := false}, peace:overview(Id)),
+    ?assertEqual({ok, [Id], []}, peace:form_cluster([Id], majority)),
+    ?assertEqual(ok, peace:activate(Id)),
+    ok = gen_server:stop(Pid).
+
+%% Calls `Fun' until a leader answers, at most `N' times.
+until_leader(Fun, N) ->
+    case Fun() of
+        {error, no_leader} when N > 0 ->
+            timer:sleep(20),
+            until_leader(Fun, N - 1);
+        Other ->
+            Other
+    end.
+
+start_single_unformed(Name, Opts) ->
+    Id = {Name, node()},
+    {ok, Pid} = peace_server:start(Opts#{
+        id => Id,
+        machine => {module, peace_test_machine, #{}},
+        storage => {peace_storage_mem, #{}}
+    }),
+    {Id, Pid}.
+
 start_single(Name, Opts) ->
     Id = {Name, node()},
     {ok, Pid} = peace_server:start_link(Opts#{

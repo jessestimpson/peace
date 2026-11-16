@@ -57,6 +57,8 @@ log_event({value, _From, _Value, _Session}) -> value;
 log_event({query, _From, _Fun}) -> query;
 log_event({reconfigure, _From, _New}) -> reconfigure;
 log_event({form, _From, _New}) -> form;
+log_event({form, _From, _New, _MState}) -> form;
+log_event({activate, _From}) -> activate;
 log_event({replace, _From, _News}) -> replace;
 log_event(Event) -> Event.
 %% A simulated run reads the state that a server published when its last
@@ -176,10 +178,16 @@ init(Config = #{id := Id}) ->
 %% == Member identity ==
 %%
 %% A member is identified by `{Name, Node, Incarnation}'. `{Name, Node}' is
-%% the address of the server. The incarnation is 16 random bytes. A server
-%% creates its incarnation when it starts and recovers no stored state, and
-%% stores the incarnation before it handles any message. The incarnation
-%% therefore changes when the stored state of the server is lost.
+%% the address of the server. A server creates its incarnation when it
+%% starts and recovers no stored state, and stores the incarnation before it
+%% handles any message. The incarnation therefore changes when the stored
+%% state of the server is lost.
+%%
+%% The incarnation is 16 random bytes, unless the storage backend supplies
+%% one. A backend supplies an incarnation with the key `incarnation' in the
+%% result of `open/2'. See `peace_storage:stored()'. The backend then
+%% guarantees what the random bytes otherwise give: the value is never used
+%% a second time at the address after the stored state was lost.
 %%
 %% Every message between servers names the incarnation of the sender and of
 %% the destination. A server drops a message that names another incarnation
@@ -193,7 +201,8 @@ init(Config = #{id := Id}) ->
 %% <li>the state of a server on another node, or</li>
 %% <li>a promise, an entry or a snapshot without an incarnation.</li>
 %% </ul>
-identify(Config = #{id := Id = {Name, Node}}, Writer, Stored) ->
+identify(Config = #{id := Id = {Name, Node}}, Writer, Stored0) ->
+    Stored = maps:remove(incarnation, Stored0),
     Blank = maps:without([meta], Stored) =:= #{} orelse maps:without([meta], Stored) =:= #{entries => #{}},
     case Stored of
         #{meta := #{node := Node, incarnation := Incarnation}} ->
@@ -203,7 +212,12 @@ identify(Config = #{id := Id = {Name, Node}}, Writer, Stored) ->
         _ when not Blank ->
             {stop, stored_state_without_incarnation};
         _ ->
-            Meta = #{node => Node, incarnation => new_incarnation(Config)},
+            Incarnation =
+                case Stored0 of
+                    #{incarnation := Supplied} -> Supplied;
+                    #{} -> new_incarnation(Config)
+                end,
+            Meta = #{node => Node, incarnation => Incarnation},
             %% The incarnation is stored before this server handles any
             %% message.
             ok = peace_writer:write(Writer, 0, #{meta => Meta}),
@@ -266,6 +280,10 @@ handle_call({reconfigure, New}, From, State) ->
     {noreply, event({reconfigure, From, New}, State)};
 handle_call({form, New}, From, State) ->
     {noreply, event({form, From, New}, State)};
+handle_call({form, New, {machine_state, MState}}, From, State) ->
+    {noreply, event({form, From, New, {machine_state, MState}}, State)};
+handle_call(activate, From, State) ->
+    {noreply, event({activate, From}, State)};
 handle_call({replace, News}, From, State) ->
     {noreply, event({replace, From, News}, State)};
 handle_call(identity, _From, State = #state{core = Core}) ->

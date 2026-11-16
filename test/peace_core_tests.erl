@@ -798,6 +798,104 @@ form_is_refused_test() ->
     S5 = ev(d, {form, f3, {[d], majority}}, S4),
     ?assertEqual({error, already_formed}, proplists:get_value(f3, replies(S5))).
 
+%% A cluster is formed with a machine state. The state is the state as of
+%% index 1, and the first value is decided at index 2.
+form_with_machine_state_test() ->
+    New = {[a, b, c], majority},
+    MState = #{kv => #{k => 0}, history => [], notify => undefined},
+    S0 = join([a, b, c], new([], majority)),
+    %% c is not formed. It has no configuration.
+    S1 = lists:foldl(fun(Id, S) -> ev(Id, {form, {f, Id}, New, {machine_state, MState}}, S) end, S0, [a, b]),
+    ?assertEqual([ok, ok], [proplists:get_value({f, Id}, replies(S1)) || Id <- [a, b]]),
+    ?assertEqual([1, 1, 0], [commit(I, S1) || I <- [a, b, c]]),
+    ?assertEqual(#{k => 0}, kv(a, S1)),
+    S2 = run(ev(a, {value, c1, {put, j, 1}}, run(ev(a, force_election, S1)))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S2))),
+    ?assertEqual(2, commit(a, S2)),
+    ?assertEqual(#{k => 0, j => 1}, kv(a, S2)),
+    %% No value is proposed at index 1.
+    ?assertEqual([], [I || {a, _To, {propose, _, Entries, _, _}} <- maps:get(sent, S2), {I, _} <- Entries, I < 2]),
+    %% c receives the machine state with `install'. It does not apply a
+    %% value to the result of `init/1'.
+    S3 = run(ev(a, heartbeat_timeout, run(ev(a, heartbeat_timeout, S2)))),
+    ?assertMatch([_ | _], [I || {a, c, {install, I, _}} <- maps:get(sent, S3)]),
+    ?assertEqual([], [I || {a, c, {learned, Entries}} <- maps:get(sent, S3), {I, _} <- Entries, I < 2]),
+    ?assertEqual(#{k => 0, j => 1}, kv(c, S3)),
+    ?assertEqual([a, b, c], members(c, S3)),
+    %% The state is stored. A server that restarts applies its log to it.
+    S4 = restart(a, S3),
+    ?assertEqual(#{k => 0, j => 1}, kv(a, S4)),
+    ?assertEqual(2, commit(a, S4)),
+    %% The formation can be repeated with the same state. Another state, or
+    %% no state, is refused.
+    S5 = lists:foldl(
+        fun({F, Event}, S) -> ev(b, setelement(2, Event, F), S) end,
+        S4,
+        [
+            {f1, {form, f, New, {machine_state, MState}}},
+            {f2, {form, f, New, {machine_state, MState#{kv := #{}}}}},
+            {f3, {form, f, New}}
+        ]
+    ),
+    ?assertEqual(
+        [ok, {error, already_formed}, {error, already_formed}],
+        [proplists:get_value(F, replies(S5)) || F <- [f1, f2, f3]]
+    ),
+    %% A cluster that was formed without a state is not formed again with
+    %% one.
+    T0 = ev(a, {form, g1, New}, join([a], new([], majority))),
+    T1 = ev(a, {form, g2, New, {machine_state, MState}}, T0),
+    ?assertEqual({error, already_formed}, proplists:get_value(g2, replies(T1))).
+
+%% A passive server receives decided values and sends no message of the
+%% protocol. After the event `activate' it is an ordinary member.
+passive_test() ->
+    {B1, B2} = {{b, n, 1}, {b, n, 2}},
+    Dead = [{X, B1} || X <- [a, c, B2]] ++ [{B1, X} || X <- [a, c, B2]],
+    S0 = run(ev(a, {value, c1, {put, k, 1}}, run(ev(a, force_election, new([a, B1, c], majority))))),
+    put(extra_config, #{passive => true}),
+    S1 = block(Dead, join([B2], S0)),
+    ?assertMatch(#{passive := true}, peace_core:overview(core(B2, S1))),
+    %% The leader replaces the member. The other two members decide the
+    %% change.
+    S2 = run(ev(a, heartbeat_timeout, run(ev(a, {replace, r1, [B2]}, S1#{sent => []})))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(r1, replies(S2))),
+    ?assertEqual([a, c, B2], members(B2, S2)),
+    ?assertEqual(#{k => 1}, kv(B2, S2)),
+    %% The passive server has sent only requests for decided values.
+    ?assertEqual([catchup], lists:usort([element(1, Msg) || {From, _To, Msg} <- maps:get(sent, S2), From =:= B2])),
+    ?assertEqual(0, map_size(peace_core:log(core(B2, S2))) - map_size(learned(B2, S2))),
+    %% The passive server does not count towards a quorum. Without c, no
+    %% value is decided.
+    S3 = run(ev(a, {value, c2, {put, k, 2}}, block(Dead ++ [{a, c}, {c, a}], S2))),
+    ?assertEqual(undefined, proplists:get_value(c2, replies(S3))),
+    %% The passive server does not campaign and does not promise.
+    S4 = run(ev(B2, force_election, run(ev(B2, election_timeout, S3#{sent := []})))),
+    ?assertEqual(follower, role(B2, S4)),
+    ?assertEqual([], maps:get(sent, S4)),
+    S5 = run(ev(c, force_election, S4)),
+    ?assertEqual(candidate, role(c, S5)),
+    ?assertEqual([], [Msg || {From, _To, Msg} <- maps:get(sent, S5), From =:= B2]),
+    %% A passive server is not formed.
+    S6 = ev(B2, {form, f1, {[a, c, B2], majority}}, S5),
+    ?assertEqual({error, passive}, proplists:get_value(f1, replies(S6))),
+    %% After the activation the server promises, and c becomes leader.
+    S7 = ev(B2, {activate, x1}, S6),
+    ?assertEqual(ok, proplists:get_value(x1, replies(S7))),
+    ?assertMatch(#{passive := false}, peace_core:overview(core(B2, S7))),
+    S8 = run(ev(c, force_election, S7)),
+    ?assertEqual(leader, role(c, S8)),
+    %% The value that only a holds was not decided.
+    ?assertEqual(#{k => 1}, kv(c, S8)),
+    %% The activation is stored. The server is not passive after a restart
+    %% with the same start arguments.
+    ?assertMatch(#{meta := #{active := true}}, stored(B2, S8)),
+    S9 = S8#{cores := (maps:get(cores, S8))#{B2 := start(B2, stored(B2, S8))}},
+    ?assertMatch(#{passive := false}, peace_core:overview(core(B2, S9))),
+    %% A server that is not passive answers `ok'.
+    ?assertEqual(ok, proplists:get_value(x2, replies(ev(a, {activate, x2}, S9)))),
+    erase(extra_config).
+
 %% A server without a configuration does not campaign.
 server_without_configuration_test() ->
     S0 = join([d], new([a, b, c], majority)),

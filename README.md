@@ -305,7 +305,7 @@ by `{Name, Node, Incarnation}`. The API takes and returns addresses.
 
 | Rule | Detail |
 |---|---|
-| Creation | A server creates its incarnation, 16 random bytes, when it starts and recovers no stored state. |
+| Creation | A server creates its incarnation when it starts and recovers no stored state. The incarnation is 16 random bytes, unless the storage backend supplies one. |
 | Storage | The incarnation is stored with the acceptor state, before the server handles any message. |
 | Messages | Every message between servers names the incarnation of the sender and of the destination. A server drops a message for another incarnation. |
 | Quorums | A configuration names incarnations. A leader counts an answer only from an incarnation that the configuration names. |
@@ -348,7 +348,31 @@ replaces no member. `rejoin` is off by default: a disk that is not mounted
 when a node starts looks like lost state, and several servers with that
 fault would each replace their member and leave their data unused.
 
+Extension points for an application that keeps a record of the members
+outside the cluster:
+
+| Extension point | Effect |
+|---|---|
+| The key `incarnation` in the result of `open/2` of a storage backend | A server that recovers no stored state uses the value as its incarnation. The backend guarantees that the value is never used a second time at the address after the stored state was lost. |
+| `peace:form_cluster(Servers, Quorum, #{members => Members})` | Forms a cluster from members whose incarnations the caller knows. The function does not ask the servers, and `Servers` can be a part of the cluster. |
+| `peace:form_cluster(Servers, Quorum, #{machine_state => State})` | Forms a cluster whose machine state is `State` and not the result of `init/1`. The state is the state as of index 1, and the first value is decided at index 2. A server that joins later receives the state from the leader. |
+| `passive => true` in the configuration of a server, and `peace:activate(Server)` | A passive server receives decided values and sends no message of the protocol: it does not promise, does not accept a proposal and does not campaign. `activate/1` makes it an ordinary member. The activation is stored. |
+
+A passive server is an acceptor that takes no step. The other servers
+cannot distinguish it from a member that is not reachable. Every behaviour
+with a passive server is therefore a behaviour of the protocol, and the
+models need no change. These extension points are not in the thesis.
+
 Limitations of member identity:
+
+- A machine state that is given to `form_cluster` stays in the stored
+  identity of each server for the lifetime of the server. A server holds
+  that state in memory and in storage in addition to its present machine
+  state.
+- Every call of `form_cluster` for one cluster must give the same machine
+  state. peace does not compare the states of different servers.
+- A passive member does not count towards a quorum. A configuration needs
+  its quorums among the other members.
 
 - A replacement needs a leader. The old configuration must still have a
   phase-one quorum and a phase-two quorum without the member that is
@@ -637,6 +661,10 @@ The tests in [test/](test/) cover:
   replacement that keeps a grid row, the replace request and its challenge,
   a request of an incarnation that no longer runs, a message for another
   incarnation, and stored state that a server refuses to start on
+- the extension points of member identity: an incarnation that the storage
+  backend supplies, formation with known members, formation with a
+  machine state and a server that joins such a cluster later, and a
+  passive server before and after its activation
 
 ### Test-only configuration
 

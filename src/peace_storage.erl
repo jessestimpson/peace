@@ -54,14 +54,28 @@
 %%   - `node' and `incarnation' are written once, when a server starts and
 %%     recovers no `meta'.
 %%   - `initial' is written once, when the cluster is formed.
+%%   - `machine_state' is written with `initial', when the cluster is formed
+%%     with a machine state.
+%%   - `active' is written when a passive server is activated.
 -type meta() :: #{
     node := node(),
-    incarnation := binary(),
-    initial => peace_core:simple()
+    incarnation := term(),
+    initial => peace_core:simple(),
+    machine_state => peace_machine:state(),
+    active => true
 }.
 
 %% The data that a server recovers when it starts.
+%%
+%% `incarnation' is not recovered data. A backend may return the key when it
+%% returns no `meta'. The server then uses the value as its incarnation, and
+%% does not create 16 random bytes. The backend must return a value that
+%% was never used at the address of the server before the stored state was
+%% lost. A backend that keeps its data in a table in memory can return a
+%% value that identifies the table. The key is ignored when the backend
+%% returns `meta'.
 -type stored() :: #{
+    incarnation => term(),
     promised => peace:epoch(),
     meta => meta(),
     entries => #{peace:index() => peace_core:entry()},

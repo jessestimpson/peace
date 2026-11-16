@@ -427,6 +427,58 @@
 %% a server. A server that restarts with the same arguments and without
 %% its stored state would otherwise answer as the member that it was.
 %%
+%% === Formation with a machine state ===
+%%
+%% The event `{form, From, {Members, Quorum}, {machine_state, MState}}'
+%% forms a cluster whose machine state is `MState' and not the result of
+%% `init/1' of the machine. This part is not in the thesis. Every server of
+%% the cluster must be given the same state.
+%%
+%% The state is the state as of index 1. A server that is formed in this
+%% way has commit index 1 and snapshot index 1, and the first index that a
+%% leader proposes is 2. No value is ever proposed at index 1. A server
+%% that joins later has commit index 0. Such a server cannot mark index 2
+%% as decided, because it lacks index 1. It asks to catch up from index 1,
+%% and it receives the machine state with `install'. A server therefore
+%% never applies a value to the result of `init/1' in such a cluster.
+%%
+%% The state is stored in `meta', in the same write as the configuration.
+%% A server that restarts reads it as the snapshot of index 1 until the
+%% server has stored a later snapshot. The state stays in `meta' after
+%% that.
+%%
+%% === A passive server ===
+%%
+%% A server that is started with `passive => true' is passive until the
+%% event `{activate, From}'. This part is not in the thesis. A passive
+%% server:
+%%
+%% <ul>
+%% <li>does not answer a `prepare' or a `prevote';</li>
+%% <li>does not accept a proposal and sends no `accept';</li>
+%% <li>does not campaign;</li>
+%% <li>receives decided values with `learned' and `install', and so learns
+%%   a configuration that names it;</li>
+%% <li>sends `replace_request' if it was started with `rejoin', and answers
+%%   a challenge;</li>
+%% <li>refuses the event `form'.</li>
+%% </ul>
+%%
+%% A passive server is an acceptor that sends no message of the protocol.
+%% The other servers cannot distinguish it from a member that is not
+%% reachable. Every behaviour with a passive server is therefore a
+%% behaviour of the protocol in which that acceptor takes no step, and the
+%% properties of the protocol hold. A passive member does not count towards
+%% a quorum, so a configuration needs its quorums among the other members.
+%%
+%% The activation is stored in `meta'. A server that restarts with its
+%% stored state after the activation is not passive, whatever its start
+%% arguments are.
+%%
+%% An application uses a passive server to do work between the decision
+%% that admits a member and the first message of that member. An example
+%% is a record of the members that is kept outside the cluster.
+%%
 %% === Replacement ===
 %%
 %% The event `{replace, From, [New]}' asks the leader to replace members.
@@ -600,6 +652,8 @@
     | {query, from(), fun((peace_machine:state()) -> term())}
     | {reconfigure, from(), simple()}
     | {form, from(), simple()}
+    | {form, from(), simple(), {machine_state, peace_machine:state()}}
+    | {activate, from()}
     | {replace, from(), [peace:member()]}
     | {stored, peace:epoch(), [peace:index()]}
     | {msg, peace:member(), msg()}.
@@ -621,6 +675,8 @@
     %% The addresses that this server sends a replace request to while it
     %% has no configuration. See "Member identity".
     rejoin = [] :: [peace:server_id()],
+    %% Whether this server is passive. See "A passive server".
+    passive = false :: boolean(),
     %% Leader: `challenges' holds the challenge that was sent to each server
     %% that asked to replace a member. `verified' holds, for each address,
     %% the last server that answered its challenge. `nonce' counts the
@@ -741,8 +797,14 @@ init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
             #{initial := Simple} -> {final, Simple};
             _ -> ?NO_CONFIG
         end,
-    {Snap, {MState, Sessions, ACfg}} =
-        maps:get(snapshot, Stored, {0, {peace_machine:init(Machine), #{}, Initial}}),
+    %% A cluster that was formed with a machine state has that state as of
+    %% index 1. See "Formation with a machine state".
+    First =
+        case Meta of
+            #{machine_state := Formed} -> {1, {Formed, #{}, Initial}};
+            _ -> {0, {peace_machine:init(Machine), #{}, Initial}}
+        end,
+    {Snap, {MState, Sessions, ACfg}} = maps:get(snapshot, Stored, First),
     %% A crash can happen after a snapshot is written and before the entries
     %% that the snapshot covers are removed. No storage backend is required
     %% to have removed those entries, so they are removed here.
@@ -753,6 +815,7 @@ init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
         id = Id,
         meta = Meta,
         rejoin = maps:get(rejoin, Config, []),
+        passive = maps:get(passive, Config, false) andalso not maps:get(active, Meta, false),
         use_challenge = not ?PLANTED(unsafe_no_challenge, Config),
         quorum_check = not ?PLANTED(unsafe_no_quorum_check, Config),
         acfg = ACfg,
@@ -872,6 +935,13 @@ event({query, From, Fun}, C = #core{id = Id, mstate = MState}) ->
     end;
 event({reconfigure, From, New}, C) ->
     reconfigure(From, New, C);
+event({form, From, New, {machine_state, MState}}, C) ->
+    form(From, New, {ok, MState}, C);
+event({activate, From}, C = #core{passive = true, meta = Meta}) ->
+    Meta1 = Meta#{active => true},
+    {C#core{passive = false, meta = Meta1}, [{persist, #{meta => Meta1}}, {reply, From, ok}]};
+event({activate, From}, C) ->
+    {C, [{reply, From, ok}]};
 event({form, From, New}, C) ->
     form(From, New, C);
 event({replace, From, News}, C) ->
@@ -895,6 +965,14 @@ event({stored, _Epoch, _Indexes}, C) ->
     {C, []};
 event({msg, Peer, _Msg}, C = #core{id = Peer}) ->
     {C, []};
+%% A passive server does not answer a `prepare' or a `prevote', as if the
+%% message were lost. See "A passive server".
+event({msg, _Peer, Msg}, C = #core{passive = true}) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
+    {C, []};
+%% A passive server does not accept a proposal and sends no `accept'. It
+%% asks for the decided values that it does not have.
+event({msg, Peer, {propose, _Epoch, _Entries, LeaderCommit, _Stamp}}, C = #core{passive = true, commit = Commit}) ->
+    {C#core{leader = Peer}, [{timer, election, reset}] ++ [{send, Peer, {catchup, Commit + 1}} || Commit < LeaderCommit]};
 event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
     %% A server outside the configuration must not be able to depose the
     %% leader. A server that was removed and has not learned of its removal
@@ -988,6 +1066,7 @@ overview(C = #core{}) ->
         id => address(C#core.id),
         member => C#core.id,
         role => C#core.role,
+        passive => C#core.passive,
         leader => address(C#core.leader),
         members => lists:usort([address(M) || M <- members(C)]),
         config => in_force(C),
@@ -1051,8 +1130,9 @@ prevote(C = #core{}) ->
 %% configuration. A candidate needs a phase-one quorum of the configuration
 %% that it has applied. A server that has applied no configuration does not
 %% know which configuration was in force for the first index.
-electable(C = #core{acfg = ACfg}) ->
-    is_member(C) andalso ACfg =/= ?NO_CONFIG.
+%% A passive server does not campaign.
+electable(C = #core{acfg = ACfg, passive = Passive}) ->
+    not Passive andalso is_member(C) andalso ACfg =/= ?NO_CONFIG.
 
 %% A server that has no configuration and that was started with `rejoin'
 %% asks to replace the member that has its address. See "Member identity".
@@ -1899,10 +1979,23 @@ sessions_in(Sessions) ->
 %% ---------------------------------------------------------------------------
 
 %% Stores the configuration that forms the cluster. See "Member identity".
-form(From, {Members0, Spec}, C = #core{id = Id, meta = Meta, acfg = ACfg, cfgs = Cfgs, commit = Commit}) ->
+form(From, New, C) ->
+    form(From, New, none, C).
+
+%% `Base' is `{ok, MState}' when the cluster is formed with a machine state.
+%% See "Formation with a machine state".
+form(From, _New, _Base, C = #core{passive = true}) ->
+    {C, [{reply, From, {error, passive}}]};
+form(From, {Members0, Spec}, Base, C = #core{id = Id, meta = Meta, acfg = ACfg, cfgs = Cfgs, commit = Commit}) ->
     New = {lists:usort(Members0), Spec},
+    Same =
+        case {Base, Meta} of
+            {none, _} -> not is_map_key(machine_state, Meta);
+            {{ok, MState}, #{machine_state := MState}} -> true;
+            {{ok, _}, _} -> false
+        end,
     case Meta of
-        #{initial := New} ->
+        #{initial := New} when Same ->
             {C, [{reply, From, ok}]};
         #{initial := _Other} ->
             {C, [{reply, From, {error, already_formed}}]};
@@ -1921,9 +2014,17 @@ form(From, {Members0, Spec}, C = #core{id = Id, meta = Meta, acfg = ACfg, cfgs =
                     {C, [{reply, From, {error, {not_named, Id}}}]};
                 {true, {error, Reason}} ->
                     {C, [{reply, From, {error, {invalid_quorum, Reason}}}]};
-                {true, ok} ->
+                {true, ok} when Base =:= none ->
                     Meta1 = Meta#{initial => New},
                     C1 = C#core{meta = Meta1, acfg = {final, New}},
+                    {C1, [{persist, #{meta => Meta1}}, {reply, From, ok}, {timer, election, reset}]};
+                {true, ok} ->
+                    {ok, Formed} = Base,
+                    %% The machine state is stored in `meta', in the same
+                    %% write as the configuration. `init/3' reads it as the
+                    %% state as of index 1.
+                    Meta1 = Meta#{initial => New, machine_state => Formed},
+                    C1 = C#core{meta = Meta1, acfg = {final, New}, mstate = Formed, commit = 1, snap = 1, last = 1},
                     {C1, [{persist, #{meta => Meta1}}, {reply, From, ok}, {timer, election, reset}]}
             end
     end.

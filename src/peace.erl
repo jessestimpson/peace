@@ -50,6 +50,8 @@
     form_cluster/3,
     replace_member/2,
     replace_member/3,
+    activate/1,
+    activate/2,
     start_server/1,
     stop_server/1,
     propose/2,
@@ -93,7 +95,7 @@
 %% state. A server that has lost its stored state is therefore another
 %% member than it was. See "Member identity" in `peace_server' and
 %% `replace_member/3'.
--type member() :: {Name :: atom(), node(), Incarnation :: binary()}.
+-type member() :: {Name :: atom(), node(), Incarnation :: term()}.
 -type epoch() :: {Round :: non_neg_integer(), member() | none}.
 -type index() :: pos_integer().
 -type role() :: follower | candidate | leader.
@@ -171,6 +173,9 @@
     %% address. Without this key the server waits for `replace_member/3'.
     %% See `replace_member/3'.
     rejoin => [server_id()],
+    %% A passive server takes no part in the protocol until `activate/2' is
+    %% called. See `activate/2'.
+    passive => boolean(),
     election_timeout_ms => pos_integer(),
     heartbeat_ms => pos_integer(),
     snapshot_interval => pos_integer() | infinity,
@@ -276,9 +281,52 @@ form_cluster(ServerIds, Quorum) ->
 %% called again after it has stored the configuration on only some of the
 %% servers. The servers on which the configuration is stored can decide
 %% values if they contain the quorums.
--spec form_cluster([server_id()], peace_quorum:spec(), timeout()) ->
+%%
+%% `Opts' can be a timeout, or a map with these keys:
+%%
+%% <ul>
+%% <li>`timeout' - the timeout of each call to a server. The default is
+%%   5000 ms.</li>
+%% <li>`machine_state' - the machine state of the new cluster. Without this
+%%   key, the machine state is the result of `init/1' of the machine. An
+%%   example of its use is a cluster that continues from the machine state
+%%   of an earlier cluster, which the caller read with `local_query/2'. See
+%%   "Formation with a machine state" in `peace_core'. Every call that forms
+%%   the same cluster must give the same state.</li>
+%% <li>`members' - the members of the new cluster, with their incarnations.
+%%   The function then does not ask the servers for their incarnations, and
+%%   `ServerIds' can be a part of the cluster. A server stores the
+%%   configuration only if the configuration names the incarnation of that
+%%   server. The caller uses this key when it knows the incarnation of
+%%   every member, for example because a storage backend supplies the
+%%   incarnations. `Quorum' must name members and not addresses.</li>
+%% </ul>
+-spec form_cluster(
+    [server_id()],
+    peace_quorum:spec(),
+    timeout() | #{timeout => timeout(), machine_state => peace_machine:state(), members => [member()]}
+) ->
     {ok, Formed :: [server_id()], NotFormed :: [server_id()]} | {error, term()}.
+form_cluster(ServerIds, Quorum, Opts) when is_map(Opts) ->
+    Form =
+        case Opts of
+            #{machine_state := MState} -> fun(New) -> {form, New, {machine_state, MState}} end;
+            #{} -> fun(New) -> {form, New} end
+        end,
+    Timeout = maps:get(timeout, Opts, ?DEFAULT_CALL_TIMEOUT_MS),
+    case Opts of
+        #{members := Members} ->
+            case peace_quorum:validate(Quorum, Members) of
+                ok -> store_configuration(ServerIds, Form({lists:usort(Members), Quorum}), Timeout);
+                {error, Reason} -> {error, {invalid_quorum, Reason}}
+            end;
+        #{} ->
+            form_cluster(ServerIds, Quorum, Timeout, Form)
+    end;
 form_cluster(ServerIds, Quorum, Timeout) ->
+    form_cluster(ServerIds, Quorum, Timeout, fun(New) -> {form, New} end).
+
+form_cluster(ServerIds, Quorum, Timeout, Form) ->
     Answers = [{Id, server_call(Id, identity, Timeout)} || Id <- ServerIds],
     case [Id || {Id, Answer} <- Answers, element(1, Answer) =/= ok] of
         [] ->
@@ -291,11 +339,7 @@ form_cluster(ServerIds, Quorum, Timeout) ->
             ],
             case {Other, peace_quorum:validate(element(2, New), Members)} of
                 {[], ok} ->
-                    Results = [{Id, server_call(Id, {form, New}, Timeout)} || Id <- ServerIds],
-                    case [Id || {Id, ok} <- Results] of
-                        [] -> {error, {cluster_not_formed, Results}};
-                        Formed -> {ok, Formed, ServerIds -- Formed}
-                    end;
+                    store_configuration(ServerIds, Form(New), Timeout);
                 {[], {error, Reason}} ->
                     {error, {invalid_quorum, Reason}};
                 _ ->
@@ -303,6 +347,13 @@ form_cluster(ServerIds, Quorum, Timeout) ->
             end;
         NotRunning ->
             {error, {not_running, NotRunning}}
+    end.
+
+store_configuration(ServerIds, Request, Timeout) ->
+    Results = [{Id, server_call(Id, Request, Timeout)} || Id <- ServerIds],
+    case [Id || {Id, ok} <- Results] of
+        [] -> {error, {cluster_not_formed, Results}};
+        Formed -> {ok, Formed, ServerIds -- Formed}
     end.
 
 %% Replaces the addresses that a quorum system names with members.
@@ -352,6 +403,31 @@ replace_member(ServerOrServers, New, Timeout) ->
         Other ->
             Other
     end.
+
+%% @equiv activate(Server, 5000)
+-spec activate(server_id()) -> ok | {error, term()} | {timeout, server_id()}.
+activate(Server) ->
+    activate(Server, ?DEFAULT_CALL_TIMEOUT_MS).
+
+%% @doc Makes a passive server take part in the protocol.
+%%
+%% A server that is started with `passive => true' receives decided values
+%% and sends no message of the protocol: it does not promise, does not
+%% accept a proposal and does not campaign. The other servers cannot
+%% distinguish it from a member that is not reachable. See "A passive
+%% server" in `peace_core'.
+%%
+%% An application starts a server as passive when it has work to do between
+%% the decision that admits the server and the first message of the server.
+%% `overview/1' of the leader shows the configuration in force, and
+%% `overview/1' of the passive server shows `passive => true'.
+%%
+%% The activation is stored. A server that restarts with its stored state
+%% after the activation is not passive. The function returns `ok' for a
+%% server that is not passive.
+-spec activate(server_id(), timeout()) -> ok | {error, term()} | {timeout, server_id()}.
+activate(Server, Timeout) ->
+    server_call(Server, activate, Timeout).
 
 start_on(Node, Config) when Node =:= node() ->
     start_server(Config);
