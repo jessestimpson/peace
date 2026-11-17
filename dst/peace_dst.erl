@@ -165,6 +165,9 @@
 %% server asks the cluster to replace the member that it was. See "Member
 %% identity" in `peace_server'.
 %%
+%% With `supplied_incarnations' also on, the storage backend supplies the
+%% incarnation of each server, and a server does not create random bytes.
+%%
 %% The `rumour' operation of such a run delivers a replace request of an
 %% incarnation that no longer runs, when one exists. The message represents
 %% a request that was delayed in the network.
@@ -172,6 +175,43 @@
 %% The invariant `replacement_is_live' applies to every run. A leader
 %% holds a server as verified only if the server ran at some time after
 %% the leader became leader.
+%%
+%% == Gates and passive servers ==
+%%
+%% With `gates' on, every server has a gate, and the workload has two more
+%% operations:
+%%
+%% <ul>
+%% <li>`{close_gate, I}' - the harness closes the gate of a server.</li>
+%% <li>`open_gates' - the harness opens every gate.</li>
+%% </ul>
+%%
+%% With `passive' on, a server that is started after the cluster was formed
+%% is passive, and the workload has one more operation:
+%%
+%% <ul>
+%% <li>`{activate, I}' - a client activates a server.</li>
+%% </ul>
+%%
+%% A server that restarts recovers its stored state, so a passive server of
+%% such a run is a member of the cluster that sends no message of the
+%% protocol. A server that was activated is not passive after a later
+%% restart, because the activation is stored.
+%%
+%% The invariant `silent_accepts_nothing' applies to every run. While the
+%% gate of a server is closed, and while a server is passive, the promise of
+%% the server does not change and the server accepts no entry. The server
+%% may learn decided entries.
+%%
+%% == Formation with a machine state ==
+%%
+%% `seeded => all' forms the cluster with a machine state on every founder.
+%% `seeded => first' forms the cluster with a machine state on the first
+%% founder only. The other founders have no configuration, and receive the
+%% configuration and the machine state from the leader. The machine state
+%% holds one value at index 1. The record of decided values that the
+%% harness keeps has that value at index 1, so `applied_matches_decided'
+%% requires every server to hold it.
 %%
 %% == Formation ==
 %%
@@ -215,6 +255,16 @@
 %% <li>`unordered_sessions' - with `retry => pipeline', a server applies a
 %%   value of a session although the value with the previous sequence number
 %%   is not applied. This mode shows that `session_order' can fail.</li>
+%% <li>`gate_ignored' - with `gates', the servers are started without a
+%%   gate, and the harness closes gates as before. This mode shows that
+%%   `silent_accepts_nothing' can fail.</li>
+%% <li>`passive_ignored' - with `passive', a server that restarts is started
+%%   without `passive', and the harness expects it to be passive. This mode
+%%   shows that `silent_accepts_nothing' can fail.</li>
+%% <li>`no_base_index' - with `seeded', a machine state that forms a cluster
+%%   is the state as of index 0 and not as of index 1. A value is then
+%%   decided at index 1, and a server that joins later applies that value
+%%   to the result of `init/1' of the machine.</li>
 %% <li>`no_conflict_step_down' - a leader learns that an index was decided
 %%   with a value other than the value that the leader proposed, and the
 %%   leader continues to lead. This is the same change as
@@ -262,7 +312,7 @@
     settle_done/1,
     terminate/1
 ]).
--export([stats/0, reset_stats/0, id/1, bump/1]).
+-export([stats/0, reset_stats/0, id/1, bump/1, gate_open/2]).
 
 -define(STATS, peace_dst_stats).
 
@@ -294,6 +344,15 @@ init(_Seed, Config) ->
         {I, server_config(I, lists:nth(I, Ids), Founders, Mode, Tab, Config)}
      || I <- lists:seq(1, N)
     ]),
+    Seeded =
+        case {Mode, maps:get(seeded, Config, false)} of
+            {no_base_index, _} -> {first, [{1, seed}]};
+            {_, false} -> false;
+            {_, Which} -> {Which, [{1, seed}]}
+        end,
+    %% The value of the machine state that forms the cluster is decided at
+    %% index 1, as far as the record of the harness is concerned.
+    _ = [ets:insert(Tab, {{decided, 1}, {'$usr', none, seed}}) || Seeded =/= false],
     ok = clear_leftovers(N),
     ok = clear_disk(),
     %% No server is started here. The first operation of every run is
@@ -328,6 +387,10 @@ init(_Seed, Config) ->
                 _ -> maps:get(quorum, Config, majority)
             end,
         formed => false,
+        seeded => Seeded,
+        gates => Mode =:= gate_ignored orelse maps:get(gates, Config, false),
+        passive => Mode =:= passive_ignored orelse maps:get(passive, Config, false),
+        mode => Mode,
         storage_loss => storage_loss(Mode, Config),
         configs => Configs,
         faults => maps:get(faults, Config, true),
@@ -387,6 +450,17 @@ generate(S = #{reconfigure := true}, Rand0) ->
             {{reconfigure, K}, Rand2};
         false ->
             generate1(S, Rand1)
+    end;
+generate(S = #{gates := Gates, passive := Passive, n := N}, Rand0) when Gates; Passive ->
+    %% A run with gates or with passive servers makes two more random draws
+    %% per operation, in this clause only.
+    {Roll, Rand1} = rand:uniform_s(Rand0),
+    {I, Rand2} = rand:uniform_s(N, Rand1),
+    if
+        Gates, Roll < 0.06 -> {{close_gate, I}, Rand2};
+        Gates, Roll < 0.12 -> {open_gates, Rand2};
+        Passive, Roll < 0.20 -> {{activate, I}, Rand2};
+        true -> generate1(S, Rand2)
     end;
 generate(S, Rand) ->
     generate1(S, Rand).
@@ -478,6 +552,29 @@ execute({crash, I}, S) ->
             bump(crashes),
             S
     end;
+%% The gate of a server is a row of the table of the run. The server reads
+%% the row when it calls its gate. See `gate_open/2'.
+execute({close_gate, I}, S = #{tab := Tab}) ->
+    true = ets:insert(Tab, {{gate, I}, closed}),
+    bump(gates_closed),
+    S;
+execute(open_gates, S = #{tab := Tab}) ->
+    true = ets:match_delete(Tab, {{gate, '_'}, closed}),
+    S;
+execute({activate, I}, S = #{tab := Tab, ids := Ids}) ->
+    case ets:member(Tab, {expect_passive, I}) of
+        true ->
+            %% The harness stops expecting a passive server before the
+            %% client sends the request, because the server may accept an
+            %% entry as soon as it has handled the request.
+            true = ets:delete(Tab, {expect_passive, I}),
+            true = ets:insert(Tab, {{activated, I}, true}),
+            bump(activations),
+            Id = lists:nth(I, Ids),
+            spawn_op(node_name(I), fun() -> peace_dst_client:activate(Id) end, S);
+        false ->
+            S
+    end;
 execute({elect, I}, S = #{ids := Ids}) ->
     bump(forced_elections),
     Id = lists:nth(I, Ids),
@@ -502,8 +599,8 @@ execute({split, I, J}, S = #{n := N}) ->
     ),
     bump(splits),
     S;
-execute(form, S = #{founders := Founders, quorum := Quorum}) ->
-    spawn_op(clients, fun() -> peace_dst_client:form(Founders, Quorum, 40) end, S#{formed := true});
+execute(form, S = #{founders := Founders, quorum := Quorum, seeded := Seeded}) ->
+    spawn_op(clients, fun() -> peace_dst_client:form(Founders, Quorum, 40, Seeded) end, S#{formed := true});
 execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N, storage_loss := Loss}) ->
     Decided = lists:sort([{Index, Value} || [Index, Value] <- ets:match(Tab, {{decided, '$1'}, '$2'})]),
     To = lists:nth(I, Ids),
@@ -538,10 +635,24 @@ execute({restart, I}, S = #{storage_loss := true, n := N}) ->
 execute({restart, I}, S) ->
     restart(I, S).
 
-restart(I, S = #{configs := Configs}) ->
+restart(I, S = #{configs := Configs, tab := Tab}) ->
     case server_pid(I) of
         undefined ->
-            Config = maps:get(I, Configs),
+            %% A server that is started after the cluster was formed, and
+            %% that was not activated, is passive.
+            Passive = maps:get(passive, S) andalso maps:get(formed, S) andalso not ets:member(Tab, {activated, I}),
+            Config =
+                case {Passive, maps:get(mode, S)} of
+                    {true, passive_ignored} ->
+                        true = ets:insert(Tab, {{expect_passive, I}, true}),
+                        maps:get(I, Configs);
+                    {true, _} ->
+                        true = ets:insert(Tab, {{expect_passive, I}, true}),
+                        bump(passive_starts),
+                        (maps:get(I, Configs))#{passive => true};
+                    {false, _} ->
+                        maps:get(I, Configs)
+                end,
             bump(restarts),
             %% The server is a child of the restarter process and inherits
             %% the node of the restarter process.
@@ -563,6 +674,7 @@ check(#{tab := Tab, ids := Ids}) ->
     ok = note_leaders(Views),
     ok = note_alive(Tab, Views),
     first_violation([
+        fun() -> silent_accepts_nothing(Tab, Views) end,
         fun() -> replacement_is_live(Tab, Views) end,
         fun() -> disk_recovers(Tab) end,
         fun() -> storage_matches_memory(Tab, Views, Disks) end,
@@ -697,7 +809,7 @@ storage_matches_memory(Tab, Views, Disks) ->
         {Promised, Stored, Snap} <- [
             lists:foldl(
                 fun apply_batch/2,
-                {Promised0, Stored0, peace_dst_storage:snapshot_index(Tab, Id)},
+                {Promised0, Stored0, max(peace_dst_storage:snapshot_index(Tab, Id), base_index(Tab, Id))},
                 %% A snapshot may be stored after a write that was sent
                 %% later. The snapshots are applied first. `apply_batch/2'
                 %% then removes the entries under them from each write.
@@ -712,12 +824,24 @@ storage_matches_memory(Tab, Views, Disks) ->
         _ -> violation(storage_matches_memory, #{servers => Wrong})
     end.
 
+%% Returns 1 if the disk of a server holds a machine state that formed the
+%% cluster. A server reads that state as the snapshot of index 1. See
+%% "Formation with a machine state" in `peace_core'.
+base_index(Tab, Id) ->
+    case ets:lookup(Tab, {Id, meta}) of
+        [{_, #{machine_state := _}}] -> 1;
+        _ -> 0
+    end.
+
 %% Applies a write to the contents of a disk.
 apply_batch(Batch, {Promised0, Entries0, Snap0}) ->
     Promised = maps:get(promised, Batch, Promised0),
     Snap =
         case Batch of
             #{snapshot := {Index, _}} -> Index;
+            %% The machine state that forms a cluster is stored in `meta'.
+            %% It is the snapshot of index 1.
+            #{meta := #{machine_state := _}} -> max(Snap0, 1);
             _ -> Snap0
         end,
     Entries = maps:merge(Entries0, maps:from_list(maps:get(entries, Batch, []))),
@@ -814,6 +938,67 @@ replacement_is_live(Tab, Views) ->
         [] -> ok;
         _ -> violation(replacement_is_live, #{servers => Wrong})
     end.
+
+%% While the gate of a server is closed, and while a server is passive, the
+%% server sends no promise and no acceptance. The check compares the state
+%% of the server with the state that the server had when the check first
+%% found the server silent:
+%%
+%% <ul>
+%% <li>The promise is the same.</li>
+%% <li>Every entry that the server holds as accepted, under an epoch, was
+%%   held under the same epoch at that time. An entry may have become
+%%   `learned', and a snapshot may have removed an entry.</li>
+%% </ul>
+%%
+%% The harness closes a gate between two steps. A server that is handling
+%% an event at that time has already made the changes of that event to its
+%% state, so the first comparison is made with the state after that event.
+silent_accepts_nothing(Tab, Views) ->
+    Wrong = lists:filtermap(
+        fun({I, {_Id, View}}) ->
+            Silent = ets:member(Tab, {gate, I}) orelse ets:member(Tab, {expect_passive, I}),
+            case {Silent, View} of
+                {false, _} ->
+                    true = ets:delete(Tab, {silent, I}),
+                    false;
+                {true, {live, Core}} ->
+                    Now = {peace_core:id(Core), peace_core:promised(Core), accepted(Core)},
+                    case ets:lookup(Tab, {silent, I}) of
+                        [{_, {Member, Promised, Accepted}}] when Member =:= element(1, Now) ->
+                            New = maps:filter(fun(Index, Epoch) -> maps:get(Index, Accepted, none) =/= Epoch end, element(3, Now)),
+                            case Promised =:= element(2, Now) andalso map_size(New) =:= 0 of
+                                true ->
+                                    bump(silent_checks),
+                                    false;
+                                false ->
+                                    {true, #{server => I, promised => {Promised, element(2, Now)}, accepted => New}}
+                            end;
+                        _ ->
+                            true = ets:insert(Tab, {{silent, I}, Now}),
+                            false
+                    end;
+                {true, _} ->
+                    false
+            end
+        end,
+        lists:zip(lists:seq(1, length(Views)), Views)
+    ),
+    case Wrong of
+        [] -> ok;
+        _ -> violation(silent_accepts_nothing, #{servers => Wrong})
+    end.
+
+%% The entries that a server holds as accepted and not as decided, as a map
+%% from the index to the epoch.
+accepted(Core) ->
+    maps:filtermap(
+        fun
+            (_Index, {learned, _Value}) -> false;
+            (_Index, {Epoch, _Value}) -> {true, Epoch}
+        end,
+        peace_core:log(Core)
+    ).
 
 %% The check reads the disks and not the servers, so that the check includes
 %% a server that decided a value and was then killed. The first time any
@@ -1040,15 +1225,27 @@ storage_loss(Mode, Config) ->
 
 server_config(I, Id, Founders, Mode, Tab, Config) ->
     Server0 = server_config1(I, Id, Founders, Mode, Tab, Config),
-    Server =
+    Server1 =
         case storage_loss(Mode, Config) of
             true ->
                 Server0#{
-                    storage => {peace_dst_storage, #{tab => Tab, amnesia => true}},
+                    %% With `supplied_incarnations', the storage backend
+                    %% supplies the incarnation of each server.
+                    storage =>
+                        {peace_dst_storage, #{
+                            tab => Tab,
+                            amnesia => true,
+                            supply_incarnation => maps:get(supplied_incarnations, Config, false)
+                        }},
                     rejoin => [id(J) || J <- lists:seq(1, maps:get(servers, Config, 3))]
                 };
             false ->
                 Server0
+        end,
+    Server =
+        case maps:get(gates, Config, false) of
+            true -> Server1#{gate => {?MODULE, gate_open, [Tab, I]}};
+            false -> Server1
         end,
     case Config of
         %% The tracer records every step of every server, in the order in
@@ -1140,6 +1337,12 @@ server_config1(I, Id, _Founders, Mode, Tab, Config) ->
             Base;
         unordered_sessions ->
             Leased#{unsafe_no_session_order => true};
+        gate_ignored ->
+            Leased;
+        no_base_index ->
+            Leased#{unsafe_no_base_index => true};
+        passive_ignored ->
+            Leased;
         lossy_disk ->
             Base;
         unsynced_wal ->
@@ -1186,6 +1389,11 @@ view({Name, Node}) ->
                 _ -> starting
             end
     end.
+
+%% The gate of server `I'. The gate is open unless the harness has closed
+%% it. See `{close_gate, I}' in `execute/2'.
+gate_open(Tab, I) ->
+    not ets:member(Tab, {gate, I}).
 
 id(I) -> {name(I), node_name(I)}.
 

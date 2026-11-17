@@ -454,7 +454,8 @@
 %% server:
 %%
 %% <ul>
-%% <li>does not answer a `prepare' or a `prevote';</li>
+%% <li>does not answer a `prepare' or a `prevote', and ignores an answer to
+%%   a pre-vote of its own;</li>
 %% <li>does not accept a proposal and sends no `accept';</li>
 %% <li>does not campaign;</li>
 %% <li>receives decided values with `learned' and `install', and so learns
@@ -702,6 +703,10 @@
     %% Whether a leader sends a challenge before it replaces a member. This
     %% field is false only in tests that show why the challenge is needed.
     use_challenge = true :: boolean(),
+    %% Whether a machine state that forms a cluster is the state as of
+    %% index 1. This field is false only in tests that show why the index
+    %% is needed. The state is then the state as of index 0.
+    base_index = true :: boolean(),
     %% Whether `form/3' validates the quorum system. This field is false
     %% only in tests that form a cluster with an unsafe quorum system.
     quorum_check = true :: boolean(),
@@ -814,9 +819,10 @@ init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
         end,
     %% A cluster that was formed with a machine state has that state as of
     %% index 1. See "Formation with a machine state".
+    BaseIndex = not ?PLANTED(unsafe_no_base_index, Config),
     First =
         case Meta of
-            #{machine_state := Formed} -> {1, {Formed, #{}, Initial}};
+            #{machine_state := Formed} -> {base_index(BaseIndex), {Formed, #{}, Initial}};
             _ -> {0, {peace_machine:init(Machine), #{}, Initial}}
         end,
     {Snap, {MState, Sessions, ACfg}} = maps:get(snapshot, Stored, First),
@@ -833,6 +839,7 @@ init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
         passive = maps:get(passive, Config, false) andalso not maps:get(active, Meta, false),
         use_challenge = not ?PLANTED(unsafe_no_challenge, Config),
         quorum_check = not ?PLANTED(unsafe_no_quorum_check, Config),
+        base_index = BaseIndex,
         acfg = ACfg,
         cfgs = maps:filtermap(
             fun
@@ -956,10 +963,12 @@ event({form, From, New, {machine_state, MState}}, C) ->
 event({gate, true}, C) ->
     {C#core{gated = false}, []};
 %% The gate closes. A leader or a candidate steps down.
+%% A pre-vote that is in progress ends. Otherwise the answers to the
+%% pre-vote would start a campaign while the gate is closed.
 event({gate, false}, C = #core{role = follower}) ->
-    {C#core{gated = true}, []};
+    {C#core{gated = true, prevote = undefined}, []};
 event({gate, false}, C) ->
-    follow(C#core{gated = true}, undefined);
+    follow(C#core{gated = true, prevote = undefined}, undefined);
 event({activate, From}, C = #core{passive = true, meta = Meta}) ->
     Meta1 = Meta#{active => true},
     {C#core{passive = false, meta = Meta1}, [{persist, #{meta => Meta1}}, {reply, From, ok}]};
@@ -991,7 +1000,8 @@ event({msg, Peer, _Msg}, C = #core{id = Peer}) ->
 %% A passive server does not answer a `prepare' or a `prevote', as if the
 %% message were lost. See "A passive server".
 event({msg, _Peer, Msg}, C) when
-    ?SILENT(C) andalso (element(1, Msg) =:= prepare orelse element(1, Msg) =:= prevote)
+    ?SILENT(C) andalso
+        (element(1, Msg) =:= prepare orelse element(1, Msg) =:= prevote orelse element(1, Msg) =:= prevote_ok)
 ->
     {C, []};
 %% A passive server does not accept a proposal and sends no `accept'. It
@@ -2050,10 +2060,19 @@ form(From, {Members0, Spec}, Base, C = #core{id = Id, meta = Meta, acfg = ACfg, 
                     %% write as the configuration. `init/3' reads it as the
                     %% state as of index 1.
                     Meta1 = Meta#{initial => New, machine_state => Formed},
-                    C1 = C#core{meta = Meta1, acfg = {final, New}, mstate = Formed, commit = 1, snap = 1, last = 1},
+                    Index = base_index(C#core.base_index),
+                    C1 = C#core{
+                        meta = Meta1, acfg = {final, New}, mstate = Formed, commit = Index, snap = Index, last = Index
+                    },
                     {C1, [{persist, #{meta => Meta1}}, {reply, From, ok}, {timer, election, reset}]}
             end
     end.
+
+%% The index of a machine state that forms a cluster. See "Formation with a
+%% machine state". The index is 0 only with the planted bug
+%% `unsafe_no_base_index'.
+base_index(true) -> 1;
+base_index(false) -> 0.
 
 %% Replaces members. Each server in `News' takes the place of the member
 %% that has the same address and another incarnation. See "Member identity".

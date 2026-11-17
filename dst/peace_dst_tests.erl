@@ -298,6 +298,10 @@ storage_loss_test_() ->
         sweep(lists:seq(1, 20), fun(Seed) ->
             opts(Seed, #{servers => 5, storage_loss => true, quorum => {grid, grid()}})
         end),
+        %% The storage backend supplies the incarnation of each server.
+        sweep(lists:seq(1, 20), fun(Seed) ->
+            opts(Seed, #{servers => 5, storage_loss => true, supplied_incarnations => true})
+        end),
         Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
         ?debugFmt("storage loss: ~p", [maps:with([runs, acknowledged, replaced, stale_requests, crashes], Stats)]),
         ?assert(Acked >= Runs * 3, Stats),
@@ -319,6 +323,87 @@ no_challenge_is_caught_test_() ->
             opts(Seed, #{mode => no_challenge, servers => 5})
         end),
         ?assertMatch({violation, #{property := replacement_is_live}}, maps:get(outcome, Result))
+    end}.
+
+%% Every server has a gate, and the harness closes and opens the gates
+%% during the run. A server whose gate is closed sends no promise and no
+%% acceptance. The runs keep every other invariant.
+gates_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 40), fun(Seed) -> opts(Seed, #{gates => true}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{gates => true, churn => true, servers => 5}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{gates => true, read_lease_ms => 40}) end),
+        Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
+        ?debugFmt("gates: ~p", [maps:with([runs, acknowledged, gates_closed, silent_checks, leader_changes], Stats)]),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(gates_closed, Stats, 0) >= Runs, Stats),
+        ?assert(maps:get(silent_checks, Stats, 0) >= Runs * 100, Stats)
+    end}.
+
+%% This test shows that the suite detects a server that takes part while its
+%% gate is closed.
+ignored_gate_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        {_Seed, Result} = first_violation(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{mode => gate_ignored}) end),
+        ?assertMatch({violation, #{property := silent_accepts_nothing}}, maps:get(outcome, Result))
+    end}.
+
+%% A server that restarts after the cluster was formed is passive until a
+%% client activates it. The server is a member that sends no promise and no
+%% acceptance. The runs keep every other invariant.
+passive_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 40), fun(Seed) -> opts(Seed, #{passive => true}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{passive => true, servers => 5, quorum => {counting, 4, 2}}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{passive => true, gates => true}) end),
+        Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
+        ?debugFmt("passive: ~p", [maps:with([runs, acknowledged, passive_starts, activations, silent_checks], Stats)]),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(passive_starts, Stats, 0) >= Runs div 2, Stats),
+        ?assert(maps:get(activations, Stats, 0) >= Runs div 4, Stats),
+        ?assert(maps:get(silent_checks, Stats, 0) >= Runs * 100, Stats)
+    end}.
+
+%% This test shows that the suite detects a server that takes part while it
+%% is expected to be passive.
+ignored_passive_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        {_Seed, Result} = first_violation(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{mode => passive_ignored}) end),
+        ?assertMatch({violation, #{property := silent_accepts_nothing}}, maps:get(outcome, Result))
+    end}.
+
+%% The cluster is formed with a machine state. In the runs with
+%% `seeded => first', only the first founder is formed, and every other
+%% server receives the configuration and the machine state from the leader.
+%% Every server holds the value of that machine state before it applies a
+%% decided value. The runs include restarts, lost disks and membership
+%% changes.
+formation_with_a_machine_state_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{seeded => all}) end),
+        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{seeded => first}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{seeded => first, servers => 5, reconfigure => true}) end),
+        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{seeded => all, servers => 5, storage_loss => true}) end),
+        sweep(lists:seq(1, 10), fun(Seed) -> calm(Seed, #{seeded => first}) end),
+        Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
+        ?debugFmt("formation with a machine state: ~p", [
+            maps:with([runs, acknowledged, snapshots_received, restarts, replaced, reconfigured], Stats)
+        ]),
+        ?assert(Acked >= Runs * 3, Stats),
+        %% A server that was not formed receives the machine state as a
+        %% snapshot. 60 of the 110 runs have such servers.
+        ?assert(maps:get(snapshots_received, Stats, 0) >= 60, Stats)
+    end}.
+
+%% This test shows that the suite detects a machine state that forms a
+%% cluster as the state of index 0.
+missing_base_index_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        {_Seed, Result} = first_violation(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{mode => no_base_index}) end),
+        ?assertMatch({violation, #{property := _}}, maps:get(outcome, Result))
     end}.
 
 %% This test runs the shipped dets backend under the same faults. Every

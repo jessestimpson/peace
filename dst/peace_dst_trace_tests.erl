@@ -79,6 +79,26 @@ flexible_quorums_are_behaviours_of_the_model_test_() ->
         exercised(sweep("flexible", lists:seq(1, 10), #{servers => 5, quorum => {counting, 4, 2}}))
     end}.
 
+%% This test validates runs in which the harness closes and opens the gates
+%% of the servers. A server whose gate is closed is an acceptor that takes
+%% no step of the model, except that it learns decided values. The runs
+%% must therefore be behaviours of the model without a change to the model.
+gates_are_behaviours_of_the_model_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        exercised(sweep("gates", lists:seq(1, 20), #{gates => true})),
+        exercised(sweep("gates-churn", lists:seq(1, 10), #{gates => true, churn => true}))
+    end}.
+
+%% This test validates runs in which a server that restarts is passive until
+%% a client activates it. The server keeps its stored state, so it is a
+%% member that takes no step of the model, except that it learns decided
+%% values.
+passive_servers_are_behaviours_of_the_model_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        exercised(sweep("passive", lists:seq(1, 20), #{passive => true})),
+        exercised(sweep("passive-gates", lists:seq(1, 10), #{passive => true, gates => true}))
+    end}.
+
 %% ---------------------------------------------------------------------------
 %% Planted bugs. These tests show that validation can reject a run. Each
 %% planted bug is a mode of `peace_dst'. The model rejects some runs that

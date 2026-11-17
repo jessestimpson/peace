@@ -96,6 +96,21 @@ membership_test_() ->
         exercised(sweep("membership", lists:seq(1, 30), #{servers => 5, reconfigure => true}))
     end}.
 
+%% Gates that the harness closes and opens, and servers that are passive
+%% after a restart until a client activates them.
+gates_and_passive_servers_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        exercised(sweep("gates", lists:seq(1, 30), #{gates => true})),
+        exercised(sweep("passive", lists:seq(1, 30), #{passive => true, gates => true}))
+    end}.
+
+%% A cluster that is formed with a machine state on the first founder only.
+formation_with_a_machine_state_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        exercised(sweep("seeded", lists:seq(1, 30), #{seeded => first})),
+        exercised(sweep("seeded-membership", lists:seq(1, 20), #{seeded => first, servers => 5, reconfigure => true}))
+    end}.
+
 %% The following tests show that Porcupine can reject a history. Each test
 %% plants a bug and searches for a seed whose history Porcupine rejects.
 

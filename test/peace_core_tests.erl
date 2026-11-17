@@ -924,6 +924,19 @@ gate_test() ->
     ?assertMatch(#{gated := false}, peace_core:overview(core(a, S6))),
     ?assertEqual(leader, role(a, S6)).
 
+%% The gate of a server closes while a pre-vote of the server is in
+%% progress. The answers to the pre-vote do not start a campaign. The
+%% simulation found this case.
+gate_closes_during_a_prevote_test() ->
+    S0 = new([a, b, c], majority),
+    %% a sends its pre-vote. The answers are held.
+    S1 = ev(a, election_timeout, S0),
+    Promised = promised(a, S1),
+    S2 = run(ev(a, {gate, false}, S1)),
+    ?assertEqual(follower, role(a, S2)),
+    ?assertEqual(Promised, promised(a, S2)),
+    ?assertEqual([], [Msg || {a, _To, Msg} <- maps:get(sent, S2), element(1, Msg) =:= prepare]).
+
 %% A server without a configuration does not campaign.
 server_without_configuration_test() ->
     S0 = join([d], new([a, b, c], majority)),

@@ -427,6 +427,29 @@ peace is verified at six levels.
 | Jepsen test | A key-value store on five Docker nodes under partitions, kills, pauses and membership changes | `make jepsen` | minutes per run |
 | Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
+The extension points of member identity are not in the TLA+ models. The
+table gives the level at which each one is checked.
+
+| Extension point | Unit tests | Simulation | Trace validation | Linearizability checking |
+|---|---|---|---|---|
+| Incarnation from the storage backend | 1 test | 20 runs of the storage loss workload | no | no |
+| Formation with known members | 1 test | The runs that form one founder of the cluster. They call the servers directly and not `peace:form_cluster/3`. | no | no |
+| Formation with a machine state | 2 tests | 110 runs, with restarts, lost disks and membership changes, and 1 planted bug | no | 50 runs |
+| Passive server | 2 tests | 80 runs and 1 planted bug | 30 runs | 30 runs |
+| Gate | 3 tests | 80 runs and 1 planted bug | 30 runs | 60 runs |
+
+- Trace validation checks the claim that a passive server, and a server
+  whose gate is closed, is an acceptor that takes no step of the model
+  except that it learns decided values. Every one of the 60 runs is a
+  behaviour of `FlexiblePaxos.tla`.
+- Trace validation does not cover formation with a machine state. The
+  model has no machine state, and a server that is formed in this way
+  starts with snapshot index 1 without an action of the model.
+- The simulation found one fault in the gate: a server whose gate closed
+  during a pre-vote started a campaign when the answers arrived. The fault
+  is corrected, and a unit test covers it.
+- No extension point is in the Jepsen test.
+
 Details of the models are in [formal/README.md](formal/README.md). Details
 of the Jepsen test, its results and its limitations are in
 [jepsen/README.md](jepsen/README.md).
@@ -490,7 +513,10 @@ Workloads:
 | Membership | The cluster moves between five configurations of five servers |
 | dets | The dets backend runs alongside the simulated disk, and the two are compared each time a server reopens its file |
 | Write-ahead log | The write-ahead log backend runs in the same way, on eta's simulated disk. A killed node loses the file data and the directory operations that it did not sync. |
-| Storage loss | Every restart of a server loses the disk of the server. The server starts with a new incarnation and asks to replace the member that it was. The runs also deliver replace requests of incarnations that no longer run. |
+| Storage loss | Every restart of a server loses the disk of the server. The server starts with a new incarnation and asks to replace the member that it was. The runs also deliver replace requests of incarnations that no longer run. In 20 of the runs, the storage backend supplies the incarnation. |
+| Gates | Every server has a gate. The harness closes the gate of a server and opens every gate, at any time. |
+| Passive servers | A server that restarts after the cluster was formed is passive until a client activates it. The server keeps its stored state, so it is a member that takes no part. |
+| Formation with a machine state | The cluster is formed with a machine state, on every founder or on the first founder only. In the second case, every other server receives the configuration and the machine state from the leader. |
 
 Every run forms its cluster inside the simulation: the first operation
 starts the servers, and the second operation collects the incarnations and
@@ -516,14 +542,20 @@ session process more often in those runs. A server reads the length of its mailb
 runtime system, which the simulation does not replace. The test therefore
 also checks that three runs of one seed produce the same trace.
 
-Ten invariants are checked after every step. They include agreement across
-the whole run, that a server's memory never holds state its disk does not,
-that a linearizable read returns every value acknowledged before it, that
-the values of a session process are applied in the order of submission, and
-that a leader accepts a replacement only from a server that ran after the
-leader started its epoch.
+Eleven invariants are checked after every step. They include agreement
+across the whole run, that a server's memory never holds state its disk
+does not, that a linearizable read returns every value acknowledged before
+it, that the values of a session process are applied in the order of
+submission, that a leader accepts a replacement only from a server that
+ran after the leader started its epoch, and that a server promises and
+accepts nothing while it is passive or its gate is closed.
 
-Twelve planted bugs confirm that the suite can fail:
+Fifteen planted bugs confirm that the suite can fail:
+
+- servers that are started without a gate, while the harness closes gates
+- a server that is started without `passive`, while the harness expects a
+  passive server
+- a machine state that forms a cluster as the state of index 0
 
 - quorums that do not intersect
 - a server that loses its disk on restart and keeps its incarnation
@@ -562,6 +594,12 @@ TLC takes about one second per run. Model checking does not need to be
 repeated when the code changes, because trace validation checks the code
 against the model directly.
 
+The suite validates 110 runs: 20 of the faults workload, 20 of the churn
+workload, 10 with `{counting, 4, 2}`, 30 with gates and 30 with passive
+servers. In a run with gates or passive servers, a server stops and starts
+taking part at any time. Every such run is a behaviour of the model, which
+has no gate and no passive server.
+
 Trace validation rejects some runs that pass the simulation's invariants:
 
 | Planted bug | Rejected by the model | Caught by invariants |
@@ -576,6 +614,9 @@ Limitations:
 - It covers only what `FlexiblePaxos.tla` models. Membership change, read
   leases, sessions, the formation of a cluster and the replacement of a
   member are not covered. The trace names a member by its address.
+- It cannot reject a server that takes part while its gate is closed,
+  because that server is an acceptor of the model. The invariant of the
+  simulation detects it.
 - The model's message set contains every message sent. An action passes if
   the messages that justify it were sent, even if the server had not yet
   received them.
@@ -610,6 +651,10 @@ Results:
 | `{counting, 4, 2}`, 5 servers | 30 | 1,642 | linearizable |
 | Read leases, clocks 6% fast | 30 | 1,136 | linearizable |
 | Membership change | 30 | 1,052 | linearizable |
+| Gates | 30 | 1,256 | linearizable |
+| Passive servers and gates | 30 | 775 | linearizable |
+| Formation with a machine state, on the first founder | 30 | 1,143 | linearizable |
+| Formation with a machine state, with membership change | 20 | 709 | linearizable |
 
 Three planted bugs confirm that Porcupine can reject a history:
 
@@ -673,8 +718,8 @@ The tests in [test/](test/) cover:
 - the extension points of member identity: an incarnation that the storage
   backend supplies, formation with known members, formation with a
   machine state and a server that joins such a cluster later, a passive
-  server before and after its activation, and a server whose gate closes
-  and opens
+  server before and after its activation, a server whose gate closes and
+  opens, and a gate that closes during a pre-vote
 
 ### Test-only configuration
 

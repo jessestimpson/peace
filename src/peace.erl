@@ -201,6 +201,7 @@
     unsafe_no_joint => boolean(),
     unsafe_no_session_order => boolean(),
     unsafe_no_challenge => boolean(),
+    unsafe_no_base_index => boolean(),
     unsafe_fixed_incarnation => boolean(),
     %% The rate of this server's clock, as `{Num, Den}'. This key is read
     %% only in a test build.

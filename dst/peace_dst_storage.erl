@@ -51,6 +51,14 @@ open(Id, Args = #{tab := Tab}) ->
             Stored = stored(Tab, Id),
             _ = Recovered =:= Stored orelse ets:insert(Tab, {{disk_differs, Id}, Recovered, Stored}),
             {ok, {Tab, Id, {Mod, Disk, Node}}, Recovered};
+        #{supply_incarnation := true} ->
+            %% The backend supplies the incarnation of the server. See
+            %% `peace_storage:stored()'. The value is the number of times
+            %% that the storage of the server was opened, which is never
+            %% used a second time at the address. The server ignores the
+            %% value if it recovers a stored identity.
+            N = ets:update_counter(Tab, {opened, Id}, 1, {{opened, Id}, 0}),
+            {ok, {Tab, Id, none}, (stored(Tab, Id))#{incarnation => {supplied, N}}};
         _ ->
             {ok, {Tab, Id, none}, stored(Tab, Id)}
     end.

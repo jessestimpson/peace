@@ -10,7 +10,7 @@
 
 -include("peace_eta.hrl").
 
--export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/4, form/3]).
+-export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/4, form/3, form/4, activate/1]).
 
 %% The number of values that a client of `pipeline/3' submits, and the time
 %% that the client waits for the replies.
@@ -203,6 +203,12 @@ deliver(To, From, Receiver, Msg) ->
     _ = erlang:send(To, {peace_msg, From, Receiver, Msg}, [noconnect]),
     ok.
 
+%% Activates a passive server. See `peace:activate/2'.
+activate(Id) ->
+    ?ETA_LABEL(activator),
+    _ = call(Id, activate, ?CALL_TIMEOUT_MS),
+    ok.
+
 %% Forms the cluster of the founders. The client asks every founder for its
 %% incarnation and then stores the configuration on every founder.
 %%
@@ -232,12 +238,33 @@ deliver(To, From, Receiver, Msg) ->
 %% so that a run can form a cluster with an unsafe quorum system. See the
 %% `unsafe_quorums' mode of `peace_dst'.
 form(Founders, Quorum, Attempts) ->
+    form(Founders, Quorum, Attempts, false).
+
+%% `Seeded' selects a formation with a machine state. See "Formation with a
+%% machine state" in `peace_core'.
+%%
+%% <ul>
+%% <li>`false' - every founder stores the configuration.</li>
+%% <li>`{all, MState}' - every founder stores the configuration and the
+%%   machine state.</li>
+%% <li>`{first, MState}' - only the first founder stores the configuration
+%%   and the machine state. The other founders have no configuration. They
+%%   receive the configuration and the machine state from the leader.</li>
+%% </ul>
+form(Founders, Quorum, Attempts, Seeded) ->
     ?ETA_LABEL(former),
+    put(seeded, Seeded),
     form(Founders, Quorum, Attempts, #{}, false).
 
 form(_Founders, _Quorum, 0, _Known, _Asked) ->
     ok;
 form(Founders, Quorum, Attempts, Known0, Asked0) ->
+    {Targets, Request} =
+        case get(seeded) of
+            false -> {Founders, fun(Config) -> {form, Config} end};
+            {all, MState} -> {Founders, fun(Config) -> {form, Config, {machine_state, MState}} end};
+            {first, MState} -> {[hd(Founders)], fun(Config) -> {form, Config, {machine_state, MState}} end}
+        end,
     Answers = [{Id, call(Id, identity, ?FORM_TIMEOUT_MS)} || Id <- Founders],
     Known = maps:merge(Known0, maps:from_list([{Id, Member} || {Id, {ok, Member, _Config}} <- Answers])),
     New = {lists:usort(maps:values(Known)), to_members(Quorum, Known)},
@@ -248,7 +275,7 @@ form(Founders, Quorum, Attempts, Known0, Asked0) ->
             ok;
         {[], true} ->
             %% Every founder is asked, also after one has not answered.
-            Stored = [{Id, call(Id, {form, New}, ?FORM_TIMEOUT_MS)} || Id <- Founders],
+            Stored = [{Id, call(Id, Request(New), ?FORM_TIMEOUT_MS)} || Id <- Targets],
             %% The first election does not wait for an election timeout, so
             %% that the cluster has a leader before the faults of the run
             %% stop a phase-one quorum. The client asks once, the first
