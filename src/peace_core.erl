@@ -479,6 +479,13 @@
 %% that admits a member and the first message of that member. An example
 %% is a record of the members that is kept outside the cluster.
 %%
+%% A server can also have a gate. `peace_server' reports the gate with the
+%% event `{gate, Open}'. While the gate is closed, the server behaves as a
+%% passive server, with two differences: the server is not refused the
+%% event `form', and the state of the gate is not stored. A leader or a
+%% candidate whose gate closes steps down. An example of a gate is a lease
+%% that the server holds from a system outside the cluster.
+%%
 %% === Replacement ===
 %%
 %% The event `{replace, From, [New]}' asks the leader to replace members.
@@ -582,6 +589,10 @@
 %% `learned' message carries.
 -define(MAX_BATCH, 64).
 
+%% Whether a server sends no message of the protocol: the server is passive
+%% or its gate is closed. See "A passive server".
+-define(SILENT(C), (C#core.passive orelse C#core.gated)).
+
 %% A tag identifies one proposal. A tag is the epoch that first proposed the
 %% value and the index of the value. A leader replies to a waiting client
 %% only when the entry applied at the index carries the tag that the leader
@@ -654,6 +665,7 @@
     | {form, from(), simple()}
     | {form, from(), simple(), {machine_state, peace_machine:state()}}
     | {activate, from()}
+    | {gate, Open :: boolean()}
     | {replace, from(), [peace:member()]}
     | {stored, peace:epoch(), [peace:index()]}
     | {msg, peace:member(), msg()}.
@@ -677,6 +689,9 @@
     rejoin = [] :: [peace:server_id()],
     %% Whether this server is passive. See "A passive server".
     passive = false :: boolean(),
+    %% Whether the gate of this server is closed. A server whose gate is
+    %% closed behaves as a passive server. See "A passive server".
+    gated = false :: boolean(),
     %% Leader: `challenges' holds the challenge that was sent to each server
     %% that asked to replace a member. `verified' holds, for each address,
     %% the last server that answered its challenge. `nonce' counts the
@@ -937,6 +952,14 @@ event({reconfigure, From, New}, C) ->
     reconfigure(From, New, C);
 event({form, From, New, {machine_state, MState}}, C) ->
     form(From, New, {ok, MState}, C);
+%% The gate opens.
+event({gate, true}, C) ->
+    {C#core{gated = false}, []};
+%% The gate closes. A leader or a candidate steps down.
+event({gate, false}, C = #core{role = follower}) ->
+    {C#core{gated = true}, []};
+event({gate, false}, C) ->
+    follow(C#core{gated = true}, undefined);
 event({activate, From}, C = #core{passive = true, meta = Meta}) ->
     Meta1 = Meta#{active => true},
     {C#core{passive = false, meta = Meta1}, [{persist, #{meta => Meta1}}, {reply, From, ok}]};
@@ -967,11 +990,13 @@ event({msg, Peer, _Msg}, C = #core{id = Peer}) ->
     {C, []};
 %% A passive server does not answer a `prepare' or a `prevote', as if the
 %% message were lost. See "A passive server".
-event({msg, _Peer, Msg}, C = #core{passive = true}) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
+event({msg, _Peer, Msg}, C) when
+    ?SILENT(C) andalso (element(1, Msg) =:= prepare orelse element(1, Msg) =:= prevote)
+->
     {C, []};
 %% A passive server does not accept a proposal and sends no `accept'. It
 %% asks for the decided values that it does not have.
-event({msg, Peer, {propose, _Epoch, _Entries, LeaderCommit, _Stamp}}, C = #core{passive = true, commit = Commit}) ->
+event({msg, Peer, {propose, _Epoch, _Entries, LeaderCommit, _Stamp}}, C = #core{commit = Commit}) when ?SILENT(C) ->
     {C#core{leader = Peer}, [{timer, election, reset}] ++ [{send, Peer, {catchup, Commit + 1}} || Commit < LeaderCommit]};
 event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
     %% A server outside the configuration must not be able to depose the
@@ -1067,6 +1092,7 @@ overview(C = #core{}) ->
         member => C#core.id,
         role => C#core.role,
         passive => C#core.passive,
+        gated => C#core.gated,
         leader => address(C#core.leader),
         members => lists:usort([address(M) || M <- members(C)]),
         config => in_force(C),
@@ -1131,8 +1157,8 @@ prevote(C = #core{}) ->
 %% that it has applied. A server that has applied no configuration does not
 %% know which configuration was in force for the first index.
 %% A passive server does not campaign.
-electable(C = #core{acfg = ACfg, passive = Passive}) ->
-    not Passive andalso is_member(C) andalso ACfg =/= ?NO_CONFIG.
+electable(C = #core{acfg = ACfg}) ->
+    not ?SILENT(C) andalso is_member(C) andalso ACfg =/= ?NO_CONFIG.
 
 %% A server that has no configuration and that was started with `rejoin'
 %% asks to replace the member that has its address. See "Member identity".

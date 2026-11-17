@@ -59,6 +59,7 @@ log_event({reconfigure, _From, _New}) -> reconfigure;
 log_event({form, _From, _New}) -> form;
 log_event({form, _From, _New, _MState}) -> form;
 log_event({activate, _From}) -> activate;
+log_event({gate, Open}) -> {gate, Open};
 log_event({replace, _From, _News}) -> replace;
 log_event(Event) -> Event.
 %% A simulated run reads the state that a server published when its last
@@ -126,6 +127,10 @@ log_event(Event) -> Event.
     backlog_len = 0 :: non_neg_integer(),
     %% Whether a `peace_backlog' message to this process is in the mailbox.
     backlog_note = false :: boolean(),
+    %% The gate of this server, and whether the gate was open when this
+    %% server last called it. See "The gate".
+    gate :: undefined | {module(), atom(), [term()]},
+    gate_open = true :: boolean(),
     %% A function that is called with every step of `peace_core'. It is set
     %% only in a test build. See `tracer/1'.
     tracer :: undefined | fun((step()) -> term())
@@ -266,7 +271,8 @@ init(Config = #{id := Id}, Writer, Stored) ->
         ),
         election_ms = ElectionMs,
         heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5)),
-        max_mailbox = maps:get(max_mailbox, Config, ?DEFAULT_MAX_MAILBOX)
+        max_mailbox = maps:get(max_mailbox, Config, ?DEFAULT_MAX_MAILBOX),
+        gate = maps:get(gate, Config, undefined)
     },
     State1 = perform(Effects, State),
     ok = trace(State1, {Id, init, undefined, Core, Effects}),
@@ -541,7 +547,52 @@ flush({State0, Steps}) ->
 %% snapshot was written as decided by an earlier event. The separate group
 %% keeps that guarantee for writes: no index is written as decided and
 %% removed by a snapshot in the same write.
-step(Event, State0 = #state{core = Core0}, Steps0) ->
+%% == The gate ==
+%%
+%% A server that is started with `gate => {Module, Function, Args}' calls
+%% that function before it handles an event, and before it sends a message
+%% that states a promise, an acceptance or a proposal. The function returns
+%% whether the gate is open. While the gate is closed:
+%%
+%% <ul>
+%% <li>`peace_core' behaves as a passive server. See "A passive server" in
+%%   `peace_core'. A leader or a candidate steps down.</li>
+%% <li>This module sends no `prepare', `promise', `propose', `accept',
+%%   `prevote' or `prevote_ok' message. This covers an `accept' message that
+%%   waited for a write while the gate closed.</li>
+%% </ul>
+%%
+%% The function runs in the server process and must not block. An exception
+%% of the function closes the gate.
+step(Event, State0 = #state{gate = Gate, gate_open = Was}, Steps0) when Gate =/= undefined ->
+    case gate_open(State0) of
+        Was ->
+            step1(Event, State0, Steps0);
+        Open ->
+            {State1, Steps1} = step1({gate, Open}, State0#state{gate_open = Open}, Steps0),
+            step1(Event, State1, Steps1)
+    end;
+step(Event, State, Steps) ->
+    step1(Event, State, Steps).
+
+gate_open(#state{gate = undefined}) ->
+    true;
+gate_open(#state{gate = {Module, Function, Args}}) ->
+    try apply(Module, Function, Args) of
+        true -> true;
+        _ -> false
+    catch
+        _:_ -> false
+    end.
+
+%% Whether a message states a promise, an acceptance or a proposal, or asks
+%% for one.
+gated(Msg) when is_tuple(Msg) ->
+    lists:member(element(1, Msg), [prepare, promise, propose, accept, prevote, prevote_ok]);
+gated(_Msg) ->
+    false.
+
+step1(Event, State0 = #state{core = Core0}, Steps0) ->
     {Core, Effects} = peace_core:handle(Event, now_ms(State0#state.clock), Core0),
     _ = ?TRACE(Event, Core),
     {State, Steps} =
@@ -873,7 +924,10 @@ effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, trans
 effect({send, {any, Address}, Msg}, State = #state{core = Core}) ->
     send(Address, {peace_msg, peace_core:id(Core), any, Msg}, State);
 effect({send, To, Msg}, State = #state{core = Core}) ->
-    send(peace_core:address(To), {peace_msg, peace_core:id(Core), To, Msg}, State);
+    case gated(Msg) andalso not gate_open(State) of
+        true -> State;
+        false -> send(peace_core:address(To), {peace_msg, peace_core:id(Core), To, Msg}, State)
+    end;
 effect({reply, undefined, _Reply}, State) ->
     State;
 effect({reply, {peace_session, Pid, Label}, Reply}, State) ->

@@ -176,6 +176,12 @@
     %% A passive server takes no part in the protocol until `activate/2' is
     %% called. See `activate/2'.
     passive => boolean(),
+    %% A function that returns whether the gate of the server is open. While
+    %% the gate is closed, the server behaves as a passive server. The
+    %% server calls the function before it handles an event and before it
+    %% sends a message of the protocol. The function must not block. See
+    %% "The gate" in `peace_server'.
+    gate => {module(), atom(), [term()]},
     election_timeout_ms => pos_integer(),
     heartbeat_ms => pos_integer(),
     snapshot_interval => pos_integer() | infinity,

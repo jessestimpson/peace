@@ -358,7 +358,10 @@ outside the cluster:
 | `peace:form_cluster(Servers, Quorum, #{machine_state => State})` | Forms a cluster whose machine state is `State` and not the result of `init/1`. The state is the state as of index 1, and the first value is decided at index 2. A server that joins later receives the state from the leader. |
 | `passive => true` in the configuration of a server, and `peace:activate(Server)` | A passive server receives decided values and sends no message of the protocol: it does not promise, does not accept a proposal and does not campaign. `activate/1` makes it an ordinary member. The activation is stored. |
 
-A passive server is an acceptor that takes no step. The other servers
+| `gate => {Module, Function, Args}` in the configuration of a server | The server calls the function before it handles an event, and before it sends a message that states a promise, an acceptance or a proposal. While the function returns `false`, the server behaves as a passive server and sends none of those messages. A leader steps down. An example is a lease that the server holds from a system outside the cluster. |
+
+A passive server is an acceptor that takes no step. A server whose gate is
+closed is the same. The other servers
 cannot distinguish it from a member that is not reachable. Every behaviour
 with a passive server is therefore a behaviour of the protocol, and the
 models need no change. These extension points are not in the thesis.
@@ -373,6 +376,12 @@ Limitations of member identity:
   state. peace does not compare the states of different servers.
 - A passive member does not count towards a quorum. A configuration needs
   its quorums among the other members.
+- A server calls its gate when it handles an event and when it sends a
+  message. A server that handles no event does not learn that its gate
+  has closed. It sends no message of the protocol in that time, because
+  the gate is called before each such message.
+- A message that was sent while the gate was open can arrive after the
+  gate has closed.
 
 - A replacement needs a leader. The old configuration must still have a
   phase-one quorum and a phase-two quorum without the member that is
@@ -663,8 +672,9 @@ The tests in [test/](test/) cover:
   incarnation, and stored state that a server refuses to start on
 - the extension points of member identity: an incarnation that the storage
   backend supplies, formation with known members, formation with a
-  machine state and a server that joins such a cluster later, and a
-  passive server before and after its activation
+  machine state and a server that joins such a cluster later, a passive
+  server before and after its activation, and a server whose gate closes
+  and opens
 
 ### Test-only configuration
 

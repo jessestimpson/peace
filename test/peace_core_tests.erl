@@ -896,6 +896,34 @@ passive_test() ->
     ?assertEqual(ok, proplists:get_value(x2, replies(ev(a, {activate, x2}, S9)))),
     erase(extra_config).
 
+%% A server whose gate is closed behaves as a passive server. A leader
+%% whose gate closes steps down.
+gate_test() ->
+    S0 = run(ev(a, {value, c1, {put, k, 1}}, run(ev(a, force_election, new([a, b, c], majority))))),
+    S1 = run(ev(a, {gate, false}, S0#{sent => []})),
+    ?assertEqual(follower, role(a, S1)),
+    ?assertMatch(#{gated := true, passive := false}, peace_core:overview(core(a, S1))),
+    %% The server does not campaign and does not promise.
+    S2 = run(ev(a, force_election, run(ev(a, election_timeout, S1)))),
+    ?assertEqual(follower, role(a, S2)),
+    S3 = run(ev(b, force_election, block([{b, c}, {c, b}], S2#{sent => []}))),
+    ?assertEqual(candidate, role(b, S3)),
+    ?assertEqual([], [Msg || {From, _To, Msg} <- maps:get(sent, S3), From =:= a]),
+    %% With c, b becomes leader. The gated server does not accept, and
+    %% receives the decided value.
+    S4 = run(ev(b, {value, c2, {put, k, 2}}, run(ev(b, force_election, block([], S3#{sent => []}))))),
+    ?assertEqual(leader, role(b, S4)),
+    ?assertEqual({ok, ok, b}, proplists:get_value(c2, replies(S4))),
+    S5 = run(ev(b, heartbeat_timeout, run(ev(b, heartbeat_timeout, S4)))),
+    ?assertEqual([catchup], lists:usort([element(1, Msg) || {From, _To, Msg} <- maps:get(sent, S5), From =:= a])),
+    ?assertEqual(#{k => 2}, kv(a, S5)),
+    %% After the gate opens, the server is an ordinary member.
+    %% The server did not record the epoch of b while its gate was closed.
+    %% Its first campaign is refused, and tells it that epoch.
+    S6 = run(ev(a, force_election, run(ev(a, force_election, ev(a, {gate, true}, S5))))),
+    ?assertMatch(#{gated := false}, peace_core:overview(core(a, S6))),
+    ?assertEqual(leader, role(a, S6)).
+
 %% A server without a configuration does not campaign.
 server_without_configuration_test() ->
     S0 = join([d], new([a, b, c], majority)),

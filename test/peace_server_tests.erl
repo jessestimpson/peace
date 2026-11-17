@@ -337,6 +337,33 @@ until_leader(Fun, N) ->
             Other
     end.
 
+%% A server with a gate decides nothing while the gate is closed.
+gate_test() ->
+    Key = {?MODULE, gate},
+    persistent_term:put(Key, false),
+    {Id, Pid} = start_single_unformed(peace_server_tests_gate, #{
+        gate => {persistent_term, get, [Key]},
+        election_timeout_ms => 50
+    }),
+    try
+        ?assertEqual({ok, [Id], []}, peace:form_cluster([Id], majority)),
+        ?assertMatch({error, _}, peace:propose(Id, {put, k, 1}, 300)),
+        ?assertMatch(#{gated := true, role := follower}, peace:overview(Id)),
+        persistent_term:put(Key, true),
+        ?assertMatch({ok, ok, _}, until_leader(fun() -> peace:propose(Id, {put, k, 2}) end, 100)),
+        ?assertMatch(#{gated := false, role := leader}, peace:overview(Id)),
+        %% The gate closes. The leader steps down at its next event.
+        persistent_term:put(Key, false),
+        ?assertEqual(ok, until(fun() -> maps:get(role, peace:overview(Id)) =:= follower end, 100)),
+        ?assertMatch({error, _}, peace:propose(Id, {put, k, 3}, 300)),
+        %% An exception of the function closes the gate.
+        persistent_term:erase(Key),
+        ?assertMatch({error, _}, peace:propose(Id, {put, k, 4}, 300))
+    after
+        persistent_term:erase(Key),
+        gen_server:stop(Pid)
+    end.
+
 start_single_unformed(Name, Opts) ->
     Id = {Name, node()},
     {ok, Pid} = peace_server:start(Opts#{
