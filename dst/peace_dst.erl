@@ -951,9 +951,16 @@ replacement_is_live(Tab, Views) ->
 %%   `learned', and a snapshot may have removed an entry.</li>
 %% </ul>
 %%
-%% The harness closes a gate between two steps. A server that is handling
-%% an event at that time has already made the changes of that event to its
-%% state, so the first comparison is made with the state after that event.
+%% The harness closes a gate between two steps. A server can be handling a
+%% group of events at that time. An event of the group that the server
+%% began before the gate closed has passed the gate, and the server has not
+%% yet published the state after that event. The check therefore does not
+%% compare with the state that it sees first. It waits until the server
+%% publishes another state, and compares with that state. A server that
+%% publishes no other state has accepted nothing.
+%%
+%% An entry that the server held as accepted in either of the two states is
+%% not a new entry.
 silent_accepts_nothing(Tab, Views) ->
     Wrong = lists:filtermap(
         fun({I, {_Id, View}}) ->
@@ -965,7 +972,19 @@ silent_accepts_nothing(Tab, Views) ->
                 {true, {live, Core}} ->
                     Now = {peace_core:id(Core), peace_core:promised(Core), accepted(Core)},
                     case ets:lookup(Tab, {silent, I}) of
-                        [{_, {Member, Promised, Accepted}}] when Member =:= element(1, Now) ->
+                        [{_, {pending, Now}}] ->
+                            bump(silent_checks),
+                            false;
+                        [{_, {pending, {Member, _, Earlier}}}] when Member =:= element(1, Now) ->
+                            %% The entries of both states are kept. A server
+                            %% that is killed loses the record that an entry
+                            %% is decided, if the write of that record had
+                            %% not returned. After the restart the server
+                            %% holds the entry as accepted again.
+                            Base = setelement(3, Now, maps:merge(Earlier, element(3, Now))),
+                            true = ets:insert(Tab, {{silent, I}, {base, Base}}),
+                            false;
+                        [{_, {base, {Member, Promised, Accepted}}}] when Member =:= element(1, Now) ->
                             New = maps:filter(fun(Index, Epoch) -> maps:get(Index, Accepted, none) =/= Epoch end, element(3, Now)),
                             case Promised =:= element(2, Now) andalso map_size(New) =:= 0 of
                                 true ->
@@ -975,7 +994,7 @@ silent_accepts_nothing(Tab, Views) ->
                                     {true, #{server => I, promised => {Promised, element(2, Now)}, accepted => New}}
                             end;
                         _ ->
-                            true = ets:insert(Tab, {{silent, I}, Now}),
+                            true = ets:insert(Tab, {{silent, I}, {pending, Now}}),
                             false
                     end;
                 {true, _} ->

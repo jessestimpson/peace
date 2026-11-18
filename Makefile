@@ -1,4 +1,4 @@
-.PHONY: all compile test dst trace porcupine jepsen tlc tlc-long tlc-soak ind check bench
+.PHONY: all compile dialyzer test dst trace porcupine jepsen tlc tlc-long tlc-soak ind check bench
 
 all: compile
 
@@ -64,4 +64,12 @@ ind:
 bench:
 	bench/run.sh all
 
-check: test dst trace tlc
+# `compile' builds without TEST, as a release does. The keys that plant bugs
+# are compiled out in that build, and a clause that only a planted bug
+# reaches is then an error. `dialyzer' checks the default profile and the
+# simulation profile.
+dialyzer:
+	rebar3 dialyzer
+	rebar3 as dst dialyzer
+
+check: compile dialyzer test dst trace tlc

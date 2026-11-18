@@ -100,15 +100,15 @@ membership_test_() ->
 %% after a restart until a client activates them.
 gates_and_passive_servers_test_() ->
     {timeout, ?TIMEOUT, fun() ->
-        exercised(sweep("gates", lists:seq(1, 30), #{gates => true})),
-        exercised(sweep("passive", lists:seq(1, 30), #{passive => true, gates => true}))
+        exercised(sweep("gates", lists:seq(1, 100), #{gates => true})),
+        exercised(sweep("passive", lists:seq(1, 100), #{passive => true, gates => true}))
     end}.
 
 %% A cluster that is formed with a machine state on the first founder only.
 formation_with_a_machine_state_test_() ->
     {timeout, ?TIMEOUT, fun() ->
-        exercised(sweep("seeded", lists:seq(1, 30), #{seeded => first})),
-        exercised(sweep("seeded-membership", lists:seq(1, 20), #{seeded => first, servers => 5, reconfigure => true}))
+        exercised(sweep("seeded", lists:seq(1, 100), #{seeded => first})),
+        exercised(sweep("seeded-membership", lists:seq(1, 60), #{seeded => first, servers => 5, reconfigure => true}))
     end}.
 
 %% The following tests show that Porcupine can reject a history. Each test

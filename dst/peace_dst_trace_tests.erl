@@ -85,8 +85,8 @@ flexible_quorums_are_behaviours_of_the_model_test_() ->
 %% must therefore be behaviours of the model without a change to the model.
 gates_are_behaviours_of_the_model_test_() ->
     {timeout, ?TIMEOUT, fun() ->
-        exercised(sweep("gates", lists:seq(1, 20), #{gates => true})),
-        exercised(sweep("gates-churn", lists:seq(1, 10), #{gates => true, churn => true}))
+        exercised(sweep("gates", lists:seq(1, 60), #{gates => true})),
+        exercised(sweep("gates-churn", lists:seq(1, 40), #{gates => true, churn => true}))
     end}.
 
 %% This test validates runs in which a server that restarts is passive until
@@ -95,8 +95,8 @@ gates_are_behaviours_of_the_model_test_() ->
 %% values.
 passive_servers_are_behaviours_of_the_model_test_() ->
     {timeout, ?TIMEOUT, fun() ->
-        exercised(sweep("passive", lists:seq(1, 20), #{passive => true})),
-        exercised(sweep("passive-gates", lists:seq(1, 10), #{passive => true, gates => true}))
+        exercised(sweep("passive", lists:seq(1, 60), #{passive => true})),
+        exercised(sweep("passive-gates", lists:seq(1, 40), #{passive => true, gates => true}))
     end}.
 
 %% ---------------------------------------------------------------------------

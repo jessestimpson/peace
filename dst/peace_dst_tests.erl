@@ -299,7 +299,7 @@ storage_loss_test_() ->
             opts(Seed, #{servers => 5, storage_loss => true, quorum => {grid, grid()}})
         end),
         %% The storage backend supplies the incarnation of each server.
-        sweep(lists:seq(1, 20), fun(Seed) ->
+        sweep(lists:seq(1, 80), fun(Seed) ->
             opts(Seed, #{servers => 5, storage_loss => true, supplied_incarnations => true})
         end),
         Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
@@ -331,9 +331,9 @@ no_challenge_is_caught_test_() ->
 gates_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
-        sweep(lists:seq(1, 40), fun(Seed) -> opts(Seed, #{gates => true}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{gates => true, churn => true, servers => 5}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{gates => true, read_lease_ms => 40}) end),
+        sweep(lists:seq(1, 200), fun(Seed) -> opts(Seed, #{gates => true}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{gates => true, churn => true, servers => 5}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{gates => true, read_lease_ms => 40}) end),
         Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
         ?debugFmt("gates: ~p", [maps:with([runs, acknowledged, gates_closed, silent_checks, leader_changes], Stats)]),
         ?assert(Acked >= Runs * 3, Stats),
@@ -355,9 +355,9 @@ ignored_gate_is_caught_test_() ->
 passive_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
-        sweep(lists:seq(1, 40), fun(Seed) -> opts(Seed, #{passive => true}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{passive => true, servers => 5, quorum => {counting, 4, 2}}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{passive => true, gates => true}) end),
+        sweep(lists:seq(1, 200), fun(Seed) -> opts(Seed, #{passive => true}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{passive => true, servers => 5, quorum => {counting, 4, 2}}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{passive => true, gates => true}) end),
         Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
         ?debugFmt("passive: ~p", [maps:with([runs, acknowledged, passive_starts, activations, silent_checks], Stats)]),
         ?assert(Acked >= Runs * 3, Stats),
@@ -383,19 +383,19 @@ ignored_passive_is_caught_test_() ->
 formation_with_a_machine_state_test_() ->
     {timeout, ?TIMEOUT, fun() ->
         ok = peace_dst:reset_stats(),
-        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{seeded => all}) end),
-        sweep(lists:seq(1, 30), fun(Seed) -> opts(Seed, #{seeded => first}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{seeded => first, servers => 5, reconfigure => true}) end),
-        sweep(lists:seq(1, 20), fun(Seed) -> opts(Seed, #{seeded => all, servers => 5, storage_loss => true}) end),
-        sweep(lists:seq(1, 10), fun(Seed) -> calm(Seed, #{seeded => first}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{seeded => all}) end),
+        sweep(lists:seq(1, 150), fun(Seed) -> opts(Seed, #{seeded => first}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{seeded => first, servers => 5, reconfigure => true}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{seeded => all, servers => 5, storage_loss => true}) end),
+        sweep(lists:seq(1, 50), fun(Seed) -> calm(Seed, #{seeded => first}) end),
         Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
         ?debugFmt("formation with a machine state: ~p", [
             maps:with([runs, acknowledged, snapshots_received, restarts, replaced, reconfigured], Stats)
         ]),
         ?assert(Acked >= Runs * 3, Stats),
         %% A server that was not formed receives the machine state as a
-        %% snapshot. 60 of the 110 runs have such servers.
-        ?assert(maps:get(snapshots_received, Stats, 0) >= 60, Stats)
+        %% snapshot. 300 of the 500 runs have such servers.
+        ?assert(maps:get(snapshots_received, Stats, 0) >= 300, Stats)
     end}.
 
 %% This test shows that the suite detects a machine state that forms a

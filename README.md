@@ -421,9 +421,9 @@ peace is verified at six levels.
 | Level | What it checks | Command | Time |
 |---|---|---|---|
 | Unit tests | The protocol core and the supporting modules | `make test` | seconds |
-| Deterministic simulation | The real server processes under faults | `make dst` | about 8 minutes |
-| Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 4 minutes |
-| Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 7 minutes |
+| Deterministic simulation | The real server processes under faults | `make dst` | about 60 minutes |
+| Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 7 minutes |
+| Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 11 minutes |
 | Jepsen test | A key-value store on five Docker nodes under partitions, kills, pauses and membership changes | `make jepsen` | minutes per run |
 | Model checking | The TLA+ models of the protocol | `make tlc`, `make ind`, `make tlc-long` | minutes to hours |
 
@@ -432,15 +432,15 @@ table gives the level at which each one is checked.
 
 | Extension point | Unit tests | Simulation | Trace validation | Linearizability checking |
 |---|---|---|---|---|
-| Incarnation from the storage backend | 1 test | 20 runs of the storage loss workload | no | no |
+| Incarnation from the storage backend | 1 test | 80 runs of the storage loss workload | no | no |
 | Formation with known members | 1 test | The runs that form one founder of the cluster. They call the servers directly and not `peace:form_cluster/3`. | no | no |
-| Formation with a machine state | 2 tests | 110 runs, with restarts, lost disks and membership changes, and 1 planted bug | no | 50 runs |
-| Passive server | 2 tests | 80 runs and 1 planted bug | 30 runs | 30 runs |
-| Gate | 3 tests | 80 runs and 1 planted bug | 30 runs | 60 runs |
+| Formation with a machine state | 2 tests | 500 runs, with restarts, lost disks and membership changes, and 1 planted bug | no | 160 runs |
+| Passive server | 2 tests | 400 runs and 1 planted bug | 100 runs | 100 runs |
+| Gate | 3 tests | 500 runs and 1 planted bug | 140 runs | 200 runs |
 
 - Trace validation checks the claim that a passive server, and a server
   whose gate is closed, is an acceptor that takes no step of the model
-  except that it learns decided values. Every one of the 60 runs is a
+  except that it learns decided values. Every one of the 200 runs is a
   behaviour of `FlexiblePaxos.tla`.
 - Trace validation does not cover formation with a machine state. The
   model has no machine state, and a server that is formed in this way
@@ -513,7 +513,7 @@ Workloads:
 | Membership | The cluster moves between five configurations of five servers |
 | dets | The dets backend runs alongside the simulated disk, and the two are compared each time a server reopens its file |
 | Write-ahead log | The write-ahead log backend runs in the same way, on eta's simulated disk. A killed node loses the file data and the directory operations that it did not sync. |
-| Storage loss | Every restart of a server loses the disk of the server. The server starts with a new incarnation and asks to replace the member that it was. The runs also deliver replace requests of incarnations that no longer run. In 20 of the runs, the storage backend supplies the incarnation. |
+| Storage loss | Every restart of a server loses the disk of the server. The server starts with a new incarnation and asks to replace the member that it was. The runs also deliver replace requests of incarnations that no longer run. In 80 of the runs, the storage backend supplies the incarnation. |
 | Gates | Every server has a gate. The harness closes the gate of a server and opens every gate, at any time. |
 | Passive servers | A server that restarts after the cluster was formed is passive until a client activates it. The server keeps its stored state, so it is a member that takes no part. |
 | Formation with a machine state | The cluster is formed with a machine state, on every founder or on the first founder only. In the second case, every other server receives the configuration and the machine state from the leader. |
@@ -576,6 +576,12 @@ Limitations:
 - In the dets workload, dets calls go to eta's in-process replacement for
   dets. It keeps the file contents but is not the real dets implementation.
   The unit tests cover real dets.
+- The invariant for a passive server and for a closed gate does not
+  compare with the state of the server at the moment when the harness
+  closes the gate. A server can be handling a group of events at that
+  moment, and an event that the server began earlier has passed the gate.
+  The invariant compares with the next state that the server publishes.
+  A promise or an acceptance in that one group of events is not detected.
 - The simulation does not make storage operations fail. Failed writes,
   failed syncs and damaged records are covered by unit tests.
 
@@ -594,8 +600,8 @@ TLC takes about one second per run. Model checking does not need to be
 repeated when the code changes, because trace validation checks the code
 against the model directly.
 
-The suite validates 110 runs: 20 of the faults workload, 20 of the churn
-workload, 10 with `{counting, 4, 2}`, 30 with gates and 30 with passive
+The suite validates 250 runs: 20 of the faults workload, 20 of the churn
+workload, 10 with `{counting, 4, 2}`, 100 with gates and 100 with passive
 servers. In a run with gates or passive servers, a server stops and starts
 taking part at any time. Every such run is a behaviour of the model, which
 has no gate and no passive server.
@@ -651,10 +657,10 @@ Results:
 | `{counting, 4, 2}`, 5 servers | 30 | 1,642 | linearizable |
 | Read leases, clocks 6% fast | 30 | 1,136 | linearizable |
 | Membership change | 30 | 1,052 | linearizable |
-| Gates | 30 | 1,256 | linearizable |
-| Passive servers and gates | 30 | 775 | linearizable |
-| Formation with a machine state, on the first founder | 30 | 1,143 | linearizable |
-| Formation with a machine state, with membership change | 20 | 709 | linearizable |
+| Gates | 100 | 3,981 | linearizable |
+| Passive servers and gates | 100 | 2,962 | linearizable |
+| Formation with a machine state, on the first founder | 100 | 4,594 | linearizable |
+| Formation with a machine state, with membership change | 60 | 2,153 | linearizable |
 
 Three planted bugs confirm that Porcupine can reject a history:
 
@@ -733,9 +739,9 @@ safeguard.
 ```
 make test       # unit tests
 make bench      # benchmarks on separate Erlang nodes, about 20 minutes
-make dst        # deterministic simulation, about 8 minutes
-make trace      # trace validation, about 4 minutes
-make porcupine  # linearizability checking with Porcupine, about 7 minutes
+make dst        # deterministic simulation, about 60 minutes
+make trace      # trace validation, about 7 minutes
+make porcupine  # linearizability checking with Porcupine, about 11 minutes
 make tlc        # quick TLC configs, a few minutes
 make ind        # inductive invariant with Apalache, about 3 minutes
 make tlc-long   # TLC configs with tens of millions of states, about 2.5 hours
