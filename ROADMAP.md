@@ -13,7 +13,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Storage | The default backend is a write-ahead log with checksums and group commit. It is tested with fault injection and in the simulation. |
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
 | Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test has not been run. |
-| Operations | Minimal. No telemetry, no leader transfer, no upgrade path. |
+| Operations | Minimal. No telemetry and no leader transfer. Messages and stored data have a version. No step agrees on a version, so no upgrade of a running cluster is possible yet. |
 | Packaging | No CI and no published package. |
 
 ## Milestones
@@ -209,7 +209,18 @@ Goal: an operator can run, observe, maintain and upgrade a cluster.
 - [ ] Emit `telemetry` events for elections, role changes, commit index,
       replication lag, snapshot activity and storage latency.
 - [ ] Log role changes and errors through `logger`.
-- [ ] Add a version field to messages, stored entries and snapshots.
+- [x] Add a version field to messages, stored entries and snapshots. Done
+      on 2026-11-19. Every message between servers names a version in its
+      envelope. All stored data of a server has one format, which is
+      stored with the identity of the server. Both numbers are 1. A server
+      drops a message of another version and does not start on data of a
+      later format. See "Versions" in `peace_server`.
+- [ ] Agree on the message version in a cluster. A server has to keep
+      sending the earlier version until every member handles the later
+      one. Without this step, a change of the message version stops a
+      cluster during a rolling upgrade.
+- [ ] Give the requests of a client a version. They are `gen_server` calls
+      and casts without one.
 - [ ] Add state machine versioning, so that the machine code can be upgraded
       on a running cluster.
 - [ ] Add session expiry by time. A client of an evicted session is
@@ -245,7 +256,11 @@ Reasons for the order:
 - [ ] Add a non-voting stage for a joining server. A server currently counts
       toward quorums before it has caught up, which can delay commits. A
       replacement for a member whose storage was lost starts with no
-      entries, so each replacement has this cost.
+      entries, so each replacement has this cost. A part exists since
+      2026-11-16: a passive server receives decided values and takes no
+      part until `peace:activate/1` is called. A passive member is still
+      counted in the quorum system, and nothing activates it when it has
+      caught up.
 - [ ] Add leader transfer, for use before a node is stopped.
 - [ ] Add operator-driven forced recovery for a cluster that has
       permanently lost a phase-one quorum. Example: under
@@ -334,6 +349,19 @@ Goal: a published, versioned package.
 Done when: version 1.0.0 is published.
 
 ## Verification work
+
+The extension points of member identity were added on 2026-11-16 and
+2026-11-17: an incarnation from the storage backend, formation with known
+members, formation with a machine state, a passive server and a gate.
+They are in the simulation, and passive servers and gates are in trace
+validation. See "Verification" in [README.md](README.md). They are in no
+TLA+ model and not in the Jepsen test.
+
+- [ ] Add the extension points of member identity to the Jepsen test: a
+      server with a gate, a passive replacement, and a fault that deletes
+      a data directory.
+- [ ] Add a machine state to the model, so that trace validation covers
+      formation with a machine state.
 
 This work improves confidence in the existing implementation. It does not
 block the milestones above and can be done at any time.

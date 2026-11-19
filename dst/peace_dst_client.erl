@@ -200,7 +200,7 @@ submit(Fun, Attempts, Again) ->
 %% the member `From' had sent the message to the member `Receiver'.
 deliver(To, From, Receiver, Msg) ->
     ?ETA_LABEL(rumour),
-    _ = erlang:send(To, {peace_msg, From, Receiver, Msg}, [noconnect]),
+    _ = erlang:send(To, {peace_msg, maps:get(message, peace:versions()), From, Receiver, Msg}, [noconnect]),
     ok.
 
 %% Activates a passive server. See `peace:activate/2'.

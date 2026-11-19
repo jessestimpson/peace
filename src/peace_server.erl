@@ -127,6 +127,9 @@ log_event(Event) -> Event.
     backlog_len = 0 :: non_neg_integer(),
     %% Whether a `peace_backlog' message to this process is in the mailbox.
     backlog_note = false :: boolean(),
+    %% The versions of messages that this server has refused, with the node
+    %% that sent them. See "Versions".
+    refused = #{} :: #{{node(), term()} => true},
     %% The gate of this server, and whether the gate was open when this
     %% server last called it. See "The gate".
     gate :: undefined | {module(), atom(), [term()]},
@@ -203,13 +206,57 @@ init(Config = #{id := Id}) ->
 %% A server does not start if its storage holds:
 %%
 %% <ul>
-%% <li>the state of a server on another node, or</li>
-%% <li>a promise, an entry or a snapshot without an incarnation.</li>
+%% <li>the state of a server on another node,</li>
+%% <li>a promise, an entry or a snapshot without an incarnation, or</li>
+%% <li>data in a format that is later than the format of this version of
+%%   peace. See "Versions".</li>
 %% </ul>
+%%
+%% == Versions ==
+%%
+%% Two numbers are defined in `peace.hrl'. Both are 1.
+%%
+%% `?MSG_VERSION' is the version of the messages between servers. Every
+%% message names the version of the server that sent it, in the envelope
+%% and not in the message of the protocol:
+%% `{peace_msg, Version, From, To, Msg}' and
+%% `{peace_chunk, Version, From, To, Chunk}'. The version covers the
+%% message, the entries in it and the chunks of a snapshot. A server drops
+%% a message of a version that it does not handle, and logs a warning once
+%% for each node and version. To the sender, a dropped message is a lost
+%% message.
+%%
+%% `?STORED_FORMAT' is the format of the data that a server stores: the
+%% promise, the entries, the snapshot and `meta'. A server stores the
+%% number in `meta' when it creates its identity. All stored data of a
+%% server has that one format. Stored `meta' without the number has
+%% format 1.
+%%
+%% The rules for a later version of peace that changes a format:
+%%
+%% <ul>
+%% <li>A server that opens data of an earlier format converts all of it and
+%%   writes it back in one batch, with the new number in `meta', before it
+%%   handles a message. A batch is atomic (see `peace_storage:batch()'), so
+%%   the stored data never has two formats.</li>
+%% <li>A server keeps sending the earlier message version until every
+%%   member handles the later one. peace has no step that agrees on a
+%%   version. That step is not implemented.</li>
+%% </ul>
+%%
+%% The write-ahead log has a format version of its own, in the header of
+%% each file. That version covers the layout of the file. See
+%% `peace_storage_wal'.
+%%
+%% The requests of a client, which are `gen_server' calls and casts, have
+%% no version.
 identify(Config = #{id := Id = {Name, Node}}, Writer, Stored0) ->
     Stored = maps:remove(incarnation, Stored0),
     Blank = maps:without([meta], Stored) =:= #{} orelse maps:without([meta], Stored) =:= #{entries => #{}},
     case Stored of
+        #{meta := #{node := Node, format := Format}} when Format > ?STORED_FORMAT ->
+            %% A later version of peace wrote the data.
+            {stop, {stored_format, Format, ?STORED_FORMAT}};
         #{meta := #{node := Node, incarnation := Incarnation}} ->
             init(Config#{member => {Name, Node, Incarnation}}, Writer, Stored);
         #{meta := #{node := Other}} ->
@@ -222,7 +269,7 @@ identify(Config = #{id := Id = {Name, Node}}, Writer, Stored0) ->
                     #{incarnation := Supplied} -> Supplied;
                     #{} -> new_incarnation(Config)
                 end,
-            Meta = #{node => Node, incarnation => Incarnation},
+            Meta = #{node => Node, incarnation => Incarnation, format => ?STORED_FORMAT},
             %% The incarnation is stored before this server handles any
             %% message.
             ok = peace_writer:write(Writer, 0, #{meta => Meta}),
@@ -350,16 +397,20 @@ handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
             %% The timer was cancelled or replaced after it fired.
             {noreply, State}
     end;
-handle_info({peace_msg, Peer, To, Msg}, State) ->
+handle_info({peace_msg, ?MSG_VERSION, Peer, To, Msg}, State) ->
     case for_me(To, Msg, State) of
         true -> {noreply, event({msg, Peer, Msg}, State)};
         false -> {noreply, State}
     end;
+handle_info({peace_msg, Version, Peer, _To, _Msg}, State) ->
+    {noreply, refuse_version(Version, Peer, State)};
 handle_info({written, Writer, Seq}, State = #state{writer = Writer}) ->
     {noreply, handle_stored(written(Seq, State))};
 handle_info({snapshot_written, Writer}, State = #state{writer = Writer, snapshots = [_Stored | Snapshots]}) ->
     {noreply, State#state{snapshots = Snapshots}};
-handle_info({peace_chunk, Peer, To, Chunk}, State = #state{core = Core}) ->
+handle_info({peace_chunk, Version, Peer, _To, _Chunk}, State) when Version =/= ?MSG_VERSION ->
+    {noreply, refuse_version(Version, Peer, State)};
+handle_info({peace_chunk, ?MSG_VERSION, Peer, To, Chunk}, State = #state{core = Core}) ->
     case To =:= peace_core:id(Core) of
         true -> {noreply, chunk(Peer, Chunk, State)};
         %% The chunk is for another incarnation of this server.
@@ -396,6 +447,25 @@ check_lease(Config) ->
             {error, {read_lease_must_not_exceed_election_timeout, Lease, Election}};
         _ ->
             ok
+    end.
+
+%% Drops a message of a version that this server does not handle. The
+%% warning is logged once for each node and version.
+refuse_version(Version, Peer, State = #state{refused = Refused, core = Core}) ->
+    Node =
+        case peace_core:address(Peer) of
+            {_Name, PeerNode} -> PeerNode;
+            _ -> undefined
+        end,
+    case Refused of
+        #{{Node, Version} := true} ->
+            State;
+        #{} ->
+            logger:warning(
+                "peace server ~p drops messages of version ~p from ~p. It handles version ~p.",
+                [peace_core:address(peace_core:id(Core)), Version, Node, ?MSG_VERSION]
+            ),
+            State#state{refused = Refused#{{Node, Version} => true}}
     end.
 
 %% Whether a message is for this incarnation of this server.
@@ -614,7 +684,7 @@ drain(0, Acc) ->
 drain(N, {State = #state{backlog_len = 0}, Steps}) ->
     Me = peace_core:id(State#state.core),
     receive
-        {peace_msg, Peer, Me, Msg} ->
+        {peace_msg, ?MSG_VERSION, Peer, Me, Msg} ->
             drain(N - 1, step({msg, Peer, Msg}, State, Steps));
         {'$gen_call', From, {value, Value}} ->
             drain(N - 1, step({value, From, Value}, State, Steps));
@@ -637,7 +707,7 @@ drain(N, {State = #state{backlog = Backlog0, backlog_len = Len}, Steps}) ->
     %% handled first. See "The mailbox limit".
     Me = peace_core:id(State#state.core),
     receive
-        {peace_msg, Peer, Me, Msg} ->
+        {peace_msg, ?MSG_VERSION, Peer, Me, Msg} ->
             drain(N - 1, step({msg, Peer, Msg}, State, Steps));
         {written, Writer, Seq} when Writer =:= State#state.writer ->
             drain(N, {written(Seq, State), Steps})
@@ -922,11 +992,11 @@ effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, trans
         Send -> send_chunks([Send], State#state{transfer = Transfer})
     end;
 effect({send, {any, Address}, Msg}, State = #state{core = Core}) ->
-    send(Address, {peace_msg, peace_core:id(Core), any, Msg}, State);
+    send(Address, {peace_msg, ?MSG_VERSION, peace_core:id(Core), any, Msg}, State);
 effect({send, To, Msg}, State = #state{core = Core}) ->
     case gated(Msg) andalso not gate_open(State) of
         true -> State;
-        false -> send(peace_core:address(To), {peace_msg, peace_core:id(Core), To, Msg}, State)
+        false -> send(peace_core:address(To), {peace_msg, ?MSG_VERSION, peace_core:id(Core), To, Msg}, State)
     end;
 effect({reply, undefined, _Reply}, State) ->
     State;
@@ -973,7 +1043,7 @@ chunk(Peer, {request, Id, Offset}, State = #state{transfer = Transfer0}) ->
 send_chunks(Sends, State = #state{core = Core}) ->
     Id = peace_core:id(Core),
     lists:foldl(
-        fun({send, To, Msg}, State1) -> send(peace_core:address(To), {peace_chunk, Id, To, Msg}, State1) end,
+        fun({send, To, Msg}, State1) -> send(peace_core:address(To), {peace_chunk, ?MSG_VERSION, Id, To, Msg}, State1) end,
         State,
         Sends
     ).

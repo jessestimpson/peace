@@ -57,9 +57,13 @@
 %%   - `machine_state' is written with `initial', when the cluster is formed
 %%     with a machine state.
 %%   - `active' is written when a passive server is activated.
+%%   - `format' is the format of all stored data of the server. It is
+%%     written with `node' and `incarnation'. Stored `meta' without the key
+%%     has format 1. See "Versions" in `peace_server'.
 -type meta() :: #{
     node := node(),
     incarnation := term(),
+    format => pos_integer(),
     initial => peace_core:simple(),
     machine_state => peace_machine:state(),
     active => true

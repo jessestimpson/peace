@@ -187,10 +187,17 @@ message_for_another_incarnation_test() ->
     #{member := Me, promised := Promised} = peace:overview(Id),
     Peer = {peace_server_tests_peer, Node, <<"peer">>},
     Propose = {propose, {99, Peer}, [], 0, 0},
-    Pid ! {peace_msg, Peer, {Name, Node, <<"another incarnation">>}, Propose},
-    Pid ! {peace_msg, Peer, any, Propose},
+    #{message := Version} = peace:versions(),
+    Pid ! {peace_msg, Version, Peer, {Name, Node, <<"another incarnation">>}, Propose},
+    Pid ! {peace_msg, Version, Peer, any, Propose},
     ?assertMatch(#{promised := Promised, role := leader}, peace:overview(Id)),
+    %% A message of another version, and a message without a version, are
+    %% dropped.
+    Pid ! {peace_msg, Version + 1, Peer, Me, Propose},
+    Pid ! {peace_chunk, Version + 1, Peer, Me, {offer, 1}},
     Pid ! {peace_msg, Peer, Me, Propose},
+    ?assertMatch(#{promised := Promised, role := leader}, peace:overview(Id)),
+    Pid ! {peace_msg, Version, Peer, Me, Propose},
     ?assertMatch(#{promised := {99, Peer}}, peace:overview(Id)),
     ok = gen_server:stop(Pid).
 
@@ -214,6 +221,21 @@ stored_identity_test() ->
         {ok, Pid2} = peace_server:start(Config(Kept)),
         ?assertMatch(#{member := Member}, peace:overview({Kept, node()})),
         ok = gen_server:stop(Pid2),
+        %% The format of the stored data is stored with the identity.
+        #{stored := Format} = peace:versions(),
+        {ok, Tab0, #{meta := #{format := Format}}} = peace_storage_dets:open({Kept, node()}, #{dir => Dir}),
+        ok = peace_storage_dets:close(Tab0),
+        %% Data in a later format. The server does not start.
+        ok = Write(peace_server_tests_later, #{meta => #{node => node(), incarnation => <<2>>, format => Format + 1}}),
+        ?assertEqual(
+            {error, {stored_format, Format + 1, Format}},
+            peace_server:start(Config(peace_server_tests_later))
+        ),
+        %% Data without a format has format 1. The server starts.
+        ok = Write(peace_server_tests_earlier, #{meta => #{node => node(), incarnation => <<3>>}}),
+        {ok, Pid3} = peace_server:start(Config(peace_server_tests_earlier)),
+        ?assertMatch(#{member := {_, _, <<3>>}}, peace:overview({peace_server_tests_earlier, node()})),
+        ok = gen_server:stop(Pid3),
         %% The stored state of a server on another node.
         ok = Write(peace_server_tests_moved, #{meta => #{node => 'other@host', incarnation => <<1>>}}),
         ?assertEqual(

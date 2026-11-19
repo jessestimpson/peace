@@ -72,6 +72,7 @@
     change_members/3,
     change_members/4,
     overview/1,
+    versions/0,
     trigger_election/1
 ]).
 
@@ -410,6 +411,13 @@ replace_member(ServerOrServers, New, Timeout) ->
         Other ->
             Other
     end.
+
+%% @doc Returns the version of the messages between servers and the format
+%% of stored data, for this version of peace. See "Versions" in
+%% `peace_server'.
+-spec versions() -> #{message := pos_integer(), stored := pos_integer()}.
+versions() ->
+    #{message => ?MSG_VERSION, stored => ?STORED_FORMAT}.
 
 %% @equiv activate(Server, 5000)
 -spec activate(server_id()) -> ok | {error, term()} | {timeout, server_id()}.

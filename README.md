@@ -394,6 +394,40 @@ Limitations of member identity:
 - `form_cluster` is not atomic. Two calls at the same time must use the
   same quorum system.
 
+### Versions
+
+`peace:versions()` returns two numbers. Both are 1.
+
+| Number | What it covers | Where it is |
+|---|---|---|
+| Message version | Every message between servers, the entries in it and the chunks of a snapshot | In the envelope of each message |
+| Stored format | All data that a server stores: the promise, the entries, the snapshot and the identity | Stored once, with the identity of the server |
+
+| Case | Behaviour |
+|---|---|
+| A message of another version, or without a version | The server drops it, and logs a warning once for each node and version. |
+| Stored data of a later format | The server does not start. |
+| Stored data without a format | The data has format 1. |
+
+All stored data of a server has one format. A later version of peace that
+changes the format converts the data of an earlier format and writes all
+of it back in one atomic batch before the server handles a message.
+
+The write-ahead log also has a format version in the header of each file.
+That version covers the layout of the file.
+
+Limitations of versions:
+
+- No step agrees on a message version in a cluster. Until that step
+  exists, a change of the message version stops a cluster during a rolling
+  upgrade, because servers of the two versions drop the messages of each
+  other.
+- No format has changed yet. The conversion of stored data is a rule and
+  not code.
+- The requests of a client have no version.
+- Stored data that a version of peace before 2026-11-14 wrote has no
+  identity, and a server does not start on it.
+
 ### Proposing to a phase-two quorum
 
 With `propose_to => quorum`, a leader sends each proposal to the smallest
@@ -721,6 +755,10 @@ The tests in [test/](test/) cover:
   replacement that keeps a grid row, the replace request and its challenge,
   a request of an incarnation that no longer runs, a message for another
   incarnation, and stored state that a server refuses to start on
+- versions: a message of another version and a message without a version
+  are dropped, the format is stored with the identity, data of a later
+  format stops a server from starting, and data without a format is read
+  as format 1
 - the extension points of member identity: an incarnation that the storage
   backend supplies, formation with known members, formation with a
   machine state and a server that joins such a cluster later, a passive

@@ -14,6 +14,14 @@
 -define(DEFAULT_MAX_SESSIONS, 10000).
 -define(DEFAULT_SESSION_WINDOW, 64).
 
+%% The version of the messages between servers. See "Versions" in
+%% `peace_server'.
+-define(MSG_VERSION, 1).
+
+%% The format of the data that a server stores. See "Versions" in
+%% `peace_server'.
+-define(STORED_FORMAT, 1).
+
 %% Planted bugs. A test build can switch off a safeguard, to show that the
 %% check that depends on the safeguard can fail. Every other build does not
 %% read the key, so the safeguard cannot be switched off.
