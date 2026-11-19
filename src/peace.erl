@@ -204,6 +204,11 @@
     unsafe_no_challenge => boolean(),
     unsafe_no_base_index => boolean(),
     unsafe_fixed_incarnation => boolean(),
+    unsafe_send_latest => boolean(),
+    unsafe_no_config_request => boolean(),
+    %% The range of message versions of this server. This key is read only
+    %% in a test build. See `peace_wire'.
+    test_msg_versions => peace_wire:range(),
     %% The rate of this server's clock, as `{Num, Den}'. This key is read
     %% only in a test build.
     test_clock_rate => {pos_integer(), pos_integer()},
@@ -412,12 +417,13 @@ replace_member(ServerOrServers, New, Timeout) ->
             Other
     end.
 
-%% @doc Returns the version of the messages between servers and the format
-%% of stored data, for this version of peace. See "Versions" in
-%% `peace_server'.
--spec versions() -> #{message := pos_integer(), stored := pos_integer()}.
+%% @doc Returns the range of versions of the messages between servers and
+%% the format of stored data, for this version of peace. `message' is the
+%% latest message version and `message_min' is the earliest. See "Versions"
+%% in `peace_server'.
+-spec versions() -> #{message := pos_integer(), message_min := pos_integer(), stored := pos_integer()}.
 versions() ->
-    #{message => ?MSG_VERSION, stored => ?STORED_FORMAT}.
+    #{message => ?MSG_VERSION, message_min => ?MSG_VERSION_MIN, stored => ?STORED_FORMAT}.
 
 %% @equiv activate(Server, 5000)
 -spec activate(server_id()) -> ok | {error, term()} | {timeout, server_id()}.
@@ -755,6 +761,10 @@ change_members(ServerOrServers, Members, Quorum, Timeout) when is_list(Members) 
 
 %% @doc Returns a map that describes the current view of one server. The map
 %% is intended for people and for tests.
+%%
+%% `message_versions' holds the range of message versions of the server
+%% under `own', and under `peers' the range of each server from which the
+%% server has received a message, by address. See `peace_wire'.
 -spec overview(server_id()) -> map() | {error, term()} | {timeout, server_id()}.
 overview(Server) ->
     server_call(Server, overview, ?DEFAULT_CALL_TIMEOUT_MS).

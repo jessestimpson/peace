@@ -12,6 +12,7 @@ peace_test_() ->
         fun leader_failover/1,
         fun flexible_quorum_survives_what_majority_cannot/1,
         fun durable_restart/1,
+        fun rolling_upgrade/1,
         fun sessions_snapshots_and_leases/1,
         fun session_process_keeps_order_across_leaders/1,
         fun session_process_and_overloaded_leader/1,
@@ -127,6 +128,72 @@ durable_restart(Ids0) ->
             %% restart. Epochs do not start again from zero.
             #{promised := {Round, _}} = peace:overview(NewLeader),
             ?assert(Round >= 2)
+        end)}.
+
+%% A cluster of three servers is upgraded twice while it runs, one server
+%% at a time. The servers start with the message version 1. The first
+%% upgrade adds version 2. The second upgrade adds version 3 and removes
+%% version 1. Versions 2 and 3 are test versions. See `peace_wire'.
+rolling_upgrade(Ids0) ->
+    Ids = lists:sublist(Ids0, 3),
+    Dir = filename:join([
+        filename:basedir(user_cache, "peace_tests"),
+        integer_to_list(erlang:unique_integer([positive]))
+    ]),
+    Opts = (fast())#{storage => {peace_storage_dets, #{dir => Dir}}},
+    Config = fun(Id, Range) -> Opts#{id => Id, machine => ?TEST_MACHINE, test_msg_versions => Range} end,
+    Upgrade = fun(Id, Range, N) ->
+        ok = peace:stop_server(Id),
+        %% The other two servers decide a value while the server is stopped.
+        %% A request can be redirected to the server that was stopped, so
+        %% the request is repeated.
+        Put = fun(Servers, Key) ->
+            await(fun() ->
+                case peace:propose(Servers, {put, Key, N}, #{timeout => 1000}) of
+                    {ok, ok, _} -> {ok, Key};
+                    _ -> retry
+                end
+            end)
+        end,
+        Put(Ids -- [Id], {down, N}),
+        ok = peace:start_server(Config(Id, Range)),
+        Put(Ids, {up, N}),
+        %% The server that was upgraded applies every value.
+        await(fun() ->
+            case peace:local_query(Id, fun(State) -> State end) of
+                {ok, #{kv := #{{up, N} := N}}, _} -> {ok, Id};
+                _ -> retry
+            end
+        end)
+    end,
+    %% The ranges that the leader holds for the other servers. A follower
+    %% receives no message from another follower, so only the leader holds
+    %% the present range of every other server.
+    Held = fun() ->
+        Leader = await_leader(Ids),
+        #{message_versions := #{peers := Peers}} = peace:overview(Leader),
+        [maps:get(Id, Peers, unknown) || Id <- Ids -- [Leader]]
+    end,
+    {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
+        ?_test(begin
+            [ok = peace:start_server(Config(Id, {1, 1})) || Id <- Ids],
+            {ok, Ids, []} = peace:form_cluster(Ids, majority),
+            _ = await_leader(Ids),
+            {ok, ok, _} = peace:propose(Ids, {put, a, 1}),
+            [Upgrade(Id, {1, 2}, N) || {N, Id} <- lists:zip([1, 2, 3], Ids)],
+            ?assertEqual([{1, 2}, {1, 2}], Held()),
+            [Upgrade(Id, {2, 3}, N) || {N, Id} <- lists:zip([4, 5, 6], Ids)],
+            ?assertEqual([{2, 3}, {2, 3}], Held()),
+            %% One server is started again with the earlier version of
+            %% peace. The other servers send to it in version 3 until it
+            %% answers with its range.
+            [First | _] = Ids,
+            Upgrade(First, {1, 2}, 7),
+            Leader = await_leader(Ids),
+            #{message_versions := #{own := Own, peers := Peers}} = peace:overview(Leader),
+            ?assertEqual({1, 2}, maps:get(First, Peers#{Leader => Own})),
+            ?assertMatch({ok, 1, Leader}, peace:propose(Leader, {get, a})),
+            ?assertMatch({ok, 7, Leader}, peace:propose(Leader, {get, {down, 7}}))
         end)}.
 
 %% This test uses sessions, snapshots and leases together, through the

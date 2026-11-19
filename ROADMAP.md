@@ -13,7 +13,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Storage | The default backend is a write-ahead log with checksums and group commit. It is tested with fault injection and in the simulation. |
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
 | Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test has not been run. |
-| Operations | Minimal. No telemetry and no leader transfer. Messages and stored data have a version. No step agrees on a version, so no upgrade of a running cluster is possible yet. |
+| Operations | Minimal. No telemetry and no leader transfer. Messages and stored data have a version. Servers with a common message version run in one cluster, so a cluster can be upgraded one server at a time. The procedure is tested in the simulation with test versions and not in the Jepsen test. |
 | Packaging | No CI and no published package. |
 
 ## Milestones
@@ -215,10 +215,26 @@ Goal: an operator can run, observe, maintain and upgrade a cluster.
       stored with the identity of the server. Both numbers are 1. A server
       drops a message of another version and does not start on data of a
       later format. See "Versions" in `peace_server`.
-- [ ] Agree on the message version in a cluster. A server has to keep
-      sending the earlier version until every member handles the later
-      one. Without this step, a change of the message version stops a
-      cluster during a rolling upgrade.
+- [x] Agree on the message version in a cluster. Done on 2026-11-19.
+      A server handles a range of message versions and names the range in
+      every envelope. A sender uses the latest version that the sender and
+      the receiver both handle. The agreement is between each pair of
+      servers and is not stored. See `peace_wire`, and "Upgrading a
+      running cluster" in [README.md](README.md). The simulation upgrades
+      a cluster through three ranges of test versions, with rollbacks.
+- [ ] Add a rolling upgrade to the Jepsen test: two builds of the node
+      with different ranges of message versions.
+- [ ] Add a cluster-wide feature level for a change of behaviour that
+      every member must make at the same time. The choice of a message
+      version covers the encoding of a message only.
+- [x] Give a founder that has not stored the configuration that forms the
+      cluster a way to obtain it. Done on 2026-11-19. The upgrade workload
+      of the simulation found the fault in seed 72: a founder was killed
+      before the write of the configuration returned, received entries
+      from the leader after its restart, and held no members at commit
+      index 107. Such a server now asks its leader for the configuration.
+      See "A founder without a configuration" in `peace_core`. The
+      exchange is not in a TLA+ model.
 - [ ] Give the requests of a client a version. They are `gen_server` calls
       and casts without one.
 - [ ] Add state machine versioning, so that the machine code can be upgraded

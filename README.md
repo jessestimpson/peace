@@ -393,21 +393,39 @@ Limitations of member identity:
   version, because that state has no incarnation.
 - `form_cluster` is not atomic. Two calls at the same time must use the
   same quorum system.
+- A founder can lack the configuration that forms the cluster: the call
+  did not reach the server, or the server stopped before the write of the
+  configuration returned. Such a server accepts the proposals of a leader
+  and asks the leader for the configuration. It cannot campaign before
+  it holds the configuration. A founder that the other founders cannot
+  reach, and a cluster without a leader, do not complete this exchange.
 
 ### Versions
 
-`peace:versions()` returns two numbers. Both are 1.
+`peace:versions()` returns three numbers. All are 1.
 
 | Number | What it covers | Where it is |
 |---|---|---|
-| Message version | Every message between servers, the entries in it and the chunks of a snapshot | In the envelope of each message |
-| Stored format | All data that a server stores: the promise, the entries, the snapshot and the identity | Stored once, with the identity of the server |
+| Latest message version (`message`) | Every message between servers, the entries in it and the chunks of a snapshot | In the envelope of each message |
+| Earliest message version (`message_min`) | The earliest message version that this version of peace handles | In the envelope of each message, with the latest version |
+| Stored format (`stored`) | All data that a server stores: the promise, the entries, the snapshot and the identity | Stored once, with the identity of the server |
+
+A server handles every message version from the earliest to the latest.
+The envelope of a message names the version of the message and the range
+of the server that sent it. The envelope is the same in every version.
 
 | Case | Behaviour |
 |---|---|
-| A message of another version, or without a version | The server drops it, and logs a warning once for each node and version. |
+| A message to a server whose range is known | The sender uses the latest version that both servers handle. |
+| A message to a server whose range is not known | The sender uses its earliest version. |
+| A message of a version outside the range of the receiver | The receiver drops it, sends its range to the sender, and logs a warning once for each node and version. |
 | Stored data of a later format | The server does not start. |
 | Stored data without a format | The data has format 1. |
+
+A server learns the range of another server from each message that it
+receives. The ranges are not stored. `peace:overview/1` shows them under
+`message_versions`. `peace_wire` describes the rules for a later version
+of peace that changes the messages.
 
 All stored data of a server has one format. A later version of peace that
 changes the format converts the data of an earlier format and writes all
@@ -416,15 +434,48 @@ of it back in one atomic batch before the server handles a message.
 The write-ahead log also has a format version in the header of each file.
 That version covers the layout of the file.
 
-Limitations of versions:
+### Upgrading a running cluster
 
-- No step agrees on a message version in a cluster. Until that step
-  exists, a change of the message version stops a cluster during a rolling
-  upgrade, because servers of the two versions drop the messages of each
-  other.
+Two versions of peace can run in one cluster when their ranges of message
+versions have a common version.
+
+1. Check that every member runs the same version of peace and that the
+   cluster has a leader.
+2. Stop one server, install the later version of peace and start the
+   server.
+3. Wait until `peace:overview/1` of the leader shows that server with the
+   range of the later version under `message_versions`, and until the
+   server has applied the values that the cluster decided.
+4. Repeat steps 2 and 3 for every other member.
+
+No step switches the cluster to the later message version. Each pair of
+servers uses the later version from the first message after both servers
+handle it.
+
+A server can be started again with the earlier version of peace while its
+stored data has the format of the earlier version.
+
+Limitations of versions and upgrades:
+
+- Only version 1 of the messages exists. The upgrade procedure is tested
+  with message versions that exist only in a test build. Those versions
+  wrap the message of version 1.
+- The choice of a version covers the encoding of a message. peace has no
+  cluster-wide switch for a change of behaviour that every member must
+  make at the same time. A later version of peace sends a message that
+  exists only in the later version only to a server that handles it.
+- After a restart, a server sends its earliest version to each server
+  until it receives a message from that server. If the receiver no longer
+  handles that version, the first message is dropped and is sent again
+  after the receiver has answered with its range.
+- A version of peace that changes the stored format cannot be replaced by
+  the earlier version on the converted data.
 - No format has changed yet. The conversion of stored data is a rule and
   not code.
+- The upgrade is not in the Jepsen test.
 - The requests of a client have no version.
+- The code of a state machine has no version. An upgrade that changes the
+  result of `apply/3` is not supported.
 - Stored data that a version of peace before 2026-11-14 wrote has no
   identity, and a server does not start on it.
 
@@ -551,6 +602,7 @@ Workloads:
 | Gates | Every server has a gate. The harness closes the gate of a server and opens every gate, at any time. |
 | Passive servers | A server that restarts after the cluster was formed is passive until a client activates it. The server keeps its stored state, so it is a member that takes no part. |
 | Formation with a machine state | The cluster is formed with a machine state, on every founder or on the first founder only. In the second case, every other server receives the configuration and the machine state from the leader. |
+| Upgrade | The harness kills a server and starts it again with a later or an earlier range of message versions, one server at a time. The ranges of two servers differ by at most one step. A server stops handling version 1 470 times in the 500 runs. 200 of the runs have no other fault and end with the check that every server holds every decided value. |
 
 Every run forms its cluster inside the simulation: the first operation
 starts the servers, and the second operation collects the incarnations and
@@ -584,8 +636,12 @@ submission, that a leader accepts a replacement only from a server that
 ran after the leader started its epoch, and that a server promises and
 accepts nothing while it is passive or its gate is closed.
 
-Fifteen planted bugs confirm that the suite can fail:
+Seventeen planted bugs confirm that the suite can fail:
 
+- a founder without the configuration that forms the cluster, which does
+  not ask the leader for the configuration
+- servers that send every message in their latest version, while the
+  harness upgrades the cluster
 - servers that are started without a gate, while the harness closes gates
 - a server that is started without `passive`, while the harness expects a
   passive server
@@ -755,10 +811,16 @@ The tests in [test/](test/) cover:
   replacement that keeps a grid row, the replace request and its challenge,
   a request of an incarnation that no longer runs, a message for another
   incarnation, and stored state that a server refuses to start on
-- versions: a message of another version and a message without a version
-  are dropped, the format is stored with the identity, data of a later
-  format stops a server from starting, and data without a format is read
-  as format 1
+- versions: a message of a version outside the range of the server and a
+  message without a version are dropped, the format is stored with the
+  identity, data of a later format stops a server from starting, and data
+  without a format is read as format 1
+- the choice of a message version: the version for each pair of ranges,
+  the answer of a server that drops a message, a server that answers in
+  the latest common version, and a body that is not of its version
+- an upgrade of a cluster of three servers on real processes through three
+  ranges of message versions, one server at a time, and one server that is
+  started again with the earlier range
 - the extension points of member identity: an incarnation that the storage
   backend supplies, formation with known members, formation with a
   machine state and a server that joins such a cluster later, a passive

@@ -187,18 +187,67 @@ message_for_another_incarnation_test() ->
     #{member := Me, promised := Promised} = peace:overview(Id),
     Peer = {peace_server_tests_peer, Node, <<"peer">>},
     Propose = {propose, {99, Peer}, [], 0, 0},
-    #{message := Version} = peace:versions(),
-    Pid ! {peace_msg, Version, Peer, {Name, Node, <<"another incarnation">>}, Propose},
-    Pid ! {peace_msg, Version, Peer, any, Propose},
+    #{message := Version, message_min := Min} = peace:versions(),
+    Range = {Min, Version},
+    Pid ! {peace_msg, Version, Range, Peer, {Name, Node, <<"another incarnation">>}, Propose},
+    Pid ! {peace_msg, Version, Range, Peer, any, Propose},
     ?assertMatch(#{promised := Promised, role := leader}, peace:overview(Id)),
-    %% A message of another version, and a message without a version, are
-    %% dropped.
-    Pid ! {peace_msg, Version + 1, Peer, Me, Propose},
-    Pid ! {peace_chunk, Version + 1, Peer, Me, {offer, 1}},
+    %% A message of a version outside the range of the server, and a message
+    %% without a version, are dropped.
+    Pid ! {peace_msg, Version + 1, Range, Peer, Me, Propose},
+    Pid ! {peace_chunk, Version + 1, Range, Peer, Me, {offer, 1}},
+    Pid ! {peace_msg, Version, Peer, Me, Propose},
     Pid ! {peace_msg, Peer, Me, Propose},
     ?assertMatch(#{promised := Promised, role := leader}, peace:overview(Id)),
-    Pid ! {peace_msg, Version, Peer, Me, Propose},
+    Pid ! {peace_msg, Version, Range, Peer, Me, Propose},
     ?assertMatch(#{promised := {99, Peer}}, peace:overview(Id)),
+    ok = gen_server:stop(Pid).
+
+%% A server sends a message in the latest version that the server and the
+%% receiver both handle. The server of this test handles the versions 2
+%% and 3. The test process is the peer.
+message_versions_test() ->
+    PeerName = peace_server_tests_wire_peer,
+    {Id = {_Name, Node}, Pid} = start_single(peace_server_tests_wire, #{test_msg_versions => {2, 3}}),
+    true = register(PeerName, self()),
+    #{member := Me, promised := Promised} = peace:overview(Id),
+    Peer = {PeerName, Node, <<"peer">>},
+    Propose = fun(Round) -> {propose, {Round, Peer}, [], 0, 0} end,
+    Body = fun(Version, Round) -> {peace_test_version, Version, Propose(Round)} end,
+    %% Version 1 is outside the range. The server drops the message and
+    %% answers with its range.
+    Pid ! {peace_msg, 1, {1, 1}, Peer, Me, Propose(99)},
+    receive
+        {peace_versions, {2, 3}, Me} -> ok
+    after 1000 -> error(no_answer)
+    end,
+    ?assertMatch(
+        #{promised := Promised, message_versions := #{own := {2, 3}, peers := #{{PeerName, Node} := {1, 1}}}},
+        peace:overview(Id)
+    ),
+    %% A body that is not a body of version 2 is dropped.
+    Pid ! {peace_msg, 2, {1, 2}, Peer, Me, Propose(99)},
+    ?assertMatch(#{promised := Promised}, peace:overview(Id)),
+    %% The peer handles the versions 1 and 2. The server answers in
+    %% version 2.
+    Pid ! {peace_msg, 2, {1, 2}, Peer, Me, Body(2, 99)},
+    receive
+        {peace_msg, 2, {2, 3}, Me, Peer, {peace_test_version, 2, _}} -> ok
+    after 1000 -> error(no_answer_in_version_2)
+    end,
+    ?assertMatch(#{promised := {99, Peer}}, peace:overview(Id)),
+    %% The peer handles the versions 2 and 3. The server answers in
+    %% version 3, also to a message of version 2.
+    Pid ! {peace_msg, 2, {2, 3}, Peer, Me, Body(2, 199)},
+    receive
+        {peace_msg, 3, {2, 3}, Me, Peer, {peace_test_version, 3, _}} -> ok
+    after 1000 -> error(no_answer_in_version_3)
+    end,
+    %% `peace_versions' changes the range that the server holds for the
+    %% peer.
+    Pid ! {peace_versions, {2, 2}, Peer},
+    ?assertMatch(#{message_versions := #{peers := #{{PeerName, Node} := {2, 2}}}}, peace:overview(Id)),
+    true = unregister(PeerName),
     ok = gen_server:stop(Pid).
 
 %% A server keeps its incarnation while it keeps its stored state. A server

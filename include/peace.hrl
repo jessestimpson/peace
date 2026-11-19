@@ -14,8 +14,9 @@
 -define(DEFAULT_MAX_SESSIONS, 10000).
 -define(DEFAULT_SESSION_WINDOW, 64).
 
-%% The version of the messages between servers. See "Versions" in
-%% `peace_server'.
+%% The earliest and the latest version of the messages between servers
+%% that this version of peace handles. See `peace_wire'.
+-define(MSG_VERSION_MIN, 1).
 -define(MSG_VERSION, 1).
 
 %% The format of the data that a server stores. See "Versions" in

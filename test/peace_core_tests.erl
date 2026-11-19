@@ -783,6 +783,39 @@ form_test() ->
     %% The configuration is stored.
     ?assertEqual([a, b, c], members(a, restart(a, S3))).
 
+%% A founder that has not stored the configuration that forms the cluster
+%% obtains the configuration from the leader.
+founder_without_configuration_test() ->
+    New = {[a, b, c], majority},
+    S0 = join([a, b, c], new([], majority)),
+    %% The formation request does not reach c.
+    S1 = lists:foldl(fun(Id, S) -> ev(Id, {form, {f, Id}, New}, S) end, S0, [a, b]),
+    ?assertEqual([], members(c, S1)),
+    %% c accepts a proposal of the leader a. c holds every index that a has
+    %% decided, and asks a for the configuration.
+    S2 = run(ev(a, {value, c1, {put, k, 1}}, run(ev(a, force_election, S1)))),
+    ?assertEqual({ok, ok, a}, proplists:get_value(c1, replies(S2))),
+    ?assertEqual([a, b, c], members(c, S2)),
+    S3 = run(ev(a, heartbeat_timeout, S2)),
+    ?assertEqual(commit(a, S3), commit(c, S3)),
+    %% The configuration is stored, and the formation can be repeated.
+    ?assertEqual([a, b, c], members(c, restart(c, S3))),
+    S4 = ev(c, {form, f1, New}, S3),
+    ?assertEqual(ok, proplists:get_value(f1, replies(S4))),
+    %% c can lead.
+    S5 = run(ev(c, force_election, S4)),
+    ?assertEqual(leader, role(c, S5)),
+    %% A server ignores a configuration as of an index above its commit
+    %% index, a joint configuration and a configuration that does not
+    %% name it.
+    Ignored = fun(Config) ->
+        S = ev(c, {msg, a, Config}, S1),
+        ?assertEqual([], members(c, S))
+    end,
+    Ignored({config, 1, {final, New}}),
+    Ignored({config, 0, {joint, New, New}}),
+    Ignored({config, 0, {final, {[a, b], majority}}}).
+
 form_is_refused_test() ->
     S0 = join([a, d], new([], majority)),
     S1 = ev(a, {form, f1, {[b, c], majority}}, S0),

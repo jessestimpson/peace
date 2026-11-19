@@ -127,6 +127,15 @@ log_event(Event) -> Event.
     backlog_len = 0 :: non_neg_integer(),
     %% Whether a `peace_backlog' message to this process is in the mailbox.
     backlog_note = false :: boolean(),
+    %% The range of message versions that this server handles, and the
+    %% range of each server from which this server has received an
+    %% envelope, by address. See `peace_wire'.
+    versions :: peace_wire:range(),
+    peers = #{} :: #{term() => peace_wire:range()},
+    %% False only in a test build with the planted bug
+    %% `unsafe_send_latest': this server sends every message in its latest
+    %% version.
+    agree = true :: boolean(),
     %% The versions of messages that this server has refused, with the node
     %% that sent them. See "Versions".
     refused = #{} :: #{{node(), term()} => true},
@@ -214,17 +223,17 @@ init(Config = #{id := Id}) ->
 %%
 %% == Versions ==
 %%
-%% Two numbers are defined in `peace.hrl'. Both are 1.
+%% Three numbers are defined in `peace.hrl'. All are 1.
 %%
-%% `?MSG_VERSION' is the version of the messages between servers. Every
-%% message names the version of the server that sent it, in the envelope
-%% and not in the message of the protocol:
-%% `{peace_msg, Version, From, To, Msg}' and
-%% `{peace_chunk, Version, From, To, Chunk}'. The version covers the
-%% message, the entries in it and the chunks of a snapshot. A server drops
-%% a message of a version that it does not handle, and logs a warning once
-%% for each node and version. To the sender, a dropped message is a lost
-%% message.
+%% `?MSG_VERSION_MIN' and `?MSG_VERSION' are the earliest and the latest
+%% version of the messages between servers that this version of peace
+%% handles. Every message names its version and the range of the server
+%% that sent it, in an envelope that is the same in every version. A
+%% server sends a message in the latest version that the server and the
+%% receiver both handle. A server drops a message of a version outside its
+%% range, tells the sender its range, and logs a warning once for each
+%% node and version. To the sender, a dropped message is a lost message.
+%% See `peace_wire'.
 %%
 %% `?STORED_FORMAT' is the format of the data that a server stores: the
 %% promise, the entries, the snapshot and `meta'. A server stores the
@@ -232,17 +241,37 @@ init(Config = #{id := Id}) ->
 %% server has that one format. Stored `meta' without the number has
 %% format 1.
 %%
-%% The rules for a later version of peace that changes a format:
+%% The rule for a later version of peace that changes the stored format: a
+%% server that opens data of an earlier format converts all of it and
+%% writes it back in one batch, with the new number in `meta', before it
+%% handles a message. A batch is atomic (see `peace_storage:batch()'), so
+%% the stored data never has two formats. The rules for a later version
+%% that changes the messages are in `peace_wire'.
 %%
-%% <ul>
-%% <li>A server that opens data of an earlier format converts all of it and
-%%   writes it back in one batch, with the new number in `meta', before it
-%%   handles a message. A batch is atomic (see `peace_storage:batch()'), so
-%%   the stored data never has two formats.</li>
-%% <li>A server keeps sending the earlier message version until every
-%%   member handles the later one. peace has no step that agrees on a
-%%   version. That step is not implemented.</li>
-%% </ul>
+%% == Upgrade of a running cluster ==
+%%
+%% Two versions of peace can run in one cluster when their ranges of
+%% message versions have a common version. The procedure for an upgrade:
+%%
+%% <ol>
+%% <li>Check that every member runs the same version of peace and that the
+%%   cluster has a leader.</li>
+%% <li>Stop one server, install the later version of peace and start the
+%%   server.</li>
+%% <li>Wait until `overview/1' of the leader shows that server with the
+%%   range of the later version under `message_versions', and until the
+%%   server has applied the values that the cluster decided.</li>
+%% <li>Repeat steps 2 and 3 for every other member.</li>
+%% </ol>
+%%
+%% No step switches the cluster to the later message version. Each pair
+%% of servers uses the later version from the first message after both
+%% servers handle it.
+%%
+%% A server that has not converted its stored data can be started again
+%% with the earlier version of peace. A server does not start on data of a
+%% later format, so a version of peace that changes the stored format
+%% cannot be replaced by the earlier version on that data.
 %%
 %% The write-ahead log has a format version of its own, in the header of
 %% each file. That version covers the layout of the file. See
@@ -319,6 +348,8 @@ init(Config = #{id := Id}, Writer, Stored) ->
         election_ms = ElectionMs,
         heartbeat_ms = maps:get(heartbeat_ms, Config, max(1, ElectionMs div 5)),
         max_mailbox = maps:get(max_mailbox, Config, ?DEFAULT_MAX_MAILBOX),
+        versions = peace_wire:range(Config),
+        agree = not ?PLANTED(unsafe_send_latest, Config),
         gate = maps:get(gate, Config, undefined)
     },
     State1 = perform(Effects, State),
@@ -361,8 +392,9 @@ handle_call({local_query, Fun}, _From, State = #state{core = Core}) ->
 handle_call(members, _From, State = #state{core = Core}) ->
     Addresses = lists:usort([peace_core:address(M) || M <- peace_core:members(Core)]),
     {reply, {ok, Addresses, peace_core:address(peace_core:leader(Core))}, State};
-handle_call(overview, _From, State = #state{core = Core}) ->
-    {reply, peace_core:overview(Core), State};
+handle_call(overview, _From, State = #state{core = Core, versions = Versions, peers = Peers}) ->
+    Overview = peace_core:overview(Core),
+    {reply, Overview#{message_versions => #{own => Versions, peers => Peers}}, State};
 handle_call(_Other, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -397,25 +429,23 @@ handle_info({timeout, Ref, Timer}, State = #state{timers = Timers}) ->
             %% The timer was cancelled or replaced after it fired.
             {noreply, State}
     end;
-handle_info({peace_msg, ?MSG_VERSION, Peer, To, Msg}, State) ->
-    case for_me(To, Msg, State) of
-        true -> {noreply, event({msg, Peer, Msg}, State)};
-        false -> {noreply, State}
+handle_info({Tag, Version, Range, Peer, To, Body}, State0) when Tag =:= peace_msg; Tag =:= peace_chunk ->
+    State = #state{versions = Versions} = learn(Peer, Range, State0),
+    case peace_wire:handles(Version, Versions) of
+        true ->
+            case peace_wire:decode(Version, Body) of
+                {ok, Msg} -> {noreply, received(Tag, Peer, To, Msg, State)};
+                error -> {noreply, State}
+            end;
+        false ->
+            {noreply, refuse_version(Version, Peer, State)}
     end;
-handle_info({peace_msg, Version, Peer, _To, _Msg}, State) ->
-    {noreply, refuse_version(Version, Peer, State)};
+handle_info({peace_versions, Range, Peer}, State) ->
+    {noreply, learn(Peer, Range, State)};
 handle_info({written, Writer, Seq}, State = #state{writer = Writer}) ->
     {noreply, handle_stored(written(Seq, State))};
 handle_info({snapshot_written, Writer}, State = #state{writer = Writer, snapshots = [_Stored | Snapshots]}) ->
     {noreply, State#state{snapshots = Snapshots}};
-handle_info({peace_chunk, Version, Peer, _To, _Chunk}, State) when Version =/= ?MSG_VERSION ->
-    {noreply, refuse_version(Version, Peer, State)};
-handle_info({peace_chunk, ?MSG_VERSION, Peer, To, Chunk}, State = #state{core = Core}) ->
-    case To =:= peace_core:id(Core) of
-        true -> {noreply, chunk(Peer, Chunk, State)};
-        %% The chunk is for another incarnation of this server.
-        false -> {noreply, State}
-    end;
 handle_info({peace_encoded, Index, Chunks, Size, Crc}, State = #state{transfer = Transfer0}) ->
     {Transfer, Sends} = peace_transfer:encoded(Index, Chunks, Size, Crc, Transfer0),
     {noreply, send_chunks(Sends, State#state{transfer = Transfer})};
@@ -449,23 +479,72 @@ check_lease(Config) ->
             ok
     end.
 
-%% Drops a message of a version that this server does not handle. The
-%% warning is logged once for each node and version.
-refuse_version(Version, Peer, State = #state{refused = Refused, core = Core}) ->
-    Node =
+%% Handles a message that was decoded.
+received(peace_msg, Peer, To, Msg, State) ->
+    case for_me(To, Msg, State) of
+        true -> event({msg, Peer, Msg}, State);
+        false -> State
+    end;
+received(peace_chunk, Peer, To, Chunk, State = #state{core = Core}) ->
+    case To =:= peace_core:id(Core) of
+        true -> chunk(Peer, Chunk, State);
+        %% The chunk is for another incarnation of this server.
+        false -> State
+    end.
+
+%% Records the range of message versions of the server that sent an
+%% envelope.
+learn(Peer, Range = {Min, Max}, State = #state{peers = Peers}) when
+    is_integer(Min), is_integer(Max), 0 < Min, Min =< Max
+->
+    Address = peace_core:address(Peer),
+    case Peers of
+        #{Address := Range} -> State;
+        #{} -> State#state{peers = Peers#{Address => Range}}
+    end;
+learn(_Peer, _Range, State) ->
+    State.
+
+%% Drops a message of a version that this server does not handle, and
+%% tells the sender the range of this server. The warning is logged once
+%% for each node and version.
+refuse_version(Version, Peer, State0 = #state{refused = Refused, core = Core, versions = Versions}) ->
+    {Node, State} =
         case peace_core:address(Peer) of
-            {_Name, PeerNode} -> PeerNode;
-            _ -> undefined
+            Address = {_Name, PeerNode} ->
+                {PeerNode, send(Address, {peace_versions, Versions, peace_core:id(Core)}, State0)};
+            _ ->
+                {undefined, State0}
         end,
+    _ = ?COUNT(versions_refused),
     case Refused of
         #{{Node, Version} := true} ->
             State;
         #{} ->
             logger:warning(
-                "peace server ~p drops messages of version ~p from ~p. It handles version ~p.",
-                [peace_core:address(peace_core:id(Core)), Version, Node, ?MSG_VERSION]
+                "peace server ~p drops messages of version ~p from ~p. It handles the versions ~p.",
+                [peace_core:address(peace_core:id(Core)), Version, Node, Versions]
             ),
             State#state{refused = Refused#{{Node, Version} => true}}
+    end.
+
+%% Sends a message of the protocol or of a snapshot transfer to the server
+%% at `Address', in the version for that server. See `peace_wire'.
+envelope(Tag, Address, To, Msg, State = #state{core = Core, versions = Versions}) ->
+    Version = version_for(Address, State),
+    send(Address, {Tag, Version, Versions, peace_core:id(Core), To, peace_wire:encode(Version, Msg)}, State).
+
+version_for(_Address, #state{agree = false, versions = {_Min, Max}}) ->
+    Max;
+version_for(Address, #state{versions = Versions, peers = Peers}) ->
+    peace_wire:choose(Versions, maps:get(Address, Peers, undefined)).
+
+%% Handles a message of the protocol that `drain/2' took from the mailbox.
+drained(Version, Range, Peer, Body, State0, Steps) ->
+    State = learn(Peer, Range, State0),
+    case peace_wire:decode(Version, Body) of
+        {ok, Msg} -> step({msg, Peer, Msg}, State, Steps);
+        error -> {State, Steps}
     end.
 
 %% Whether a message is for this incarnation of this server.
@@ -683,9 +762,10 @@ drain(0, Acc) ->
     Acc;
 drain(N, {State = #state{backlog_len = 0}, Steps}) ->
     Me = peace_core:id(State#state.core),
+    {Min, Max} = State#state.versions,
     receive
-        {peace_msg, ?MSG_VERSION, Peer, Me, Msg} ->
-            drain(N - 1, step({msg, Peer, Msg}, State, Steps));
+        {peace_msg, Version, Range, Peer, Me, Body} when is_integer(Version), Version >= Min, Version =< Max ->
+            drain(N - 1, drained(Version, Range, Peer, Body, State, Steps));
         {'$gen_call', From, {value, Value}} ->
             drain(N - 1, step({value, From, Value}, State, Steps));
         {'$gen_call', From, {value, Value, Session}} ->
@@ -706,9 +786,10 @@ drain(N, {State = #state{backlog = Backlog0, backlog_len = Len}, Steps}) ->
     %% in the mailbox. The messages of peers and of the storage process are
     %% handled first. See "The mailbox limit".
     Me = peace_core:id(State#state.core),
+    {Min, Max} = State#state.versions,
     receive
-        {peace_msg, ?MSG_VERSION, Peer, Me, Msg} ->
-            drain(N - 1, step({msg, Peer, Msg}, State, Steps));
+        {peace_msg, Version, Range, Peer, Me, Body} when is_integer(Version), Version >= Min, Version =< Max ->
+            drain(N - 1, drained(Version, Range, Peer, Body, State, Steps));
         {written, Writer, Seq} when Writer =:= State#state.writer ->
             drain(N, {written(Seq, State), Steps})
     after 0 ->
@@ -991,12 +1072,12 @@ effect({send, To, {install, Index, Snapshot}}, State = #state{core = Core, trans
         encode -> encode(Index, Snapshot, State#state{transfer = Transfer});
         Send -> send_chunks([Send], State#state{transfer = Transfer})
     end;
-effect({send, {any, Address}, Msg}, State = #state{core = Core}) ->
-    send(Address, {peace_msg, ?MSG_VERSION, peace_core:id(Core), any, Msg}, State);
-effect({send, To, Msg}, State = #state{core = Core}) ->
+effect({send, {any, Address}, Msg}, State) ->
+    envelope(peace_msg, Address, any, Msg, State);
+effect({send, To, Msg}, State) ->
     case gated(Msg) andalso not gate_open(State) of
         true -> State;
-        false -> send(peace_core:address(To), {peace_msg, ?MSG_VERSION, peace_core:id(Core), To, Msg}, State)
+        false -> envelope(peace_msg, peace_core:address(To), To, Msg, State)
     end;
 effect({reply, undefined, _Reply}, State) ->
     State;
@@ -1040,10 +1121,9 @@ chunk(Peer, {request, Id, Offset}, State = #state{transfer = Transfer0}) ->
     _ = ?COUNT(chunks_requested),
     send_chunks(Sends, State#state{transfer = Transfer}).
 
-send_chunks(Sends, State = #state{core = Core}) ->
-    Id = peace_core:id(Core),
+send_chunks(Sends, State) ->
     lists:foldl(
-        fun({send, To, Msg}, State1) -> send(peace_core:address(To), {peace_chunk, ?MSG_VERSION, Id, To, Msg}, State1) end,
+        fun({send, To, Msg}, State1) -> envelope(peace_chunk, peace_core:address(To), To, Msg, State1) end,
         State,
         Sends
     ).

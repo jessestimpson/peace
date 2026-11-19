@@ -213,6 +213,33 @@
 %% harness keeps has that value at index 1, so `applied_matches_decided'
 %% requires every server to hold it.
 %%
+%% == Upgrade ==
+%%
+%% With `upgrade' on, the harness upgrades the cluster while it runs. Each
+%% server has a level, which stands for a version of peace. A server of
+%% level `L' handles the message versions from `max(1, L)' to `L + 1'. See
+%% `peace_wire'. Every server starts at level 0, which has the range of
+%% this version of peace. The levels of two servers differ by at most 1,
+%% as in an upgrade that is finished before the next upgrade starts. The
+%% workload has two more operations:
+%%
+%% <ul>
+%% <li>`{upgrade, I}' - the harness kills a server and starts it again one
+%%   level higher, if no other server is then more than one level
+%%   lower.</li>
+%% <li>`{rollback, I}' - the harness kills a server and starts it again one
+%%   level lower, if no other server is then more than one level
+%%   higher.</li>
+%% </ul>
+%%
+%% A server can be killed before the write of the configuration that forms
+%% the cluster returns. See "A founder without a configuration" in
+%% `peace_core'.
+%%
+%% The runs keep every invariant. A run with `converge' also shows that
+%% servers of two levels exchange messages, because the servers of the
+%% lower level hold every decided value at the end of the run.
+%%
 %% == Formation ==
 %%
 %% The first operation of a run starts every server. The second operation
@@ -265,6 +292,15 @@
 %%   is the state as of index 0 and not as of index 1. A value is then
 %%   decided at index 1, and a server that joins later applies that value
 %%   to the result of `init/1' of the machine.</li>
+%% <li>`send_latest' - with `upgrade', a server sends every message in the
+%%   latest version that the server handles. A server of a lower level
+%%   drops those messages. This mode shows that the convergence check of a
+%%   run with `upgrade' can fail.</li>
+%% <li>`no_config_request' - with `upgrade', a founder that has not stored
+%%   the configuration that forms the cluster does not ask the leader for
+%%   it. A founder that is killed before the write of the configuration
+%%   returns then never holds a configuration. This mode shows that the
+%%   convergence check can fail for that reason.</li>
 %% <li>`no_conflict_step_down' - a leader learns that an index was decided
 %%   with a value other than the value that the leader proposed, and the
 %%   leader continues to lead. This is the same change as
@@ -390,6 +426,7 @@ init(_Seed, Config) ->
         seeded => Seeded,
         gates => Mode =:= gate_ignored orelse maps:get(gates, Config, false),
         passive => Mode =:= passive_ignored orelse maps:get(passive, Config, false),
+        upgrade => Mode =:= send_latest orelse Mode =:= no_config_request orelse maps:get(upgrade, Config, false),
         mode => Mode,
         storage_loss => storage_loss(Mode, Config),
         configs => Configs,
@@ -438,6 +475,16 @@ generate(#{booted := false}, Rand) ->
     {boot, Rand};
 generate(#{formed := false}, Rand) ->
     {form, Rand};
+generate(S = #{upgrade := true, n := N}, Rand0) ->
+    %% A run with `upgrade' makes two more random draws per operation, in
+    %% this clause only.
+    {Roll, Rand1} = rand:uniform_s(Rand0),
+    {I, Rand2} = rand:uniform_s(N, Rand1),
+    if
+        Roll < 0.06 -> {{upgrade, I}, Rand2};
+        Roll < 0.075 -> {{rollback, I}, Rand2};
+        true -> generate(S#{upgrade := false}, Rand2)
+    end;
 generate(S = #{reconfigure := true}, Rand0) ->
     %% A run with `reconfigure' on makes one more random draw per operation
     %% than a run with `reconfigure' off. The extra draw is made only in
@@ -552,6 +599,10 @@ execute({crash, I}, S) ->
             bump(crashes),
             S
     end;
+execute({upgrade, I}, S) ->
+    relevel(I, 1, S);
+execute({rollback, I}, S) ->
+    relevel(I, -1, S);
 %% The gate of a server is a row of the table of the run. The server reads
 %% the row when it calls its gate. See `gate_open/2'.
 execute({close_gate, I}, S = #{tab := Tab}) ->
@@ -611,12 +662,18 @@ execute({rumour, I}, S = #{tab := Tab, ids := Ids, n := N, storage_loss := Loss}
     case {Loss, retired(Tab, From), lists:nthtail(max(0, length(Decided) - 4), Decided), view(To), view(From)} of
         {true, [Retired | _], _, _, _} ->
             bump(stale_requests),
-            spawn_op(node_name(I), fun() -> peace_dst_client:deliver(To, Retired, any, replace_request) end, S);
+            Range = range(Tab, I),
+            spawn_op(
+                node_name(I), fun() -> peace_dst_client:deliver(To, Retired, any, replace_request, Range, Range) end, S
+            );
         {_, _, Latest = [_ | _], {live, ToCore}, {live, FromCore}} ->
             bump(rumours),
             {Sender, Receiver} = {peace_core:id(FromCore), peace_core:id(ToCore)},
+            {FromRange, ToRange} = {range(Tab, I rem N + 1), range(Tab, I)},
             spawn_op(
-                node_name(I), fun() -> peace_dst_client:deliver(To, Sender, Receiver, {learned, Latest}) end, S
+                node_name(I),
+                fun() -> peace_dst_client:deliver(To, Sender, Receiver, {learned, Latest}, FromRange, ToRange) end,
+                S
             );
         _ ->
             S
@@ -635,13 +692,55 @@ execute({restart, I}, S = #{storage_loss := true, n := N}) ->
 execute({restart, I}, S) ->
     restart(I, S).
 
+%% Changes the level of a server by one, if the levels of two servers then
+%% differ by at most 1. The server is killed and started again. See
+%% "Upgrade".
+relevel(I, Step, S = #{tab := Tab, n := N}) ->
+    Level0 = level(Tab, I),
+    Others = [level(Tab, J) || J <- lists:seq(1, N), J =/= I],
+    Level =
+        case Step of
+            1 -> min(Level0 + 1, lists:min(Others) + 1);
+            -1 -> max(0, max(Level0 - 1, lists:max(Others) - 1))
+        end,
+    case Level of
+        Level0 ->
+            S;
+        _ ->
+            %% The kill also stops a restarter process that has not yet
+            %% started its server.
+            ok = eta_net:kill_node(node_name(I)),
+            true = ets:insert(Tab, {{level, I}, Level}),
+            bump(
+                case Step of
+                    1 -> upgrades;
+                    -1 -> rollbacks
+                end
+            ),
+            %% A server of level 2 does not handle version 1, which is the
+            %% version of this version of peace.
+            _ = Level =:= 2 andalso Step =:= 1 andalso bump(first_version_removed),
+            restart(I, S)
+    end.
+
+level(Tab, I) ->
+    case ets:lookup(Tab, {level, I}) of
+        [{_Key, Level}] -> Level;
+        [] -> 0
+    end.
+
+%% The range of message versions of a server. See "Upgrade".
+range(Tab, I) ->
+    Level = level(Tab, I),
+    {max(1, Level), Level + 1}.
+
 restart(I, S = #{configs := Configs, tab := Tab}) ->
     case server_pid(I) of
         undefined ->
             %% A server that is started after the cluster was formed, and
             %% that was not activated, is passive.
             Passive = maps:get(passive, S) andalso maps:get(formed, S) andalso not ets:member(Tab, {activated, I}),
-            Config =
+            Config0 =
                 case {Passive, maps:get(mode, S)} of
                     {true, passive_ignored} ->
                         true = ets:insert(Tab, {{expect_passive, I}, true}),
@@ -652,6 +751,11 @@ restart(I, S = #{configs := Configs, tab := Tab}) ->
                         (maps:get(I, Configs))#{passive => true};
                     {false, _} ->
                         maps:get(I, Configs)
+                end,
+            Config =
+                case maps:get(upgrade, S) of
+                    true -> Config0#{test_msg_versions => range(Tab, I)};
+                    false -> Config0
                 end,
             bump(restarts),
             %% The server is a child of the restarter process and inherits
@@ -1360,6 +1464,10 @@ server_config1(I, Id, _Founders, Mode, Tab, Config) ->
             Leased;
         no_base_index ->
             Leased#{unsafe_no_base_index => true};
+        send_latest ->
+            Leased#{unsafe_send_latest => true};
+        no_config_request ->
+            Leased#{unsafe_no_config_request => true};
         passive_ignored ->
             Leased;
         lossy_disk ->

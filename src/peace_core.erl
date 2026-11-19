@@ -412,7 +412,7 @@
 %%
 %% A server campaigns only after it has applied a configuration, because a
 %% candidate needs a phase-one quorum of the configuration that it has
-%% applied. A server gets its first configuration in one of three ways:
+%% applied. A server gets its first configuration in one of four ways:
 %%
 %% <ul>
 %% <li>The event `{form, From, {Members, Quorum}}' stores the configuration
@@ -421,7 +421,46 @@
 %%   configuration can be stored again. See `peace:form_cluster/3'.</li>
 %% <li>A leader adds the server with a membership change.</li>
 %% <li>A leader replaces a member with the server.</li>
+%% <li>A leader sends the configuration that formed the cluster. See "A
+%%   founder without a configuration".</li>
 %% </ul>
+%%
+%% === A founder without a configuration ===
+%%
+%% A founder is a member of the configuration that forms a cluster. A
+%% founder can lack that configuration: the formation request did not
+%% reach the founder, or the founder stopped before the write of the
+%% configuration returned. The other founders elect a leader, and the
+%% founder accepts the proposals of that leader. The founder then answers
+%% `already_formed' to a formation request, because it holds decided
+%% values. This part is not in the thesis.
+%%
+%% Such a founder obtains the configuration from the leader:
+%%
+%% <ol>
+%% <li>A server that has no configuration, and that holds every index that
+%%   its leader has decided, answers a proposal of the leader with
+%%   `config_request' in addition to `accept'.</li>
+%% <li>A leader that receives `config_request' from a member answers
+%%   `{config, Index, Config}'. `Index' is the commit index of the leader
+%%   and `Config' is the configuration as of that index.</li>
+%% <li>The server stores `Config' as the configuration that formed the
+%%   cluster if the server still has no configuration, its commit index is
+%%   at least `Index', `Config' is not a joint configuration and `Config'
+%%   names the server.</li>
+%% </ol>
+%%
+%% The argument that `Config' is the configuration that formed the
+%% cluster: a server applies the decided values in order, and a server
+%% that applies a configuration change holds a configuration from then
+%% on. The server holds no configuration at a commit index of at least
+%% `Index', so no configuration change is decided at or below `Index'.
+%% The configuration as of `Index' is therefore the configuration that
+%% formed the cluster.
+%%
+%% A cluster that was formed with a machine state does not need this
+%% exchange. A founder without a configuration lacks index 1 in such a
+%% cluster, and receives the configuration with `install'.
 %%
 %% The configuration that forms a cluster is not in the start arguments of
 %% a server. A server that restarts with the same arguments and without
@@ -649,6 +688,8 @@
     | {learned, [{peace:index(), value()}]}
     | {install, peace:index(), snapshot()}
     | replace_request
+    | config_request
+    | {config, peace:index(), config()}
     | {challenge, nonce()}
     | {challenge_ok, nonce()}.
 
@@ -703,6 +744,9 @@
     %% Whether a leader sends a challenge before it replaces a member. This
     %% field is false only in tests that show why the challenge is needed.
     use_challenge = true :: boolean(),
+    %% False only in a test build with the planted bug
+    %% `unsafe_no_config_request'. See "A founder without a configuration".
+    config_request = true :: boolean(),
     %% Whether a machine state that forms a cluster is the state as of
     %% index 1. This field is false only in tests that show why the index
     %% is needed. The state is then the state as of index 0.
@@ -838,6 +882,7 @@ init(Config = #{id := Address, machine := Machine}, Stored, Now) ->
         rejoin = maps:get(rejoin, Config, []),
         passive = maps:get(passive, Config, false) andalso not maps:get(active, Meta, false),
         use_challenge = not ?PLANTED(unsafe_no_challenge, Config),
+        config_request = not ?PLANTED(unsafe_no_config_request, Config),
         quorum_check = not ?PLANTED(unsafe_no_quorum_check, Config),
         base_index = BaseIndex,
         acfg = ACfg,
@@ -1007,7 +1052,11 @@ event({msg, _Peer, Msg}, C) when
 %% A passive server does not accept a proposal and sends no `accept'. It
 %% asks for the decided values that it does not have.
 event({msg, Peer, {propose, _Epoch, _Entries, LeaderCommit, _Stamp}}, C = #core{commit = Commit}) when ?SILENT(C) ->
-    {C#core{leader = Peer}, [{timer, election, reset}] ++ [{send, Peer, {catchup, Commit + 1}} || Commit < LeaderCommit]};
+    C1 = C#core{leader = Peer},
+    {C1,
+        [{timer, election, reset}] ++
+            [{send, Peer, {catchup, Commit + 1}} || Commit < LeaderCommit] ++
+            config_request(Peer, LeaderCommit, C1)};
 event({msg, Peer, Msg}, C) when element(1, Msg) =:= prepare; element(1, Msg) =:= prevote ->
     %% A server outside the configuration must not be able to depose the
     %% leader. A server that was removed and has not learned of its removal
@@ -1723,7 +1772,8 @@ msg1({propose, Epoch = {_, Peer}, Entries, LeaderCommit, Stamp}, Peer, C0 = #cor
             %% this server cannot mark as decided from its own log. The
             %% entries at those indexes are missing, or they are from an
             %% older epoch.
-            [{send, Peer, {catchup, C3#core.commit + 1}} || C3#core.commit < LeaderCommit],
+            [{send, Peer, {catchup, C3#core.commit + 1}} || C3#core.commit < LeaderCommit] ++
+            config_request(Peer, LeaderCommit, C3),
     {C3, Effects};
 msg1({propose, _Epoch, _Entries, _Commit, _Stamp}, Peer, C = #core{promised = Promised}) ->
     {C, [{send, Peer, {nack, Promised}}]};
@@ -1777,6 +1827,26 @@ msg1({challenge_ok, Nonce}, Peer, C = #core{role = leader, challenges = Challeng
             {C, []}
     end;
 msg1({challenge_ok, _Nonce}, _Peer, C) ->
+    {C, []};
+%% See "A founder without a configuration".
+msg1(config_request, Peer, C = #core{role = leader, acfg = ACfg, commit = Commit}) ->
+    case lists:member(Peer, members(C)) of
+        true -> {C, [{send, Peer, {config, Commit, ACfg}}]};
+        false -> {C, []}
+    end;
+msg1(config_request, _Peer, C) ->
+    {C, []};
+msg1({config, Index, {final, New = {Members, _Spec}}}, _Peer, C = #core{id = Id, meta = Meta, commit = Commit}) when
+    Commit >= Index
+->
+    case lacks_config(C) andalso lists:member(Id, Members) of
+        true ->
+            Meta1 = Meta#{initial => New},
+            {C#core{meta = Meta1, acfg = {final, New}}, [{persist, #{meta => Meta1}}, {timer, election, reset}]};
+        false ->
+            {C, []}
+    end;
+msg1({config, _Index, _Config}, _Peer, C) ->
     {C, []};
 msg1({catchup, From}, Peer, C = #core{commit = Commit, snap = Snap}) when From >= 1, From =< Snap ->
     %% The entries have been removed. The state that the entries produced
@@ -2013,6 +2083,16 @@ sessions_in(Sessions) ->
 %% ---------------------------------------------------------------------------
 %% Membership
 %% ---------------------------------------------------------------------------
+
+%% Whether this server holds no configuration: it has applied none, it
+%% has stored none, and its log has no configuration change.
+lacks_config(#core{acfg = ACfg, cfgs = Cfgs, meta = Meta}) ->
+    ACfg =:= ?NO_CONFIG andalso map_size(Cfgs) =:= 0 andalso not is_map_key(initial, Meta).
+
+%% The request for the configuration that formed the cluster. See "A
+%% founder without a configuration".
+config_request(Leader, LeaderCommit, C = #core{commit = Commit, config_request = Enabled}) ->
+    [{send, Leader, config_request} || Enabled, Commit >= LeaderCommit, lacks_config(C)].
 
 %% Stores the configuration that forms the cluster. See "Member identity".
 form(From, New, C) ->

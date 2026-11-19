@@ -349,6 +349,50 @@ ignored_gate_is_caught_test_() ->
         ?assertMatch({violation, #{property := silent_accepts_nothing}}, maps:get(outcome, Result))
     end}.
 
+%% The harness upgrades the cluster while it runs, one server at a time,
+%% and sometimes starts a server again one level lower. The servers of a
+%% run handle different ranges of message versions. The runs keep every
+%% invariant. In the runs without other faults, every server holds every
+%% decided value at the end.
+upgrade_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        ok = peace_dst:reset_stats(),
+        sweep(lists:seq(1, 200), fun(Seed) -> calm(Seed, #{upgrade => true}) end),
+        sweep(lists:seq(1, 200), fun(Seed) -> opts(Seed, #{upgrade => true}) end),
+        sweep(lists:seq(1, 100), fun(Seed) -> opts(Seed, #{upgrade => true, servers => 5, snapshot_interval => 5}) end),
+        Stats = #{runs := Runs, acknowledged := Acked} = peace_dst:stats(),
+        ?debugFmt("upgrade: ~p", [
+            maps:with(
+                [runs, acknowledged, upgrades, rollbacks, first_version_removed, versions_refused, snapshots_received],
+                Stats
+            )
+        ]),
+        ?assert(Acked >= Runs * 3, Stats),
+        ?assert(maps:get(upgrades, Stats, 0) >= Runs * 3, Stats),
+        ?assert(maps:get(rollbacks, Stats, 0) >= Runs div 4, Stats),
+        %% In one run in two, on average, a server stops handling
+        %% version 1.
+        ?assert(maps:get(first_version_removed, Stats, 0) >= Runs div 2, Stats),
+        ?assert(maps:get(snapshots_received, Stats, 0) >= 20, Stats)
+    end}.
+
+%% This test shows that the suite detects servers that do not agree on a
+%% message version.
+no_version_agreement_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        {_Seed, Result} = first_violation(lists:seq(1, 30), fun(Seed) -> calm(Seed, #{mode => send_latest}) end),
+        ?assertMatch({violation, #{property := converged}}, maps:get(outcome, Result))
+    end}.
+
+%% This test shows that the suite detects a founder that never holds the
+%% configuration that forms the cluster. The upgrade workload kills servers
+%% while the cluster is formed.
+founder_without_configuration_is_caught_test_() ->
+    {timeout, ?TIMEOUT, fun() ->
+        {_Seed, Result} = first_violation(lists:seq(1, 100), fun(Seed) -> calm(Seed, #{mode => no_config_request}) end),
+        ?assertMatch({violation, #{property := converged}}, maps:get(outcome, Result))
+    end}.
+
 %% A server that restarts after the cluster was formed is passive until a
 %% client activates it. The server is a member that sends no promise and no
 %% acceptance. The runs keep every other invariant.

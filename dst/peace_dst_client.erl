@@ -10,7 +10,7 @@
 
 -include("peace_eta.hrl").
 
--export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/4, form/3, form/4, activate/1]).
+-export([value/5, pipeline/3, query/3, reconfigure/5, restart/1, deliver/6, form/3, form/4, activate/1]).
 
 %% The number of values that a client of `pipeline/3' submits, and the time
 %% that the client waits for the replies.
@@ -198,9 +198,12 @@ submit(Fun, Attempts, Again) ->
 
 %% Delivers a protocol message to the server at the address `To', as if
 %% the member `From' had sent the message to the member `Receiver'.
-deliver(To, From, Receiver, Msg) ->
+%% `FromRange' and `ToRange' are the ranges of message versions of the two
+%% servers.
+deliver(To, From, Receiver, Msg, FromRange, ToRange) ->
     ?ETA_LABEL(rumour),
-    _ = erlang:send(To, {peace_msg, maps:get(message, peace:versions()), From, Receiver, Msg}, [noconnect]),
+    Version = peace_wire:choose(FromRange, ToRange),
+    _ = erlang:send(To, {peace_msg, Version, FromRange, From, Receiver, peace_wire:encode(Version, Msg)}, [noconnect]),
     ok.
 
 %% Activates a passive server. See `peace:activate/2'.
