@@ -506,7 +506,7 @@ peace is verified at six levels.
 | Level | What it checks | Command | Time |
 |---|---|---|---|
 | Unit tests | The protocol core and the supporting modules | `make test` | seconds |
-| Deterministic simulation | The real server processes under faults | `make dst` | about 60 minutes |
+| Deterministic simulation | The real server processes under faults | `make dst` | about 7 minutes |
 | Trace validation | That simulated runs are behaviours of the TLA+ model | `make trace` | about 7 minutes |
 | Linearizability checking | The client histories of simulated runs, with Porcupine | `make porcupine` | about 11 minutes |
 | Jepsen test | A key-value store on five Docker nodes under partitions, kills, pauses and membership changes | `make jepsen` | minutes per run |
@@ -839,7 +839,8 @@ safeguard.
 ```
 make test       # unit tests
 make bench      # benchmarks on separate Erlang nodes, about 20 minutes
-make dst        # deterministic simulation, about 60 minutes
+make dst        # deterministic simulation, about 7 minutes on a machine with 10 processors
+make dst-serial # the same tests one after another in one Erlang node
 make trace      # trace validation, about 7 minutes
 make porcupine  # linearizability checking with Porcupine, about 11 minutes
 make tlc        # quick TLC configs, a few minutes
@@ -850,6 +851,10 @@ make tlc-soak   # the three-index membership config, about 8 hours
 
 Requirements:
 
+- `make dst` runs [dst/run.sh](dst/run.sh). Each test runs in an Erlang
+  node of its own, and 8 nodes run at the same time on a machine with 10
+  processors. `dst/run.sh -j JOBS TEST...` sets the number of nodes and
+  selects tests. The output of each test is in `_build/dst-logs/`.
 - `make dst` and `make trace` need eta. The `dst` profile declares it as a
   git dependency. For local development, link a checkout at
   `_checkouts/eta`.

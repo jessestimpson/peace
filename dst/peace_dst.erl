@@ -768,12 +768,17 @@ restart(I, S = #{configs := Configs, tab := Tab}) ->
     end.
 
 check(#{tab := Tab, ids := Ids}) ->
-    Views = [{Id, view(Id)} || Id <- Ids],
+    %% The state of each server is read once for each check. A read copies
+    %% the whole state of the server, and produces two trace messages for
+    %% the scheduler of eta. An earlier version read each server four times
+    %% for each check.
+    Observed = [{Id, observe(Id)} || Id <- Ids],
+    Views = [{Id, view_of(State)} || {Id, State} <- Observed],
     Disks = [{Id, stored_promised(Tab, Id), peace_dst_storage:entries(Tab, Id)} || Id <- Ids],
     %% A server acts on a decision before the write of the `learned' entry
     %% has returned. The entries of the writes that are in progress are
     %% added to the record of decided values here.
-    _ = [ok = peace_dst_storage:decided(Tab, Id, Batch) || Id <- Ids, Batch <- inflight(Id)],
+    _ = [ok = peace_dst_storage:decided(Tab, Id, Batch) || {Id, State} <- Observed, Batch <- inflight_of(State)],
     Record = decided_record(Tab),
     ok = note_leaders(Views),
     ok = note_alive(Tab, Views),
@@ -781,7 +786,7 @@ check(#{tab := Tab, ids := Ids}) ->
         fun() -> silent_accepts_nothing(Tab, Views) end,
         fun() -> replacement_is_live(Tab, Views) end,
         fun() -> disk_recovers(Tab) end,
-        fun() -> storage_matches_memory(Tab, Views, Disks) end,
+        fun() -> storage_matches_memory(Tab, Observed, Disks) end,
         fun() -> promise_never_regresses(Tab, Disks) end,
         fun() -> agreement(Tab, Disks) end,
         fun() -> session_order(Views) end,
@@ -838,8 +843,15 @@ terminate(S = #{tab := Tab, n := N}) ->
 %% their files. Every run
 %% uses this one directory, so that the name of the directory is the same in
 %% every run. The harness empties the directory before and after each run.
+%%
+%% The environment variable `PEACE_DST_DISK_DIR' sets the directory.
+%% `dst/run.sh' runs several Erlang nodes at the same time and gives each
+%% node a directory of its own.
 disk_dir() ->
-    filename:join(filename:basedir(user_cache, "peace_dst"), "disk").
+    case os:getenv("PEACE_DST_DISK_DIR") of
+        false -> filename:join(filename:basedir(user_cache, "peace_dst"), "disk");
+        Dir -> Dir
+    end.
 
 %% This function uses `prim_file' because the file server is a process that
 %% no schedule controls. The dets backend keeps files in the directory. The
@@ -899,7 +911,7 @@ disk_recovers(Tab) ->
 %% the writes that are in progress have been applied to the contents of the
 %% disk. A write that has returned and that the server has not yet been told
 %% of is applied twice, which changes nothing.
-storage_matches_memory(Tab, Views, Disks) ->
+storage_matches_memory(Tab, Observed, Disks) ->
     Wrong = [
         {Id, #{
             promised => {peace_core:promised(Core), Promised},
@@ -908,7 +920,8 @@ storage_matches_memory(Tab, Views, Disks) ->
             only_on_disk => maps:without(maps:keys(Log), Stored),
             differ => [I || {I, E} <- maps:to_list(Log), maps:get(I, Stored, E) =/= E]
         }}
-     || {{Id, {live, Core}}, {Id, Promised0, Stored0}} <- lists:zip(Views, Disks),
+     || {{Id, State}, {Id, Promised0, Stored0}} <- lists:zip(Observed, Disks),
+        {live, Core} <- [view_of(State)],
         Log <- [peace_core:log(Core)],
         {Promised, Stored, Snap} <- [
             lists:foldl(
@@ -917,7 +930,7 @@ storage_matches_memory(Tab, Views, Disks) ->
                 %% A snapshot may be stored after a write that was sent
                 %% later. The snapshots are applied first. `apply_batch/2'
                 %% then removes the entries under them from each write.
-                snapshots(Id) ++ inflight(Id)
+                snapshots_of(State) ++ inflight_of(State)
             )
         ],
         peace_core:promised(Core) =/= Promised orelse Log =/= Stored orelse
@@ -952,30 +965,16 @@ apply_batch(Batch, {Promised0, Entries0, Snap0}) ->
     {Promised, maps:filter(fun(I, _) -> I > Snap end, Entries), Snap}.
 
 %% Returns the writes that a server has sent to its storage process and
-%% that have not returned, in order.
-inflight({Name, Node}) ->
-    case server_pid(Name, Node) of
-        undefined ->
-            [];
-        Pid ->
-            case eta_observe:read(Pid) of
-                #{inflight := Inflight} -> [Batch || {_Seq, Batch} <- Inflight];
-                _ -> []
-            end
-    end.
+%% that have not returned, in order. The argument is the result of
+%% `observe/1'.
+inflight_of(#{inflight := Inflight}) -> [Batch || {_Seq, Batch} <- Inflight];
+inflight_of(_State) -> [].
 
 %% Returns the snapshots that a server has sent to its storage process and
-%% that are not yet stored, in order.
-snapshots({Name, Node}) ->
-    case server_pid(Name, Node) of
-        undefined ->
-            [];
-        Pid ->
-            case eta_observe:read(Pid) of
-                #{snapshots := Snapshots} -> Snapshots;
-                _ -> []
-            end
-    end.
+%% that are not yet stored, in order. The argument is the result of
+%% `observe/1'.
+snapshots_of(#{snapshots := Snapshots}) -> Snapshots;
+snapshots_of(_State) -> [].
 
 %% The promise is that of one incarnation. A server that has lost its
 %% storage has a new incarnation, and that incarnation has promised
@@ -1279,29 +1278,37 @@ session_order(Views) ->
     end.
 
 linearizable_read(Tab, Record) ->
+    Applied = applied_puts(Record),
     Wrong = [
         #{query => N, missing => Before -- Saw, saw => Saw}
      || [N, Before, Saw] <- ets:match(Tab, {{query, '$1'}, '$2', {ok, '$3'}}),
-        Before -- Saw =/= [] orelse not is_applied_prefix(Record, lists:reverse(Saw))
+        Before -- Saw =/= [] orelse not lists:prefix(lists:reverse(Saw), Applied)
     ],
     case Wrong of
         [] -> ok;
         _ -> violation(linearizable_read, #{queries => Wrong})
     end.
 
-%% Returns whether `Ops', oldest first, is equal to the state that a machine
-%% holds after some prefix of the decided log.
-is_applied_prefix(Record, Ops) ->
+%% Returns the puts, oldest first, of the state that a machine holds after
+%% the longest prefix of the decided log that the record contains.
+%%
+%% The state after a shorter prefix of the log is a prefix of this list,
+%% because one more index adds at most one put to the end of the state. Each
+%% prefix of this list is also the state after some prefix of the log. A
+%% list of puts is therefore the state after some prefix of the decided log
+%% exactly when the list is a prefix of this list.
+%%
+%% `linearizable_read/2' calls this function once for each check. An earlier
+%% version computed the state after every prefix of the log for every
+%% query, and took about 70% of the time of a run.
+applied_puts(Record) ->
     Last = lists:max([0 | maps:keys(Record)]),
-    lists:any(
-        fun(Commit) ->
-            case expected(Commit, Record) of
-                {missing, _} -> false;
-                Applied -> [Op || {_I, {put, Op}} <- Applied] =:= Ops
-            end
+    Applied =
+        case expected(Last, Record) of
+            {missing, I} -> expected(I - 1, Record);
+            All -> All
         end,
-        lists:seq(0, Last)
-    ).
+    [Op || {_I, {put, Op}} <- Applied].
 
 decided_at(Tab, Index) ->
     case ets:lookup(Tab, {decided, Index}) of
@@ -1506,16 +1513,20 @@ spawn_op(Node, Fun, S = #{ops := Ops}) ->
 
 %% Returns the protocol state of a server. The read does not send a message
 %% to the server.
-view({Name, Node}) ->
+view(Id) ->
+    view_of(observe(Id)).
+
+%% Reads the state that a server publishes. Returns `down' if the server
+%% does not run.
+observe({Name, Node}) ->
     case server_pid(Name, Node) of
-        undefined ->
-            down;
-        Pid ->
-            case eta_observe:read(Pid) of
-                #{core := Core} -> {live, Core};
-                _ -> starting
-            end
+        undefined -> down;
+        Pid -> eta_observe:read(Pid)
     end.
+
+view_of(down) -> down;
+view_of(#{core := Core}) -> {live, Core};
+view_of(_State) -> starting.
 
 %% The gate of server `I'. The gate is open unless the harness has closed
 %% it. See `{close_gate, I}' in `execute/2'.

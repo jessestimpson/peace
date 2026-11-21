@@ -1,13 +1,18 @@
-%% This module is the simulation suite. `make dst' runs the suite. `make dst'
-%% is `rebar3 as dst eunit' on one scheduler thread. See the Makefile for the
-%% reason.
+%% This module is the simulation suite. `make dst' runs the suite with
+%% `dst/run.sh': each test runs in an Erlang node of its own, and several
+%% nodes run at the same time. `make dst-serial' runs the tests one after
+%% another in one node. Each node has one scheduler thread. See the Makefile
+%% for the reason.
 -module(peace_dst_tests).
 
 -include_lib("eunit/include/eunit.hrl").
 
 -export([opts/2]).
 
--define(TIMEOUT, 600).
+%% The limit for one test, in seconds. The longest test takes about 520
+%% seconds alone on an idle machine. A test takes longer when other tests
+%% run at the same time.
+-define(TIMEOUT, 1800).
 
 opts(Seed, Config) ->
     #{

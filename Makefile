@@ -1,4 +1,4 @@
-.PHONY: all compile dialyzer test dst trace porcupine jepsen tlc tlc-long tlc-soak ind check bench
+.PHONY: all compile dialyzer test dst dst-serial trace porcupine jepsen tlc tlc-long tlc-soak ind check bench
 
 all: compile
 
@@ -22,7 +22,14 @@ test:
 #     over twenty times slower than the default on an idle machine.
 #   - On a busy machine, one thread is about three times slower than one
 #     thread on an idle machine.
+#
+# `dst' runs each test in an Erlang node of its own, and several nodes at
+# the same time. See dst/run.sh. `dst-serial' runs the tests one after
+# another in one node.
 dst:
+	dst/run.sh
+
+dst-serial:
 	ERL_FLAGS="+S 1" rebar3 as dst eunit
 
 # Trace validation. This target performs simulated runs. TLC checks that each

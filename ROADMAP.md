@@ -395,18 +395,44 @@ TLA+ model and not in the Jepsen test.
 This work improves confidence in the existing implementation. It does not
 block the milestones above and can be done at any time.
 
-- [ ] Reduce the time that the test suite takes. On 2026-11-21, the first
-      34 tests of `rebar3 as dst eunit` took 4,224 seconds on one machine,
-      and the suite had not finished. The tests run one after another. The
-      longest tests each take between 180 and 600 seconds. Candidates:
-      - Measure where a simulated run spends its time, and remove the
-        largest cost.
-      - Run the tests of the simulation in several Erlang nodes at the
-        same time. The tests are independent of each other.
-      - Add a target with a lower seed count for use during development.
-        Keep the current seed counts for CI and before a release.
-      - Review the seed count of each test that takes more than 180
-        seconds.
+- [ ] Reduce the time that the test suite takes. On 2026-11-21, the 38
+      tests of the simulation took 3,973 seconds when they ran one after
+      another in one Erlang node. After the three changes below, `make dst`
+      takes 388 seconds on a machine with 4 performance cores and 6
+      efficiency cores.
+      - [x] Run the tests of the simulation in several Erlang nodes at the
+            same time. Done on 2026-11-21 with `dst/run.sh`. The 38 tests
+            took 1,000 seconds with 8 nodes.
+      - [x] Remove the quadratic cost from the `linearizable_read` check
+            of the harness. Done on 2026-11-21. The check computed the
+            machine state after every prefix of the decided log for every
+            query, after every step. The check now computes the applied
+            puts once for each check. The 38 tests took 671 seconds with 8
+            nodes.
+      - [x] Read the state of each server once for each check. Done on
+            2026-11-21. The check read each server four times. A read
+            copies the whole state of the server and produces two trace
+            messages for the scheduler of eta. 256 runs have the same
+            traces and the same outcomes as before, and take between 30%
+            and 43% less time. The 38 tests take 388 seconds with 8 nodes.
+      - [ ] Do the work of the check only for a server that changed. The
+            check after every step takes about 75% of the time of a run:
+            with the check switched off, 20 runs with 5 servers take 2.0
+            seconds, against 11.6 seconds with the check. Between two
+            checks, 83% to 88% of the servers have the same state and the
+            same disk. This item needs two features in eta: the process
+            that ran in a step, and a check process that lives for the
+            whole run. The reduction count of a server detects only 43% to
+            78% of the unchanged servers. A copy of the state in an ETS
+            table costs as much as the read.
+      - [ ] Split the longest tests. The time of `make dst` is the time
+            of the longest test: `stale_leader_is_caught_test_`, 347
+            seconds while 7 other nodes run.
+      - [ ] Run the tests of `make trace` and `make porcupine` in several
+            Erlang nodes at the same time.
+      - [ ] Add a target with a lower seed count for use during
+            development. Keep the current seed counts for CI and before a
+            release.
 - [ ] Extend trace validation to writes that are in progress. A server
       with a tracer waits for every write, because the TLA+ model has no
       state for an entry that a server holds in memory and has not stored.
