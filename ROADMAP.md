@@ -12,7 +12,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Protocol logic | Implemented. Verified by model checking, an inductive invariant, deterministic simulation and trace validation. See [README.md](README.md), "Verification". |
 | Storage | The default backend is a write-ahead log with checksums and group commit. It is tested with fault injection and in the simulation. |
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
-| Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test has not been run. |
+| Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test of 24 hours ran on 2026-11-20 without a violation. |
 | Operations | Minimal. No telemetry and no leader transfer. Messages and stored data have a version. Servers with a common message version run in one cluster, so a cluster can be upgraded one server at a time. The procedure is tested in the simulation with test versions and not in the Jepsen test. |
 | Packaging | No CI and no published package. |
 
@@ -110,8 +110,11 @@ separate Erlang nodes with real faults.
       quorum systems.
 - [x] Cover a custom quorum module. Done on 2026-11-12 with a weighted
       voting module: one run of 180 seconds, linearizable.
-- [ ] Run a soak test of at least 24 hours. `jepsen/soak.sh 24` runs it. It
-      has not been run.
+- [x] Run a soak test of at least 24 hours. Done on 2026-11-20:
+      `jepsen/soak.sh 24` ran 135 runs of 600 seconds without a violation.
+      Knossos ran out of memory in 54 runs. `jepsen/recheck.sh` checked
+      all 9,070 keys again with Porcupine, and all are linearizable. See
+      [jepsen/README.md](jepsen/README.md), "Soak test".
 
 Done when: the Jepsen test passes for every quorum system in
 [README.md](README.md), "Quorum systems", and the soak test completes

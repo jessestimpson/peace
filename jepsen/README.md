@@ -23,6 +23,7 @@ Clojars and Maven Central on the first run.
 | `jepsen/run.sh [options]` | Compiles the key-value node and runs the test in the control container. |
 | `jepsen/down.sh` | Stops and removes the containers. |
 | `jepsen/soak.sh HOURS [MINUTES_PER_RUN]` | Runs the test repeatedly for `HOURS` hours. See "Soak test". |
+| `jepsen/recheck.sh [FIRST_RUN]` | Checks the stored histories again with Porcupine. See "Soak test". |
 | `make jepsen` | Runs `jepsen/run.sh` with the default options. |
 
 `jepsen/run.sh` exits with status 0 if the history is linearizable. The
@@ -176,13 +177,72 @@ test can detect a lease that is held for too long.
 `jepsen/soak.sh HOURS` runs the test repeatedly. It cycles through eight
 configurations: the quorum systems and the fault sets of the table above.
 Each run lasts 10 minutes. The script appends one line per run to
-`jepsen/soak.log` and stops at the first run that does not pass. On macOS
-the script keeps the machine awake with `caffeinate`.
+`jepsen/soak.log`. On macOS the script keeps the machine awake with
+`caffeinate`.
+
+The script handles the result of a run as follows:
+
+| Exit status of the run | Meaning | Action of the script |
+|---|---|---|
+| 0 | The history is linearizable. | Counts the run as passed. |
+| 2 | The checker did not finish, for example because it ran out of memory. No violation was found. | Counts the run as unchecked, keeps the output in `jepsen/soak-unchecked-RUN.log` and continues. |
+| Other | The history has a violation, or the test crashed. | Keeps the output in `jepsen/soak-failure-RUN.log` and stops. |
 
 The soak test uses many short runs instead of one long run, because the
 memory that the checker needs grows with the length of a history.
 
-A soak test of 24 hours has not been run.
+### Second check of the histories
+
+The checker of the Jepsen test is Knossos, with a heap of 700 MB. Knossos
+runs out of memory on some keys. `jepsen/recheck.sh [FIRST_RUN]` checks
+the stored history of every key again with
+[Porcupine](https://github.com/anishathalye/porcupine). It checks every
+run in `jepsen/peace/store` whose directory name is `FIRST_RUN` or later.
+The command is in `jepsen/recheck`. It needs Go 1.19 or later.
+
+The command uses the rules of Knossos for operations that failed and for
+operations with an unknown outcome. The model differs in one rule. Knossos
+accepts a read that returned no value in every state. The command accepts
+such a read only when the key was never written.
+
+The command was compared with Knossos on 2026-11-21, on the 175 runs in
+the store that have key histories:
+
+| Verdict of Knossos | Verdict of the command | Keys |
+|---|---|---|
+| linearizable | linearizable | 9,719 |
+| not linearizable | not linearizable | 36 |
+| linearizable | not linearizable | 23 |
+| not linearizable | linearizable | 0 |
+| out of memory | linearizable | 163 |
+
+The 59 keys that the command reports are in the two runs with
+`--stale-reads`. In each of the 23 keys that only the command reports, a
+node returned no value after a write of the key was acknowledged.
+
+### Result of 2026-11-20
+
+`jepsen/soak.sh 24` ran from 2026-11-20T02:33Z to 2026-11-21T02:38Z on
+commit `4d31a87`, on the machine of "Results".
+
+| Measure | Value |
+|---|---|
+| Runs | 135 |
+| Runs with a violation or a crash | 0 |
+| Runs that Knossos checked completely, all linearizable | 81 |
+| Runs in which Knossos ran out of memory | 54 |
+| Keys | 9,070 |
+| Keys on which Knossos ran out of memory | 161 |
+| Keys that `jepsen/recheck.sh` found linearizable | 9,070 |
+| Acknowledged operations in the histories of the keys | 444,796 |
+| Operations with an unknown outcome in the histories of the keys | 39,269 |
+
+Every configuration ran 16 or 17 times. Knossos ran out of memory in 3 to
+11 runs of each configuration. `jepsen/recheck.sh 20261120T0233` checked
+the 9,070 keys in about 3 seconds.
+
+A first attempt, at 2026-11-20T02:21Z, stopped after one run in which
+Knossos ran out of memory. The script stopped at such a run at that time.
 
 ## Limitations
 
@@ -196,7 +256,14 @@ A soak test of 24 hours has not been run.
 - The test has no run that shows a violation when clock rates exceed the
   assumption of read leases. The deterministic simulation has such a run
   (see [../README.md](../README.md)).
-- The longest run is 300 seconds. A soak test of 24 hours has not been run.
+- The longest run is 600 seconds. The soak test of 24 hours consists of
+  135 runs of 600 seconds.
+- Knossos ran out of memory in 54 of the 135 runs of the soak test. The
+  161 keys of those runs that Knossos did not check were checked only by
+  `jepsen/recheck.sh`.
+- The model of the Jepsen test accepts a read that returns no value in
+  every state. A node that loses a key is detected by `jepsen/recheck.sh`
+  and not by the Jepsen test.
 - Few membership and quorum changes are confirmed in a run, because many
   requests reach a node that is down or has no leader.
 - All containers run on one machine. Network latency is close to zero
@@ -219,3 +286,5 @@ A soak test of 24 hours has not been run.
 | `docker/` | The Dockerfiles and the compose file. `docker/secret` holds the SSH key pair that `up.sh` generates. |
 | `build.sh` | Compiles the node and writes `peace.tar.gz`. |
 | `soak.sh` | The soak test. |
+| `recheck.sh` | The second check of the stored histories. |
+| `recheck/` | The Go command that `recheck.sh` runs, with its unit tests. |

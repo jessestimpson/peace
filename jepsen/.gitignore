@@ -3,4 +3,6 @@ peace/store/
 peace/target/
 peace.tar.gz
 soak.log
-soak-failure-*.log
+soak-*.log
+soak.out
+recheck/recheck

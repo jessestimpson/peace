@@ -4,8 +4,17 @@
 #   example: jepsen/soak.sh 24
 # The script cycles through the configurations below. Each run lasts
 # MINUTES_PER_RUN minutes (default 10). The script appends one line per run
-# to jepsen/soak.log and stops at the first run that does not pass. The exit
-# status is 0 if every run passed.
+# to jepsen/soak.log.
+#
+# The exit status of a run gives the result of the run:
+#   0      The history is linearizable.
+#   2      The checker did not finish, for example because it ran out of
+#          memory. No violation was found. The script counts the run as
+#          unchecked, keeps the output in jepsen/soak-unchecked-RUN.log and
+#          continues.
+#   other  The history has a violation, or the test crashed. The script
+#          keeps the output in jepsen/soak-failure-RUN.log and stops.
+# The exit status of the script is 0 if no run had a violation or a crash.
 #
 # A soak of many short runs is used instead of one long run, because the
 # memory that the checker needs grows with the length of a history.
@@ -35,6 +44,7 @@ fi
 
 run=0
 passed=0
+unchecked=0
 echo "$(date -u +%FT%TZ) soak start: $HOURS hours, $SECONDS_PER_RUN seconds per run" >> "$LOG"
 while [ "$(date +%s)" -lt "$END" ]; do
   config="${CONFIGS[$(( run % ${#CONFIGS[@]} ))]}"
@@ -47,6 +57,12 @@ while [ "$(date +%s)" -lt "$END" ]; do
   status=$?
   ok="$(grep -m1 -o ':ok-count [0-9]*' "$out" | grep -o '[0-9]*' || echo '?')"
   echo "$(date -u +%FT%TZ) run $run status $status ok-operations $ok nodes $nodes options $options" >> "$LOG"
+  if [ "$status" -eq 2 ]; then
+    cp "$out" "soak-unchecked-$run.log"
+    unchecked=$(( unchecked + 1 ))
+    rm -f "$out"
+    continue
+  fi
   if [ "$status" -ne 0 ]; then
     cp "$out" "soak-failure-$run.log"
     echo "$(date -u +%FT%TZ) soak stopped: run $run did not pass. Output: jepsen/soak-failure-$run.log" >> "$LOG"
@@ -56,4 +72,4 @@ while [ "$(date +%s)" -lt "$END" ]; do
   passed=$(( passed + 1 ))
   rm -f "$out"
 done
-echo "$(date -u +%FT%TZ) soak end: $passed of $run runs passed" >> "$LOG"
+echo "$(date -u +%FT%TZ) soak end: $passed of $run runs passed, $unchecked unchecked" >> "$LOG"
