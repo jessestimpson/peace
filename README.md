@@ -913,8 +913,8 @@ work required.
   continue a session after a restart assigns and stores the sequence
   numbers itself.
 - **A refusal costs leader time.** At 3 times the rate that a leader can
-  decide, the benchmark leader applied 13,461 puts per second, against
-  about 85,000 just above that rate.
+  decide, the benchmark leader applied 34,229 puts per second, against
+  about 81,000 just above that rate.
 - **The mailbox limit is approximate.** A server counts every message in
   its mailbox, and reads the count once for each group of events. Messages
   that have not yet arrived at the server are not counted.

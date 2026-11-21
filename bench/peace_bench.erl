@@ -205,6 +205,17 @@ suite(overload) ->
      || Rate <- [100000, 300000], Max <- [infinity, 16384]
     ],
     ok;
+%% The `overload' trial with the mailbox limit, with measurements of the
+%% server process of the leader during the load. Each rate runs twice:
+%% once with samples of the process, and once with a profile of its calls.
+suite(overload_profile) ->
+    [
+        with_cluster(#{servers => 3, storage => wal, opts => #{max_mailbox => 16384}}, fun(C) ->
+            overload_profile_trial(C, Rate, Kind)
+        end)
+     || Rate <- [100000, 300000], Kind <- [sample, calls]
+    ],
+    ok;
 %% Session processes that together have more undecided values than the
 %% leader accepts (`max_pending', 8192).
 suite(session_overload) ->
@@ -660,6 +671,45 @@ overload_trial(C, Max, Rate, Ms) ->
             false -> "yes"
         end
     ]),
+    C.
+
+%% Sends `Rate' puts per second to the leader for 10 s, as
+%% `overload_trial/4' does. After 3 s of load it observes the server
+%% process of the leader: for 4 s with `peace_bench_profile:sample/2', or
+%% for 2 s with `peace_bench_profile:calls/3'.
+overload_profile_trial(C, Rate, Kind) ->
+    Leader = {Name, Node} = await_leader(C),
+    Pid = erpc:call(Node, erlang, whereis, [Name]),
+    Self = self(),
+    Senders = 8,
+    Start = now_us(),
+    _ = [spawn_link(fun() -> overload_sender(Leader, Self, Rate div Senders, Start, 10000000, 0) end) || _ <- lists:seq(1, Senders)],
+    Profiler = spawn_link(fun() ->
+        timer:sleep(3000),
+        Result =
+            case Kind of
+                sample ->
+                    erpc:call(Node, peace_bench_profile, sample, [Pid, 4000], 30000);
+                calls ->
+                    File = filename:absname(io_lib:format("_build/bench/overload_calls_~b.txt", [Rate])),
+                    ok = erpc:call(Node, peace_bench_profile, calls, [Pid, 2000, File], 120000),
+                    {file, lists:flatten(File)}
+            end,
+        Self ! {profile, Result}
+    end),
+    Stats = #{sent := Sent} = collect_replies(
+        #{senders => Senders, sent => 0, stop => 0, ok => [], answered => 0, refused => 0, other => 0}, 60000
+    ),
+    Profile =
+        receive
+            {profile, P} -> P
+        after 180000 -> error({no_profile, Profiler})
+        end,
+    io:format("~n== ~b puts sent per second, ~s ==~n", [Rate, Kind]),
+    io:format("sent ~b, applied ~b, refused ~b, other ~b~n", [
+        Sent, length(maps:get(ok, Stats)), maps:get(refused, Stats), maps:get(other, Stats)
+    ]),
+    io:format("~p~n", [Profile]),
     C.
 
 overload_sender(Leader, Collector, Rate, Start, Us, Sent) ->

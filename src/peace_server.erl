@@ -594,6 +594,11 @@ event(Event, State) ->
 %% <li>`drain/2' handles the messages of peers and of the storage process
 %%   before the requests of the backlog. A leader under load therefore
 %%   continues to decide values and to send heartbeats.</li>
+%% <li>`drain/2' adds each client request that it reads in the mailbox to
+%%   the backlog, or refuses the request, also when the limit is not
+%%   exceeded. The mailbox therefore holds no client request that
+%%   `drain/2' has read. Without this step, the receive in `drain/2' tests
+%%   every client request in the mailbox for each event of a group.</li>
 %% <li>A `peace_backlog' message to this process is in the mailbox, so that
 %%   the backlog is handled when no other message arrives.</li>
 %% </ul>
@@ -784,14 +789,26 @@ drain(N, {State = #state{backlog_len = 0}, Steps}) ->
 drain(N, {State = #state{backlog = Backlog0, backlog_len = Len}, Steps}) ->
     %% The backlog holds requests that are older than every client request
     %% in the mailbox. The messages of peers and of the storage process are
-    %% handled first. See "The mailbox limit".
+    %% handled first. A client request in the mailbox is added to the
+    %% backlog or refused, and does not count as an event of the group. See
+    %% "The mailbox limit".
     Me = peace_core:id(State#state.core),
     {Min, Max} = State#state.versions,
     receive
         {peace_msg, Version, Range, Peer, Me, Body} when is_integer(Version), Version >= Min, Version =< Max ->
             drain(N - 1, drained(Version, Range, Peer, Body, State, Steps));
         {written, Writer, Seq} when Writer =:= State#state.writer ->
-            drain(N, {written(Seq, State), Steps})
+            drain(N, {written(Seq, State), Steps});
+        {'$gen_call', From, {value, Value}} ->
+            drain(N, {keep({value, From, Value}, State), Steps});
+        {'$gen_call', From, {value, Value, Session}} ->
+            drain(N, {keep({value, From, Value, Session}, State), Steps});
+        {'$gen_call', From, {consistent_query, Fun}} ->
+            drain(N, {keep({query, From, Fun}, State), Steps});
+        {'$gen_cast', {value, Value}} ->
+            drain(N, {keep({value, undefined, Value}, State), Steps});
+        {'$gen_cast', {value, From = {peace_session, _Pid, _Label}, Value, Session}} ->
+            drain(N, {keep({value, From, Value, Session}, State), Steps})
     after 0 ->
         {{value, Event}, Backlog} = queue:out(Backlog0),
         drain(N - 1, step(Event, State#state{backlog = Backlog, backlog_len = Len - 1}, Steps))

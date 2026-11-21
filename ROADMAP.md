@@ -188,6 +188,16 @@ scope depends on the results of milestone 1.
 - [ ] Lower the cost of a refusal. At 3 times the rate that a leader can
       decide, the leader spends most of its time on refusals. See
       "Overload" in bench/README.md.
+      - [x] Remove the mailbox scan in `drain/2`. Done on 2026-11-21.
+            `drain/2` adds each client request that it reads to the
+            backlog, or refuses the request. At 300,000 puts sent per
+            second the leader applied 34,229 puts per second, against
+            13,461 before.
+      - [ ] Reduce the work of one refusal in the server process. After
+            the change above, the refusals take about 24% of the traced
+            CPU time of the leader at 300,000 puts sent per second.
+      - Not planned: a refusal in the calling process, and a separate
+        process that receives the requests of remote callers.
 - [x] Transfer and store snapshots in chunks. Done on 2026-11-13. A server
       sends a snapshot in chunks of `snapshot_chunk_bytes` bytes, and the
       receiver asks for one chunk at a time. The write-ahead log writes a
@@ -385,6 +395,18 @@ TLA+ model and not in the Jepsen test.
 This work improves confidence in the existing implementation. It does not
 block the milestones above and can be done at any time.
 
+- [ ] Reduce the time that the test suite takes. On 2026-11-21, the first
+      34 tests of `rebar3 as dst eunit` took 4,224 seconds on one machine,
+      and the suite had not finished. The tests run one after another. The
+      longest tests each take between 180 and 600 seconds. Candidates:
+      - Measure where a simulated run spends its time, and remove the
+        largest cost.
+      - Run the tests of the simulation in several Erlang nodes at the
+        same time. The tests are independent of each other.
+      - Add a target with a lower seed count for use during development.
+        Keep the current seed counts for CI and before a release.
+      - Review the seed count of each test that takes more than 180
+        seconds.
 - [ ] Extend trace validation to writes that are in progress. A server
       with a tracer waits for every write, because the TLA+ model has no
       state for an entry that a server holds in memory and has not stored.

@@ -14,8 +14,9 @@ are from the fourth run.
 | [peace_kv.erl](peace_kv.erl) | A key-value state machine and a client for it: put, get, delete, compare-and-swap |
 | [peace_kv_tests.erl](peace_kv_tests.erl) | Tests for `peace_kv` |
 | [peace_bench.erl](peace_bench.erl) | The benchmark harness |
+| [peace_bench_profile.erl](peace_bench_profile.erl) | Samples and a call profile of one process, for the `overload_profile` suite |
 | [run.sh](run.sh) | Compiles the `bench` profile and runs the harness |
-| [results/](results) | The unedited output of each suite. [results/before-group-commit/](results/before-group-commit) has the output of the first run. [results/before-milestone-4/](results/before-milestone-4) has the output of the second run. [results/before-storage-process/](results/before-storage-process) has the output of the third run. [results/before-chunked-snapshots/](results/before-chunked-snapshots) has the output of the two snapshot suites with the library of commit 7ee3e50. |
+| [results/](results) | The unedited output of each suite. [results/before-group-commit/](results/before-group-commit) has the output of the first run. [results/before-milestone-4/](results/before-milestone-4) has the output of the second run. [results/before-storage-process/](results/before-storage-process) has the output of the third run. [results/before-chunked-snapshots/](results/before-chunked-snapshots) has the output of the two snapshot suites with the library of commit 7ee3e50. [results/before-backlog-in-drain/](results/before-backlog-in-drain) has the output of the `overload` suite with the library of commit b45861c. |
 
 ## Commands
 
@@ -29,13 +30,14 @@ bench/run.sh large_snapshot       # puts while a follower receives a snapshot of
 bench/run.sh snapshot_storage     # puts while every server stores a snapshot of up to 1000 MB
 bench/run.sh overload             # puts at a fixed rate above the rate that the leader decides
 bench/run.sh session_overload     # session processes with more undecided values than the leader accepts
+bench/run.sh overload_profile     # samples and a call profile of the leader during the overload load
 rebar3 as bench eunit             # the tests for peace_kv
 ```
 
 The suites of `make bench` are `throughput`, `value_size`, `propose_to`,
 `reads`, `failover`, `restart` and `catch_up`. The suites `quick`,
-`slow_disk`, `large_snapshot`, `snapshot_storage`, `overload` and
-`session_overload` are run by name. The
+`slow_disk`, `large_snapshot`, `snapshot_storage`, `overload`,
+`session_overload` and `overload_profile` are run by name. The
 two snapshot suites need about 8 GB of free memory.
 
 The environment variable `PEACE_BENCH_NODE_FLAGS` sets extra emulator flags
@@ -245,25 +247,52 @@ leader for 10 s at a fixed rate, and do not wait for replies. "No limit" is
 
 | Puts sent per second | Mailbox limit | Puts applied per second | Puts refused | Largest mailbox (messages) | p50 ms | p99 ms | Time to answer every put after the load (ms) | Leader changed |
 |---|---|---|---|---|---|---|---|---|
-| 99,991 | no limit | 84,769 | 152,222 | 22,775 | 156.3 | 321.8 | 126.1 | no |
-| 99,986 | 16,384 | 75,253 | 247,331 | 19,328 | 166.7 | 447.6 | 252.2 | no |
-| 299,963 | no limit | 7,783 | 2,438,028 | 2,374,368 | 264.7 | 52,447.8 | 107,721.1 | yes |
-| 299,962 | 16,384 | 13,461 | 2,865,006 | 18,389 | 1,454.5 | 1,852.0 | 278.9 | no |
+| 99,988 | no limit | 82,198 | 177,896 | 21,762 | 172.7 | 299.4 | 149.8 | no |
+| 99,984 | 16,384 | 80,712 | 192,723 | 12,497 | 181.5 | 335.2 | 290.3 | no |
+| 299,954 | no limit | 8,217 | 1,887,721 | 2,391,165 | 226.6 | 60,669.0 | 116,046.0 | yes |
+| 299,974 | 16,384 | 34,229 | 2,657,452 | 12,408 | 537.8 | 674.5 | 253.7 | no |
 
 The latency columns cover the puts that were applied. The mailbox was read
 every 20 ms.
 
-- At 300,000 puts per second, the limit kept the mailbox under 20,000
+- At 300,000 puts per second, the limit kept the mailbox under 13,000
   messages, kept the leader, and answered every put within 0.3 s of the
   end of the load. Without the limit the mailbox reached 2.4 million
-  messages, the leader changed, and the last answer arrived 108 s after
+  messages, the leader changed, and the last answer arrived 116 s after
   the end of the load.
 - The limit does not keep the throughput. At 300,000 puts per second the
-  leader applied 13,461 puts per second, against about 85,000 at 100,000
-  puts per second. The leader refused 286,500 puts per second, and each
+  leader applied 34,229 puts per second, against about 81,000 at 100,000
+  puts per second. The leader refused 265,700 puts per second, and each
   refusal is one receive and one message to the client.
-- At 100,000 puts per second, the leader applied 11% fewer puts with the
-  limit than without it.
+- At 100,000 puts per second, the leader applied 2% fewer puts with the
+  limit than without it. This difference is within the variation between
+  runs.
+
+**Effect of the backlog change of 2026-11-21.** Source of the earlier
+figures:
+[results/before-backlog-in-drain/overload.txt](results/before-backlog-in-drain/overload.txt).
+Before the change, a server with a request in its backlog left the client
+requests that arrived in the mailbox, and the receive in `drain/2` tested
+every one of them for each event of a group. `drain/2` now adds each
+client request that it reads to the backlog, or refuses the request. Both
+rows have `max_mailbox` 16,384 and 300,000 puts sent per second.
+
+| peace | Puts applied per second | p50 ms | p99 ms | Largest mailbox (messages) |
+|---|---|---|---|---|
+| Before the change | 13,461 | 1,454.5 | 1,852.0 | 18,389 |
+| After the change | 34,229 | 537.8 | 674.5 | 12,408 |
+
+The `overload_profile` suite measures the server process of the leader
+during the same load: samples of the status and the stack, and a call
+profile with `eprof`. In one run of each version:
+
+| Measure at 300,000 puts sent per second | Before the change | After the change |
+|---|---|---|
+| Time of one call of `drain/2` | 38.6 µs | 0.49 µs |
+| Share of `drain/2` in the traced CPU time | 33.0% | 13.3% |
+| Samples in which the process is suspended on a busy distribution port | 516 of 1,367 | 21 of 829 |
+
+The cause of the lower number of suspended samples was not investigated.
 
 **Session processes.** Sources:
 [results/session_overload.txt](results/session_overload.txt) and
@@ -276,17 +305,20 @@ limit on the values sent, and no mailbox limit.
 
 | Sessions | Puts applied per second, before | Puts applied per second, now | Values sent per put applied, before | Values sent per put applied, now |
 |---|---|---|---|---|
-| 100 | 77,641 | 79,169 | 1.01 | 1.01 |
-| 400 | 46,630 | 40,525 | 3.37 | 1.81 |
-| 1,600 | 5,988 | 29,594 | 29.33 | 2.87 |
+| 100 | 77,641 | 72,801 | 1.01 | 1.01 |
+| 400 | 46,630 | 43,485 | 3.37 | 1.80 |
+| 1,600 | 5,988 | 38,566 | 29.33 | 2.69 |
 
 - With 1,600 sessions, the earlier session process sent each put 29 times
   on average, and the cluster applied 5,988 puts per second. The session
-  process now sends each put 2.9 times, and the cluster applies 29,594.
-- With 400 sessions the two versions are within the variation between
-  runs.
-- The throughput with 1,600 sessions is still 37% of the throughput with
+  process now sends each put 2.7 times, and the cluster applies 38,566.
+- With 100 and 400 sessions the two versions are within the variation
+  between runs.
+- The throughput with 1,600 sessions is still 53% of the throughput with
   100 sessions.
+- The "now" column was measured on 2026-11-21, after the backlog change.
+  Before that change, the cluster applied 29,594 puts per second with
+  1,600 sessions.
 
 ### Value size
 
@@ -492,7 +524,7 @@ changes 9 and 10.
    milliseconds.
 4. **A refusal costs leader time.** A server holds at most `max_mailbox`
    client requests and refuses the newest. At 3 times the rate that the
-   leader can decide, the leader applied 16% of the puts that it applied
+   leader can decide, the leader applied 42% of the puts that it applied
    just above that rate. See "Overload".
 5. **Leader failure is detected only by the election timeout.** The time
    without a leader is between 1 and 2 election timeouts. A lower election
