@@ -137,7 +137,15 @@
 %% In a simulated run, this macro counts an occurrence for the statistics of
 %% the simulation.
 -ifdef(DST).
--define(COUNT(Key), peace_dst:bump(Key)).
+%% The macro writes to the table of `peace_dst' if the table exists, and
+%% does not call `peace_dst'. Another application can then run peace under
+%% eta without the harness of peace.
+-define(COUNT(Key),
+    case ets:whereis(peace_dst_stats) of
+        undefined -> ok;
+        _ -> _ = ets:update_counter(peace_dst_stats, Key, 1, {Key, 0}), ok
+    end
+).
 -else.
 -define(COUNT(Key), ok).
 -endif.
