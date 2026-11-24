@@ -44,7 +44,11 @@ jobs:
 
       # The jar of TLC is in formal/vendor. A push and a pull request run
       # the set `quick'.
+      # FORCE=1 runs every config of the set. Without it, the script
+      # skips a config that formal/checked.tsv records as checked.
       - name: TLC
+        env:
+          FORCE: "1"
         run: formal/check_all.sh "${{ inputs.set || 'quick' }}"
 
       - name: Upload the output of TLC
