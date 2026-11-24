@@ -848,12 +848,14 @@ GitHub Actions runs two workflows, with Erlang/OTP 28.3 on
 | CI | Dialyzer | `make dialyzer` | Each push to `main` and each pull request |
 | CI | Deterministic simulation | `dst/run.sh -j N`, with N the number of processors of the runner | Each push to `main` and each pull request |
 | CI | Trace validation | `make trace` | Each push to `main` and each pull request |
-| CI | Linearizability checking | `make porcupine` | Each push to `main` and each pull request |
 | [Model check](.github/workflows/model.yml) | TLC | `formal/check_all.sh quick` | Each push to `main` and each pull request that changes a file in `formal/` |
 | Model check | TLC | `formal/check_all.sh long` | A manual start of the workflow with the set `long` |
 
 The levels that GitHub Actions does not run are:
 
+- `make porcupine`. Porcupine uses 17 GB of memory for the history
+  `flexible-14`, measured on a computer with 32 GB. A runner of GitHub
+  Actions has 16 GB, and the runner stopped during that check.
 - `make ind`, because Apalache is not in the repository.
 - `make tlc-soak`, because the config takes about 8 hours and a job of
   GitHub Actions ends after 6 hours.

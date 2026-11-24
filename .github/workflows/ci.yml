@@ -105,23 +105,3 @@ jobs:
 
       - name: Trace validation
         run: make trace
-
-  porcupine:
-    name: Linearizability checking
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: ${{ env.OTP_VERSION }}
-          rebar3-version: ${{ env.REBAR3_VERSION }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: dst/porcupine/go.mod
-          cache-dependency-path: dst/porcupine/go.sum
-
-      - name: Porcupine
-        run: make porcupine
