@@ -1,5 +1,8 @@
 # peace
 
+[![CI](https://github.com/jessestimpson/peace/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jessestimpson/peace/actions/workflows/ci.yml)
+[![Model check](https://github.com/jessestimpson/peace/actions/workflows/model.yml/badge.svg?branch=main)](https://github.com/jessestimpson/peace/actions/workflows/model.yml)
+
 peace is an Erlang library for replicated state machines. It implements
 Flexible Paxos.
 
@@ -833,6 +836,29 @@ The configuration keys that plant bugs, and the hook that trace validation
 uses, are compiled only when `TEST` is defined. `rebar3 eunit` defines it. A
 release build ignores these keys, so configuration cannot disable a
 safeguard.
+
+### Continuous integration
+
+GitHub Actions runs two workflows, with Erlang/OTP 28.3 on
+`ubuntu-latest`.
+
+| Workflow | Job | Command | Runs on |
+|---|---|---|---|
+| [CI](.github/workflows/ci.yml) | Unit tests | `make compile`, `make test` | Each push to `main` and each pull request |
+| CI | Dialyzer | `make dialyzer` | Each push to `main` and each pull request |
+| CI | Deterministic simulation | `dst/run.sh -j N`, with N the number of processors of the runner | Each push to `main` and each pull request |
+| CI | Trace validation | `make trace` | Each push to `main` and each pull request |
+| CI | Linearizability checking | `make porcupine` | Each push to `main` and each pull request |
+| [Model check](.github/workflows/model.yml) | TLC | `formal/check_all.sh quick` | Each push to `main` and each pull request that changes a file in `formal/` |
+| Model check | TLC | `formal/check_all.sh long` | A manual start of the workflow with the set `long` |
+
+The levels that GitHub Actions does not run are:
+
+- `make ind`, because Apalache is not in the repository.
+- `make tlc-soak`, because the config takes about 8 hours and a job of
+  GitHub Actions ends after 6 hours.
+- `make jepsen`, which needs five Docker nodes.
+- `make bench`.
 
 ### Commands
 

@@ -19,7 +19,14 @@ set -e
 cd "$(dirname "$0")/.."
 build=_build/dst+test
 logs=_build/dst-logs
-paths="-pa $PWD/$build/lib/peace/ebin -pa $PWD/$build/lib/peace/dst -pa $PWD/$build/checkouts/eta/ebin"
+paths="-pa $PWD/$build/lib/peace/ebin -pa $PWD/$build/lib/peace/dst"
+# eta is a checkout in `_checkouts/eta', or a dependency that rebar3 has
+# fetched.
+if [ -d "$build/checkouts/eta" ]; then
+    paths="$paths -pa $PWD/$build/checkouts/eta/ebin"
+else
+    paths="$paths -pa $PWD/$build/lib/eta/ebin"
+fi
 
 if [ "$1" = "--one" ]; then
     name=$2

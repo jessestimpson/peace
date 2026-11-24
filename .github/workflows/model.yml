@@ -1,0 +1,55 @@
+name: Model check
+
+# TLC runs when a file of the models changes. The result of TLC depends on
+# the models and the configs only, so a change to the Erlang source does
+# not start this workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "formal/**"
+      - ".github/workflows/model.yml"
+  pull_request:
+    paths:
+      - "formal/**"
+      - ".github/workflows/model.yml"
+  workflow_dispatch:
+    inputs:
+      set:
+        description: The set of configs of formal/check_all.sh
+        type: choice
+        default: quick
+        options:
+          - quick
+          - long
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tlc:
+    name: TLC
+    runs-on: ubuntu-latest
+    # The set `long' takes about 2.5 hours on a computer with 10 processors.
+    # A job of GitHub Actions ends after 6 hours.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The jar of TLC is in formal/vendor. A push and a pull request run
+      # the set `quick'.
+      - name: TLC
+        run: formal/check_all.sh "${{ inputs.set || 'quick' }}"
+
+      - name: Upload the output of TLC
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlc-logs
+          path: formal/logs
