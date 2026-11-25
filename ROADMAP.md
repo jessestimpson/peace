@@ -14,7 +14,7 @@ peace is at version 0.1.0. It is not ready for production use.
 | Performance | Measured on one machine. See [bench/README.md](bench/README.md). |
 | Testing on real nodes | A Jepsen test on Docker nodes on one machine. See [jepsen/README.md](jepsen/README.md). A soak test of 24 hours ran on 2026-11-20 without a violation. |
 | Operations | Minimal. No telemetry and no leader transfer. Messages and stored data have a version. Servers with a common message version run in one cluster, so a cluster can be upgraded one server at a time. The procedure is tested in the simulation with test versions and not in the Jepsen test. |
-| Packaging | No CI and no published package. |
+| Packaging | GitHub Actions runs the unit tests, Dialyzer, the deterministic simulation, trace validation and the quick TLC configs. See [README.md](README.md), "Continuous integration". No published package. |
 
 ## Milestones
 

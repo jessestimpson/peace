@@ -24,6 +24,18 @@ peace:start_cluster(Ids, Machine, #{quorum => {counting, 4, 2}}).
 Flexible Paxos is described in chapter 4 of Heidi Howard's thesis,
 [Distributed consensus revised](docs/UCAM-CL-TR-935.pdf) (UCAM-CL-TR-935).
 
+## Verified properties
+
+[VERIFIED.md](VERIFIED.md) lists the properties of peace that a mechanical
+check supports. Each entry states the property, the method that checked it
+and the bound of the check. The file also lists the assumptions and the
+properties that are not verified.
+
+A reader, human or LLM, who has a question about the behaviour of peace
+should read VERIFIED.md first. A statement in that file is true for peace
+within the bound that the entry states. "Verification" in this file
+describes the methods in detail.
+
 ## Example
 
 A state machine:

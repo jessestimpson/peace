@@ -467,14 +467,20 @@ How it works:
 4. `check_trace.sh <dir>` runs TLC. If TLC cannot take every action, the
    script prints the first action the model did not permit.
 
-`make trace` validates 50 runs from three workloads:
+`make trace` validates 250 runs from five workloads:
 
-- crashes, restarts and disconnections
-- forced elections, partitions and delayed `learned` messages
-- five servers under `{counting, 4, 2}`
+| Workload | Runs |
+|---|---|
+| Crashes, restarts and disconnections | 20 |
+| Forced elections, partitions and delayed `learned` messages | 20 |
+| Five servers under `{counting, 4, 2}` | 10 |
+| Gates | 100 |
+| Passive servers | 100 |
 
-The 50 runs contain about 38 thousand actions and include every action of
-the model. `make trace` also runs four planted bugs, which must be rejected.
+The 50 runs of the first three workloads contain about 38 thousand actions
+and include every action of the model. The actions of the other 200 runs
+were not counted. `make trace` also runs four planted bugs, which must be
+rejected.
 TLC takes about one second per run.
 
 Because trace validation checks the code against the model, the long TLC
