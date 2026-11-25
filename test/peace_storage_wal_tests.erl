@@ -309,11 +309,17 @@ flip(Bin, Pos) ->
     <<Before:Pos/binary, Byte, After/binary>> = Bin,
     <<Before/binary, (Byte bxor 16#55), After/binary>>.
 
+%% `erlang:unique_integer/1' starts from the same values in every Erlang
+%% node, so a later run of the tests gets the name of a directory of an
+%% earlier run. A run that ends without its cleanup leaves the directory
+%% with its data. Each test therefore deletes the directory before it uses
+%% the directory, and again after the test.
 with_dir(Fun) ->
     Dir = filename:join([
         filename:basedir(user_cache, "peace_tests"),
         "wal_" ++ integer_to_list(erlang:unique_integer([positive]))
     ]),
+    _ = file:del_dir_r(Dir),
     try
         Fun(Dir)
     after

@@ -114,7 +114,7 @@ durable_restart(Ids0) ->
     ]),
     Opts = (fast())#{storage => {peace_storage_dets, #{dir => Dir}}},
     Config = fun(Id) -> Opts#{id => Id, machine => ?TEST_MACHINE} end,
-    {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
+    {setup, fun() -> empty_dir(Dir) end, fun(_) -> file:del_dir_r(Dir) end,
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
             Leader = await_leader(Ids),
@@ -174,7 +174,7 @@ rolling_upgrade(Ids0) ->
         #{message_versions := #{peers := Peers}} = peace:overview(Leader),
         [maps:get(Id, Peers, unknown) || Id <- Ids -- [Leader]]
     end,
-    {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
+    {setup, fun() -> empty_dir(Dir) end, fun(_) -> file:del_dir_r(Dir) end,
         ?_test(begin
             [ok = peace:start_server(Config(Id, {1, 1})) || Id <- Ids],
             {ok, Ids, []} = peace:form_cluster(Ids, majority),
@@ -210,7 +210,7 @@ sessions_snapshots_and_leases(Ids0) ->
         read_lease_ms => 100
     },
     Config = fun(Id) -> Opts#{id => Id, machine => ?TEST_MACHINE} end,
-    {setup, fun() -> ok end, fun(_) -> file:del_dir_r(Dir) end,
+    {setup, fun() -> empty_dir(Dir) end, fun(_) -> file:del_dir_r(Dir) end,
         ?_test(begin
             {ok, Ids, []} = peace:start_cluster(Ids, ?TEST_MACHINE, Opts),
             Leader = await_leader(Ids),
@@ -546,6 +546,7 @@ default_storage_is_durable(Ids0) ->
             filename:basedir(user_cache, "peace_tests"),
             "default_" ++ integer_to_list(erlang:unique_integer([positive]))
         ),
+        ok = empty_dir(Dir),
         ok = application:set_env(peace, data_dir, Dir),
         try
             Opts = #{election_timeout_ms => 100},
@@ -562,6 +563,15 @@ default_storage_is_durable(Ids0) ->
             file:del_dir_r(Dir)
         end
     end).
+
+%% `erlang:unique_integer/1' starts from the same values in every Erlang
+%% node, so a later run of the tests gets the name of a directory of an
+%% earlier run. A run that ends without its cleanup leaves the directory
+%% with its data. Each test therefore deletes the directory before it uses
+%% the directory, and again after the test.
+empty_dir(Dir) ->
+    _ = file:del_dir_r(Dir),
+    ok.
 
 await_leader(Ids) ->
     await(fun() ->

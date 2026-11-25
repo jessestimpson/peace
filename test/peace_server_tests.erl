@@ -254,6 +254,10 @@ message_versions_test() ->
 %% does not start on stored state that it cannot be the owner of.
 stored_identity_test() ->
     Dir = filename:join(filename:basedir(user_cache, "peace_tests"), "identity_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    %% A later run of the tests gets the same name, because
+    %% `erlang:unique_integer/1' starts from the same values in every
+    %% Erlang node. A directory of an earlier run is deleted.
+    _ = file:del_dir_r(Dir),
     Storage = {peace_storage_dets, #{dir => Dir}},
     Config = fun(Name) -> #{id => {Name, node()}, machine => {module, peace_test_machine, #{}}, storage => Storage} end,
     Write = fun(Name, Batch) ->
