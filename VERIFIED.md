@@ -90,7 +90,7 @@ Tools that the checks use:
 
 | Tool | Version | Methods | Behaviour assumed |
 |---|---|---|---|
-| [eta](https://github.com/jessestimpson/eta) | The `main` branch. No commit is fixed. | `SIM`, `TRACE`, `PORC` | A run is determined by its seed. The simulated network, clock and disk produce only faults that a real system can produce, and the simulated disk loses only data that was not synced. |
+| [eta](https://github.com/jessestimpson/eta) | The commit that the `dst` profile of `rebar.config` fixes. `rebar.lock` does not hold the dependencies of a profile. | `SIM`, `TRACE`, `PORC` | A run is determined by its seed. The simulated network, clock and disk produce only faults that a real system can produce, and the simulated disk loses only data that was not synced. |
 | TLC | `tla2tools` 1.8.0 | `TLC`, `TRACE` | TLC visits every reachable state of a model and reports every violation of an invariant, except for a state that a fingerprint collision hides. |
 | [Apalache](https://apalache-mc.org) | 0.63.0 | `IND` | Apalache reports a counterexample to an implication if one exists for the constants. |
 | [Porcupine](https://github.com/anishathalye/porcupine) | 1.3.1 | `PORC`, and the second check of `JEPSEN` | Porcupine accepts a history only if the history is linearizable with respect to the model that it is given. |

@@ -895,9 +895,10 @@ Requirements:
   node of its own, and 8 nodes run at the same time on a machine with 10
   processors. `dst/run.sh -j JOBS TEST...` sets the number of nodes and
   selects tests. The output of each test is in `_build/dst-logs/`.
-- `make dst` and `make trace` need eta. The `dst` profile declares it as a
-  git dependency. For local development, link a checkout at
-  `_checkouts/eta`.
+- `make dst` and `make trace` need eta. The `dst` profile of `rebar.config`
+  declares it as a git dependency and fixes its commit, because `rebar.lock`
+  does not hold the dependencies of a profile. For local development, link
+  a checkout at `_checkouts/eta`. A checkout replaces the fixed commit.
 - `make trace` and the TLC targets need Java 11 or later.
 - `make porcupine` needs eta and Go 1.19 or later. The first run downloads
   Porcupine as a Go module.
