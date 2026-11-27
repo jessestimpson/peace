@@ -50,7 +50,11 @@ Every entry holds only under these assumptions.
   state finds the state that it last synced. A server that has lost its
   stored state is covered by `I1` to `I4`. A data directory that is
   restored from a backup violates this assumption, and peace does not
-  detect it.
+  detect it. On macOS, Erlang/OTP 25 and later implement `file:sync/1` and
+  `file:datasync/1` with `fcntl(F_BARRIERFSYNC)`. That call fixes the order
+  of the writes and does not wait until the data is on the disk. A loss of
+  power on macOS can therefore lose synced state, which violates this
+  assumption. No check of peace covers a loss of power on macOS.
 - **A2. The state machine is deterministic.** `apply/3` returns the same
   result on every server.
 - **A3. No Byzantine faults.** A server runs the code of peace. A message
@@ -79,7 +83,7 @@ Software that peace runs on:
 
 | Dependency | Version | Used for | Behaviour assumed | Treatment in each method |
 |---|---|---|---|---|
-| Erlang/OTP: the emulator, `kernel` and `stdlib` | 28.3 in GitHub Actions, 28 in the Jepsen test | Processes, distribution, files, timers and the monotonic clock | A message between two processes is not altered. `file:sync/1` and `file:datasync/1` return after the data is on the disk. The monotonic clock does not go backwards. | `UNIT`, `JEPSEN`: included. `SIM`, `TRACE`, `PORC`: eta replaces the scheduler, the clock, the network and the disk. `TLC`, `IND`: not in the models. |
+| Erlang/OTP: the emulator, `kernel` and `stdlib` | 28.3 in GitHub Actions, 28 in the Jepsen test | Processes, distribution, files, timers and the monotonic clock | A message between two processes is not altered. `file:sync/1` and `file:datasync/1` return after the data is on the disk. This does not hold on macOS: see `A1`. The monotonic clock does not go backwards. | `UNIT`, `JEPSEN`: included. `SIM`, `TRACE`, `PORC`: eta replaces the scheduler, the clock, the network and the disk. `TLC`, `IND`: not in the models. |
 | dets, in `stdlib` | The same | The `peace_storage_dets` backend | A dets file holds the objects that were written before the last sync. | `UNIT`: included. `SIM`: replaced by `eta_dets`. `JEPSEN`: not used. |
 | The operating system and the disk | Not fixed | Storage of the write-ahead log and the dets files | Data that was synced is read back unchanged after a restart. This is assumption `A1`. | `UNIT`: included, with injected faults in the write-ahead log tests. `SIM`: replaced by the simulated disk of eta. `JEPSEN`: included, on one shared disk. |
 
